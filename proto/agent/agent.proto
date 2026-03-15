@@ -61,6 +61,14 @@ message Heartbeat {
   int64  disk_used_gb = 4; // 已用磁盘（GB）
   int64  net_in_bps   = 5; // 宿主机实时入口速率（bytes/s）
   int64  net_out_bps  = 6; // 宿主机实时出口速率（bytes/s）
+  float  load1        = 11; // 系统负载 (1 min)
+  float  load5        = 12; // 系统负载 (5 min)
+  float  load15       = 13; // 系统负载 (15 min)
+  int64  uptime       = 14; // 系统运行时间 (秒)
+  int32  cpus         = 15; // 逻辑 CPU 核数
+  int64  ram_total_mb = 16; // 总内存 (MB)
+  int64  disk_total_gb = 17; // 总磁盘 (GB)
+  int32  bandwidth_mbps = 18; // 总带宽 (Mbps)
 
   // 当前宿主机上所有 VM 的简要状态，用于平台侧对账。
   repeated VMSummary vms = 7;

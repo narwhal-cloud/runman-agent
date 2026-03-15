@@ -1,17 +1,18 @@
 package db
 
 import (
-	"gorm.io/driver/sqlite"
+	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 )
 
 type Config struct {
-	ID          uint   `gorm:"primaryKey"`
-	ServerAddr  string `json:"server_addr"`
-	Token       string `json:"token"`
-	MonitorNIC  string `json:"monitor_nic"`  // 指定监控网卡
-	MonitorDisk string `json:"monitor_disk"` // 指定监控磁盘/挂载点
-	VirtType    string `json:"virt_type"`    // 固定虚拟化类型 (podman/kvm)
+	ID            uint   `gorm:"primaryKey"`
+	ServerAddr    string `json:"server_addr"`
+	Token         string `json:"token"`
+	MonitorNIC    string `json:"monitor_nic"`    // 指定监控网卡
+	MonitorDisk   string `json:"monitor_disk"`   // 指定监控磁盘/挂载点
+	VirtType      string `json:"virt_type"`      // 固定虚拟化类型 (podman/kvm)
+	BandwidthMbps int32  `json:"bandwidth_mbps"` // 启动测速结果 (Mbps)
 }
 
 type VMConfig struct {

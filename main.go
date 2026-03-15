@@ -5,6 +5,7 @@ import (
 	"flag"
 	"io"
 	"log"
+	"net/http"
 	"runman-agent/db"
 	"runman-agent/manager"
 	"runman-agent/monitor"
@@ -68,7 +69,46 @@ func main() {
 		_ = ws.ListenAndServe(*webAddr)
 	}()
 
+	go a.measureBandwidth()
+
 	a.run()
+}
+
+func (a *Agent) measureBandwidth() {
+	const testURL = "https://speed.cloudflare.com/__down?bytes=10240000"
+	log.Printf("Starting bandwidth test...")
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", testURL, nil)
+	if err != nil {
+		log.Printf("Bandwidth test request error: %v", err)
+		return
+	}
+	start := time.Now()
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("Bandwidth test failed: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	n, err := io.Copy(io.Discard, resp.Body)
+	if err != nil {
+		log.Printf("Bandwidth test read error: %v", err)
+		return
+	}
+	elapsed := time.Since(start).Seconds()
+	mbps := int32(float64(n) * 8 / elapsed / 1_000_000)
+	log.Printf("Bandwidth test result: %d Mbps (downloaded %d bytes in %.2fs)", mbps, n, elapsed)
+
+	a.hostMon.SetBandwidth(mbps)
+
+	conf, _ := a.db.GetConfig()
+	if conf != nil {
+		conf.BandwidthMbps = mbps
+		_ = a.db.SaveConfig(conf)
+	}
 }
 
 func (a *Agent) run() {

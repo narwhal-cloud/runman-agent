@@ -259,13 +259,21 @@ func (*AgentEnvelope_PortFwdReport) isAgentEnvelope_Payload() {}
 
 // 心跳包 — 携带宿主机实时负载与 VM 摘要列表。
 type Heartbeat struct {
-	state      protoimpl.MessageState `protogen:"open.v1"`
-	Timestamp  int64                  `protobuf:"varint,1,opt,name=timestamp,proto3" json:"timestamp,omitempty"`                       // Unix 秒
-	CpuPct     float32                `protobuf:"fixed32,2,opt,name=cpu_pct,json=cpuPct,proto3" json:"cpu_pct,omitempty"`              // CPU 使用率（0-100）
-	RamUsedMb  int64                  `protobuf:"varint,3,opt,name=ram_used_mb,json=ramUsedMb,proto3" json:"ram_used_mb,omitempty"`    // 已用内存（MB）
-	DiskUsedGb int64                  `protobuf:"varint,4,opt,name=disk_used_gb,json=diskUsedGb,proto3" json:"disk_used_gb,omitempty"` // 已用磁盘（GB）
-	NetInBps   int64                  `protobuf:"varint,5,opt,name=net_in_bps,json=netInBps,proto3" json:"net_in_bps,omitempty"`       // 宿主机实时入口速率（bytes/s）
-	NetOutBps  int64                  `protobuf:"varint,6,opt,name=net_out_bps,json=netOutBps,proto3" json:"net_out_bps,omitempty"`    // 宿主机实时出口速率（bytes/s）
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Timestamp     int64                  `protobuf:"varint,1,opt,name=timestamp,proto3" json:"timestamp,omitempty"`                               // Unix 秒
+	CpuPct        float32                `protobuf:"fixed32,2,opt,name=cpu_pct,json=cpuPct,proto3" json:"cpu_pct,omitempty"`                      // CPU 使用率（0-100）
+	RamUsedMb     int64                  `protobuf:"varint,3,opt,name=ram_used_mb,json=ramUsedMb,proto3" json:"ram_used_mb,omitempty"`            // 已用内存（MB）
+	DiskUsedGb    int64                  `protobuf:"varint,4,opt,name=disk_used_gb,json=diskUsedGb,proto3" json:"disk_used_gb,omitempty"`         // 已用磁盘（GB）
+	NetInBps      int64                  `protobuf:"varint,5,opt,name=net_in_bps,json=netInBps,proto3" json:"net_in_bps,omitempty"`               // 宿主机实时入口速率（bytes/s）
+	NetOutBps     int64                  `protobuf:"varint,6,opt,name=net_out_bps,json=netOutBps,proto3" json:"net_out_bps,omitempty"`            // 宿主机实时出口速率（bytes/s）
+	Load1         float32                `protobuf:"fixed32,11,opt,name=load1,proto3" json:"load1,omitempty"`                                     // 系统负载 (1 min)
+	Load5         float32                `protobuf:"fixed32,12,opt,name=load5,proto3" json:"load5,omitempty"`                                     // 系统负载 (5 min)
+	Load15        float32                `protobuf:"fixed32,13,opt,name=load15,proto3" json:"load15,omitempty"`                                   // 系统负载 (15 min)
+	Uptime        int64                  `protobuf:"varint,14,opt,name=uptime,proto3" json:"uptime,omitempty"`                                    // 系统运行时间 (秒)
+	Cpus          int32                  `protobuf:"varint,15,opt,name=cpus,proto3" json:"cpus,omitempty"`                                        // 逻辑 CPU 核数
+	RamTotalMb    int64                  `protobuf:"varint,16,opt,name=ram_total_mb,json=ramTotalMb,proto3" json:"ram_total_mb,omitempty"`        // 总内存 (MB)
+	DiskTotalGb   int64                  `protobuf:"varint,17,opt,name=disk_total_gb,json=diskTotalGb,proto3" json:"disk_total_gb,omitempty"`     // 总磁盘 (GB)
+	BandwidthMbps int32                  `protobuf:"varint,18,opt,name=bandwidth_mbps,json=bandwidthMbps,proto3" json:"bandwidth_mbps,omitempty"` // 总带宽 (Mbps)
 	// 当前宿主机上所有 VM 的简要状态，用于平台侧对账。
 	Vms []*VMSummary `protobuf:"bytes,7,rep,name=vms,proto3" json:"vms,omitempty"`
 	// 宿主机入口地址（IPv4 / DDNS 域名），变化时才需要填写。
@@ -346,6 +354,62 @@ func (x *Heartbeat) GetNetInBps() int64 {
 func (x *Heartbeat) GetNetOutBps() int64 {
 	if x != nil {
 		return x.NetOutBps
+	}
+	return 0
+}
+
+func (x *Heartbeat) GetLoad1() float32 {
+	if x != nil {
+		return x.Load1
+	}
+	return 0
+}
+
+func (x *Heartbeat) GetLoad5() float32 {
+	if x != nil {
+		return x.Load5
+	}
+	return 0
+}
+
+func (x *Heartbeat) GetLoad15() float32 {
+	if x != nil {
+		return x.Load15
+	}
+	return 0
+}
+
+func (x *Heartbeat) GetUptime() int64 {
+	if x != nil {
+		return x.Uptime
+	}
+	return 0
+}
+
+func (x *Heartbeat) GetCpus() int32 {
+	if x != nil {
+		return x.Cpus
+	}
+	return 0
+}
+
+func (x *Heartbeat) GetRamTotalMb() int64 {
+	if x != nil {
+		return x.RamTotalMb
+	}
+	return 0
+}
+
+func (x *Heartbeat) GetDiskTotalGb() int64 {
+	if x != nil {
+		return x.DiskTotalGb
+	}
+	return 0
+}
+
+func (x *Heartbeat) GetBandwidthMbps() int32 {
+	if x != nil {
+		return x.BandwidthMbps
 	}
 	return 0
 }
@@ -1824,7 +1888,7 @@ const file_proto_agent_agent_proto_rawDesc = "" +
 	"\n" +
 	"cmd_result\x18\x04 \x01(\v2\x14.agent.CommandResultH\x00R\tcmdResult\x12B\n" +
 	"\x0fport_fwd_report\x18\x05 \x01(\v2\x18.agent.PortForwardReportH\x00R\rportFwdReportB\t\n" +
-	"\apayload\"\xd5\x02\n" +
+	"\apayload\"\xb2\x04\n" +
 	"\tHeartbeat\x12\x1c\n" +
 	"\ttimestamp\x18\x01 \x01(\x03R\ttimestamp\x12\x17\n" +
 	"\acpu_pct\x18\x02 \x01(\x02R\x06cpuPct\x12\x1e\n" +
@@ -1833,7 +1897,16 @@ const file_proto_agent_agent_proto_rawDesc = "" +
 	"diskUsedGb\x12\x1c\n" +
 	"\n" +
 	"net_in_bps\x18\x05 \x01(\x03R\bnetInBps\x12\x1e\n" +
-	"\vnet_out_bps\x18\x06 \x01(\x03R\tnetOutBps\x12\"\n" +
+	"\vnet_out_bps\x18\x06 \x01(\x03R\tnetOutBps\x12\x14\n" +
+	"\x05load1\x18\v \x01(\x02R\x05load1\x12\x14\n" +
+	"\x05load5\x18\f \x01(\x02R\x05load5\x12\x16\n" +
+	"\x06load15\x18\r \x01(\x02R\x06load15\x12\x16\n" +
+	"\x06uptime\x18\x0e \x01(\x03R\x06uptime\x12\x12\n" +
+	"\x04cpus\x18\x0f \x01(\x05R\x04cpus\x12 \n" +
+	"\fram_total_mb\x18\x10 \x01(\x03R\n" +
+	"ramTotalMb\x12\"\n" +
+	"\rdisk_total_gb\x18\x11 \x01(\x03R\vdiskTotalGb\x12%\n" +
+	"\x0ebandwidth_mbps\x18\x12 \x01(\x05R\rbandwidthMbps\x12\"\n" +
 	"\x03vms\x18\a \x03(\v2\x10.agent.VMSummaryR\x03vms\x12\x1d\n" +
 	"\n" +
 	"entry_host\x18\b \x01(\tR\tentryHost\x12\x1d\n" +

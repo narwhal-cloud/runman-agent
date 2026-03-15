@@ -28,13 +28,14 @@
 
     <main class="container mx-auto px-6 py-8">
         <!-- Host Stats Grid -->
-        <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-4">
             <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
                 <p class="text-slate-500 text-sm font-semibold mb-1 uppercase tracking-wider">CPU Usage</p>
                 <h3 id="cpu-pct" class="text-3xl font-bold text-indigo-600">0%</h3>
                 <div class="w-full bg-slate-100 h-2 rounded-full mt-3">
                     <div id="cpu-bar" class="bg-indigo-500 h-2 rounded-full transition-all duration-500" style="width: 0%"></div>
                 </div>
+                <p class="text-[10px] text-slate-400 mt-2">Load: <span id="load-avg">- / - / -</span></p>
             </div>
             <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
                 <p class="text-slate-500 text-sm font-semibold mb-1 uppercase tracking-wider">Memory Usage</p>
@@ -72,6 +73,38 @@
                     </div>
                 </div>
                 <p class="text-[10px] text-slate-400 mt-2 uppercase" id="nic-label">Monitoring: Any</p>
+            </div>
+        </div>
+
+        <!-- Secondary Stats Row -->
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+            <div class="bg-white px-5 py-4 rounded-xl shadow-sm border border-slate-200 flex items-center space-x-4">
+                <div class="text-2xl">⚡</div>
+                <div>
+                    <p class="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Bandwidth</p>
+                    <p id="bandwidth" class="text-lg font-bold text-amber-500">-- Mbps</p>
+                </div>
+            </div>
+            <div class="bg-white px-5 py-4 rounded-xl shadow-sm border border-slate-200 flex items-center space-x-4">
+                <div class="text-2xl">🖥️</div>
+                <div>
+                    <p class="text-[10px] text-slate-400 font-bold uppercase tracking-wider">CPU Cores</p>
+                    <p id="cpu-cores" class="text-lg font-bold text-slate-700">-- vCPU</p>
+                </div>
+            </div>
+            <div class="bg-white px-5 py-4 rounded-xl shadow-sm border border-slate-200 flex items-center space-x-4">
+                <div class="text-2xl">🕐</div>
+                <div>
+                    <p class="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Uptime</p>
+                    <p id="uptime" class="text-lg font-bold text-slate-700">--</p>
+                </div>
+            </div>
+            <div class="bg-white px-5 py-4 rounded-xl shadow-sm border border-slate-200 flex items-center space-x-4">
+                <div class="text-2xl">📊</div>
+                <div>
+                    <p class="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Load (1/5/15m)</p>
+                    <p id="load-detail" class="text-sm font-bold text-slate-700">- / - / -</p>
+                </div>
             </div>
         </div>
 
@@ -149,25 +182,41 @@
             return (bps / Math.pow(k, i)).toFixed(2) + ' ' + sizes[i];
         }
 
+        function formatUptime(seconds) {
+            const d = Math.floor(seconds / 86400);
+            const h = Math.floor((seconds % 86400) / 3600);
+            const m = Math.floor((seconds % 3600) / 60);
+            if (d > 0) return d + 'd ' + h + 'h ' + m + 'm';
+            if (h > 0) return h + 'h ' + m + 'm';
+            return m + 'm';
+        }
+
         async function refreshStatus() {
             try {
                 const res = await fetch('/api/status');
                 const data = await res.json();
-                document.getElementById('cpu-pct').innerText = data.cpu_pct.toFixed(1) + '%';
-                document.getElementById('cpu-bar').style.width = data.cpu_pct + '%';
-                
-                document.getElementById('ram-used').innerText = data.ram_used_mb;
-                document.getElementById('ram-total').innerText = data.ram_total_mb;
-                document.getElementById('ram-bar').style.width = (data.ram_used_mb / data.ram_total_mb * 100) + '%';
-                
-                document.getElementById('disk-used').innerText = data.disk_used_gb;
-                document.getElementById('disk-total').innerText = data.disk_total_gb;
-                document.getElementById('disk-bar').style.width = (data.disk_used_gb / data.disk_total_gb * 100) + '%';
-                
-                document.getElementById('net-in-rate').innerText = formatBps(data.net_in_bps * 8);
-                document.getElementById('net-out-rate').innerText = formatBps(data.net_out_bps * 8);
-                document.getElementById('net-in-total').innerText = formatBytes(data.net_in_total);
-                document.getElementById('net-out-total').innerText = formatBytes(data.net_out_total);
+                document.getElementById('cpu-pct').innerText = (data.cpu_pct || 0).toFixed(1) + '%';
+                document.getElementById('cpu-bar').style.width = (data.cpu_pct || 0) + '%';
+                const loadStr = (data.load1 || 0).toFixed(2) + ' / ' + (data.load5 || 0).toFixed(2) + ' / ' + (data.load15 || 0).toFixed(2);
+                document.getElementById('load-avg').innerText = loadStr;
+                document.getElementById('load-detail').innerText = loadStr;
+
+                document.getElementById('ram-used').innerText = data.ram_used_mb || 0;
+                document.getElementById('ram-total').innerText = data.ram_total_mb || 0;
+                if (data.ram_total_mb) document.getElementById('ram-bar').style.width = (data.ram_used_mb / data.ram_total_mb * 100) + '%';
+
+                document.getElementById('disk-used').innerText = data.disk_used_gb || 0;
+                document.getElementById('disk-total').innerText = data.disk_total_gb || 0;
+                if (data.disk_total_gb) document.getElementById('disk-bar').style.width = (data.disk_used_gb / data.disk_total_gb * 100) + '%';
+
+                document.getElementById('net-in-rate').innerText = formatBps((data.net_in_bps || 0) * 8);
+                document.getElementById('net-out-rate').innerText = formatBps((data.net_out_bps || 0) * 8);
+                document.getElementById('net-in-total').innerText = formatBytes(data.net_in_total || 0);
+                document.getElementById('net-out-total').innerText = formatBytes(data.net_out_total || 0);
+
+                document.getElementById('cpu-cores').innerText = (data.cpus || '--') + ' vCPU';
+                document.getElementById('uptime').innerText = data.uptime ? formatUptime(data.uptime) : '--';
+                document.getElementById('bandwidth').innerText = data.bandwidth_mbps ? data.bandwidth_mbps + ' Mbps' : '测速中...';
             } catch (e) {}
         }
 
