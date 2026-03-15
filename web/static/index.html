@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RunMan Agent Dashboard</title>
+    <link rel="icon" type="image/png" href="/logo.png">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .status-pulse { animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
+        body { background-color: #f8fafc; }
+    </style>
+</head>
+<body class="text-slate-800">
+    <nav class="bg-indigo-600 text-white shadow-lg">
+        <div class="container mx-auto px-6 py-4 flex justify-between items-center">
+            <div class="flex items-center space-x-3">
+                <img src="/logo.png" alt="Logo" class="w-8 h-8 rounded shadow-inner">
+                <span class="text-xl font-bold tracking-tight">RunMan Agent</span>
+            </div>
+            <div class="flex items-center space-x-4 text-sm font-medium">
+                <div class="w-3 h-3 bg-green-400 rounded-full status-pulse"></div>
+                <span id="node-id" class="bg-indigo-500 px-3 py-1 rounded">Node: Loading...</span>
+            </div>
+        </div>
+    </nav>
+
+    <main class="container mx-auto px-6 py-8">
+        <!-- Host Stats Grid -->
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+            <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                <p class="text-slate-500 text-sm font-semibold mb-1 uppercase tracking-wider">CPU Usage</p>
+                <h3 id="cpu-pct" class="text-3xl font-bold text-indigo-600">0%</h3>
+                <div class="w-full bg-slate-100 h-2 rounded-full mt-3">
+                    <div id="cpu-bar" class="bg-indigo-500 h-2 rounded-full transition-all duration-500" style="width: 0%"></div>
+                </div>
+            </div>
+            <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                <p class="text-slate-500 text-sm font-semibold mb-1 uppercase tracking-wider">Memory Usage</p>
+                <div class="flex items-baseline space-x-1">
+                    <h3 id="ram-used" class="text-3xl font-bold text-emerald-600">0</h3>
+                    <span class="text-slate-400 text-sm">/ <span id="ram-total">0</span> MB</span>
+                </div>
+                <div class="w-full bg-slate-100 h-2 rounded-full mt-3">
+                    <div id="ram-bar" class="bg-emerald-500 h-2 rounded-full transition-all duration-500" style="width: 0%"></div>
+                </div>
+            </div>
+            <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                <p class="text-slate-500 text-sm font-semibold mb-1 uppercase tracking-wider">Disk Usage</p>
+                <div class="flex items-baseline space-x-1">
+                    <h3 id="disk-used" class="text-3xl font-bold text-blue-600">0</h3>
+                    <span class="text-slate-400 text-sm">/ <span id="disk-total">0</span> GB</span>
+                </div>
+                <div class="w-full bg-slate-100 h-2 rounded-full mt-3">
+                    <div id="disk-bar" class="bg-blue-500 h-2 rounded-full transition-all duration-500" style="width: 0%"></div>
+                </div>
+                <p class="text-[10px] text-slate-400 mt-2 italic" id="disk-label">Partition: /</p>
+            </div>
+            <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                <p class="text-slate-500 text-sm font-semibold mb-1 uppercase tracking-wider">Net Speed & Traffic</p>
+                <div class="grid grid-cols-2 gap-2">
+                    <div>
+                        <div class="text-[10px] text-slate-400 font-bold uppercase">Rate</div>
+                        <div class="text-md font-bold text-indigo-500">↑ <span id="net-out-rate">0 bps</span></div>
+                        <div class="text-md font-bold text-blue-500">↓ <span id="net-in-rate">0 bps</span></div>
+                    </div>
+                    <div class="border-l border-slate-100 pl-3">
+                        <div class="text-[10px] text-slate-400 font-bold uppercase">Total</div>
+                        <div class="text-[11px] font-mono text-slate-600">↑ <span id="net-out-total">0 B</span></div>
+                        <div class="text-[11px] font-mono text-slate-600">↓ <span id="net-in-total">0 B</span></div>
+                    </div>
+                </div>
+                <p class="text-[10px] text-slate-400 mt-2 uppercase" id="nic-label">Monitoring: Any</p>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+            <div class="lg:col-span-2">
+                <div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+                    <div class="px-6 py-4 border-b border-slate-100 bg-slate-50 flex justify-between items-center">
+                        <h2 class="font-bold text-slate-700 uppercase tracking-tight">Virtual Machines</h2>
+                        <span id="vm-count" class="text-xs bg-indigo-100 text-indigo-600 px-2 py-1 rounded-full font-bold">0 Active</span>
+                    </div>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left">
+                            <thead class="bg-slate-50 text-slate-500 text-[10px] uppercase font-bold tracking-widest">
+                                <tr>
+                                    <th class="px-6 py-3">Identifier</th>
+                                    <th class="px-6 py-3">Status</th>
+                                    <th class="px-6 py-3">Resource Allocation</th>
+                                    <th class="px-6 py-3 text-right">Traffic Stat</th>
+                                </tr>
+                            </thead>
+                            <tbody id="vm-table-body" class="divide-y divide-slate-100 text-sm"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <div class="lg:col-span-1 space-y-6">
+                <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
+                    <h2 class="font-bold text-slate-700 mb-6 flex items-center uppercase text-sm tracking-widest">
+                        <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"></path></svg>
+                        Agent Control
+                    </h2>
+                    <form id="configForm" class="space-y-4">
+                        <div>
+                            <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">Platform Server</label>
+                            <input type="text" id="serverAddr" class="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm">
+                        </div>
+                        <div>
+                            <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">API Token</label>
+                            <input type="password" id="token" class="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm">
+                        </div>
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">Monitor NIC</label>
+                                <select id="monitorNIC" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs outline-none focus:ring-2 focus:ring-indigo-500"></select>
+                            </div>
+                            <div>
+                                <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">Monitor Disk</label>
+                                <select id="monitorDisk" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs outline-none focus:ring-2 focus:ring-indigo-500"></select>
+                            </div>
+                        </div>
+                        <button type="submit" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 rounded-lg transition-all shadow-lg shadow-indigo-100 uppercase text-xs tracking-widest mt-4">
+                            Save Changes
+                        </button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        function formatBytes(bytes, decimals = 2) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(decimals)) + ' ' + sizes[i];
+        }
+
+        function formatBps(bps) {
+            if (bps === 0) return '0 bps';
+            const k = 1000;
+            const sizes = ['bps', 'Kbps', 'Mbps', 'Gbps'];
+            const i = Math.floor(Math.log(bps) / Math.log(k));
+            return (bps / Math.pow(k, i)).toFixed(2) + ' ' + sizes[i];
+        }
+
+        async function refreshStatus() {
+            try {
+                const res = await fetch('/api/status');
+                const data = await res.json();
+                document.getElementById('cpu-pct').innerText = data.cpu_pct.toFixed(1) + '%';
+                document.getElementById('cpu-bar').style.width = data.cpu_pct + '%';
+                
+                document.getElementById('ram-used').innerText = data.ram_used_mb;
+                document.getElementById('ram-total').innerText = data.ram_total_mb;
+                document.getElementById('ram-bar').style.width = (data.ram_used_mb / data.ram_total_mb * 100) + '%';
+                
+                document.getElementById('disk-used').innerText = data.disk_used_gb;
+                document.getElementById('disk-total').innerText = data.disk_total_gb;
+                document.getElementById('disk-bar').style.width = (data.disk_used_gb / data.disk_total_gb * 100) + '%';
+                
+                document.getElementById('net-in-rate').innerText = formatBps(data.net_in_bps * 8);
+                document.getElementById('net-out-rate').innerText = formatBps(data.net_out_bps * 8);
+                document.getElementById('net-in-total').innerText = formatBytes(data.net_in_total);
+                document.getElementById('net-out-total').innerText = formatBytes(data.net_out_total);
+            } catch (e) {}
+        }
+
+        async function refreshVMs() {
+            try {
+                const res = await fetch('/api/vms');
+                const vms = await res.json();
+                document.getElementById('vm-count').innerText = vms.length + ' Total';
+                document.getElementById('vm-table-body').innerHTML = vms.map(vm => `
+                    <tr class="hover:bg-slate-50 transition-colors">
+                        <td class="px-6 py-4 font-medium text-slate-900 truncate max-w-[150px]" title="${vm.vm_id}">
+                            ${vm.vm_id.substring(0, 12)}
+                            <div class="text-[10px] text-slate-400 font-normal mt-0.5 tracking-tight">${vm.ip || 'INTERNAL NETWORK'}</div>
+                        </td>
+                        <td class="px-6 py-4">
+                            <span class="px-2 py-0.5 rounded-full text-[9px] font-black tracking-widest uppercase ${vm.status === 2 ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'}">
+                                ${vm.status === 2 ? 'RUNNING' : 'STOPPED'}
+                            </span>
+                        </td>
+                        <td class="px-6 py-4 text-xs space-y-0.5">
+                            <div class="flex items-center text-slate-500"><span class="w-12 font-bold uppercase text-[9px]">CPU</span> ${vm.cpu_pct.toFixed(1)}%</div>
+                            <div class="flex items-center text-slate-500"><span class="w-12 font-bold uppercase text-[9px]">RAM</span> ${vm.ram_used_mb} MB</div>
+                        </td>
+                        <td class="px-6 py-4 text-right font-mono text-xs text-slate-400">
+                            <div>↓ ${formatBytes(vm.traffic_in_bytes)}</div>
+                            <div class="mt-0.5">↑ ${formatBytes(vm.traffic_out_bytes)}</div>
+                        </td>
+                    </tr>
+                `).join('');
+            } catch (e) {}
+        }
+
+        async function init() {
+            // Load System Info
+            const sysRes = await fetch('/api/system/info');
+            const sys = await sysRes.json();
+            
+            const nicSel = document.getElementById('monitorNIC');
+            nicSel.innerHTML = '<option value="">All Interfaces</option>' + sys.nics.map(n => `<option value="${n}">${n}</option>`).join('');
+            
+            const diskSel = document.getElementById('monitorDisk');
+            diskSel.innerHTML = sys.disks.map(d => `<option value="${d}">${d}</option>`).join('');
+
+            // Load Config
+            const confRes = await fetch('/api/config');
+            const conf = await confRes.json();
+            document.getElementById('serverAddr').value = conf.server_addr;
+            document.getElementById('token').value = conf.token;
+            document.getElementById('monitorNIC').value = conf.monitor_nic;
+            document.getElementById('monitorDisk').value = conf.monitor_disk;
+            document.getElementById('node-id').innerText = "VIRT: " + conf.virt_type.toUpperCase();
+            document.getElementById('nic-label').innerText = "Monitoring: " + (conf.monitor_nic || "All Interfaces");
+            document.getElementById('disk-label').innerText = "Disk: " + conf.monitor_disk;
+        }
+
+        document.getElementById('configForm').onsubmit = async (e) => {
+            e.preventDefault();
+            const config = {
+                server_addr: document.getElementById('serverAddr').value,
+                token: document.getElementById('token').value,
+                monitor_nic: document.getElementById('monitorNIC').value,
+                monitor_disk: document.getElementById('monitorDisk').value
+            };
+            await fetch('/api/config', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(config)
+            });
+            alert('Settings updated');
+            window.location.reload();
+        };
+
+        init().then(() => {
+            setInterval(refreshStatus, 2000);
+            setInterval(refreshVMs, 5000);
+        });
+    </script>
+</body>
+</html>

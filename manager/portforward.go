@@ -1,0 +1,329 @@
+package manager
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"net"
+	"sync"
+	"time"
+)
+
+// --- 限速器实现 ---
+
+type RateLimiter struct {
+	rate       int64
+	capacity   int64
+	tokens     int64
+	lastUpdate time.Time
+	mu         sync.Mutex
+}
+
+func NewRateLimiter(bytesPerSec int64) *RateLimiter {
+	if bytesPerSec <= 0 {
+		return nil
+	}
+	return &RateLimiter{
+		rate:       bytesPerSec,
+		capacity:   bytesPerSec,
+		tokens:     bytesPerSec,
+		lastUpdate: time.Now(),
+	}
+}
+
+func (l *RateLimiter) Wait(n int) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	for {
+		now := time.Now()
+		elapsed := now.Sub(l.lastUpdate).Seconds()
+		l.tokens += int64(elapsed * float64(l.rate))
+		if l.tokens > l.capacity {
+			l.tokens = l.capacity
+		}
+		l.lastUpdate = now
+
+		if l.tokens >= int64(n) {
+			l.tokens -= int64(n)
+			return
+		}
+
+		needed := int64(n) - l.tokens
+		waitTime := time.Duration(float64(needed)/float64(l.rate)*1e9) * time.Nanosecond
+		l.mu.Unlock()
+		time.Sleep(waitTime)
+		l.mu.Lock()
+	}
+}
+
+type LimitedWriter struct {
+	w       io.Writer
+	limiter *RateLimiter
+}
+
+func (lw *LimitedWriter) Write(p []byte) (n int, err error) {
+	lw.limiter.Wait(len(p))
+	return lw.w.Write(p)
+}
+
+// --- 转发管理实现 ---
+
+type PortForwardEntry struct {
+	VMID      string
+	Protocol  string // "tcp" or "udp"
+	HostPort  int
+	GuestPort int
+	Mbps      int
+	cancel    context.CancelFunc
+	ln        io.Closer
+}
+
+type PortForwardManager struct {
+	mu       sync.RWMutex
+	mappings map[string][]*PortForwardEntry
+	mgr      VMManager
+}
+
+func NewPortForwardManager(mgr VMManager) *PortForwardManager {
+	return &PortForwardManager{
+		mappings: make(map[string][]*PortForwardEntry),
+		mgr:      mgr,
+	}
+}
+
+// AddMapping 添加转发规则
+func (m *PortForwardManager) AddMapping(ctx context.Context, vmId string, protocol string, hostPort, guestPort int, mbps int) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// 幂等性检查
+	for _, e := range m.mappings[vmId] {
+		if e.Protocol == protocol && e.HostPort == hostPort {
+			if e.GuestPort == guestPort && e.Mbps == mbps {
+				return nil
+			}
+			// 如果配置变了，先删除旧的
+			m.mu.Unlock()
+			_ = m.RemoveMapping(ctx, vmId, protocol, hostPort)
+			m.mu.Lock()
+			break
+		}
+	}
+
+	ip, err := m.mgr.GetVMIP(ctx, vmId)
+	if err != nil {
+		return err
+	}
+	targetAddr := fmt.Sprintf("%s:%d", ip, guestPort)
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	entry := &PortForwardEntry{
+		VMID:      vmId,
+		Protocol:  protocol,
+		HostPort:  hostPort,
+		GuestPort: guestPort,
+		Mbps:      mbps,
+		cancel:    cancel,
+	}
+
+	limiter := NewRateLimiter(int64(mbps) * 1024 * 1024 / 8)
+
+	if protocol == "tcp" {
+		ln, err := net.Listen("tcp", fmt.Sprintf(":%d", hostPort))
+		if err != nil {
+			cancel()
+			return err
+		}
+		entry.ln = ln
+		go m.runTCP(runCtx, ln, targetAddr, limiter)
+	} else {
+		pc, err := net.ListenPacket("udp", fmt.Sprintf(":%d", hostPort))
+		if err != nil {
+			cancel()
+			return err
+		}
+		entry.ln = pc
+		go m.runUDP(runCtx, pc, targetAddr, limiter)
+	}
+
+	m.mappings[vmId] = append(m.mappings[vmId], entry)
+	return nil
+}
+
+func (m *PortForwardManager) RemoveMapping(ctx context.Context, vmId string, protocol string, hostPort int) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	entries := m.mappings[vmId]
+	for i, e := range entries {
+		if e.Protocol == protocol && e.HostPort == hostPort {
+			e.cancel()
+			if e.ln != nil {
+				e.ln.Close()
+			}
+			m.mappings[vmId] = append(entries[:i], entries[i+1:]...)
+			return nil
+		}
+	}
+	return nil
+}
+
+// DesiredRule SyncForVM 全量同步某个 VM 的规则
+type DesiredRule struct {
+	Protocol  string
+	HostPort  int
+	GuestPort int
+}
+
+func (m *PortForwardManager) SyncForVM(ctx context.Context, vmId string, desired []DesiredRule, defaultMbps int) error {
+	m.mu.RLock()
+	current := m.mappings[vmId]
+	m.mu.RUnlock()
+
+	// 1. 删除不在期望列表中的规则
+	for _, c := range current {
+		found := false
+		for _, d := range desired {
+			if c.Protocol == d.Protocol && c.HostPort == d.HostPort {
+				found = true
+				break
+			}
+		}
+		if !found {
+			_ = m.RemoveMapping(ctx, vmId, c.Protocol, c.HostPort)
+		}
+	}
+
+	// 2. 添加或更新期望的规则
+	for _, d := range desired {
+		_ = m.AddMapping(ctx, vmId, d.Protocol, d.HostPort, d.GuestPort, defaultMbps)
+	}
+
+	return nil
+}
+
+func (m *PortForwardManager) GetReport() []PortForwardEntry {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var all []PortForwardEntry
+	for _, entries := range m.mappings {
+		for _, e := range entries {
+			all = append(all, PortForwardEntry{
+				VMID:      e.VMID,
+				Protocol:  e.Protocol,
+				HostPort:  e.HostPort,
+				GuestPort: e.GuestPort,
+				Mbps:      e.Mbps,
+			})
+		}
+	}
+	return all
+}
+
+// --- 内部转发逻辑 ---
+
+func (m *PortForwardManager) runTCP(ctx context.Context, ln net.Listener, target string, limiter *RateLimiter) {
+	defer func() { _ = ln.Close() }()
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				time.Sleep(time.Second)
+				continue
+			}
+		}
+		go m.handleTCP(ctx, conn, target, limiter)
+	}
+}
+
+func (m *PortForwardManager) handleTCP(ctx context.Context, src net.Conn, target string, limiter *RateLimiter) {
+	defer func() { _ = src.Close() }()
+	dst, err := net.DialTimeout("tcp", target, 5*time.Second)
+	if err != nil {
+		return
+	}
+	defer func() { _ = dst.Close() }()
+
+	done := make(chan struct{}, 2)
+	go func() {
+		m.proxy(dst, src, limiter)
+		done <- struct{}{}
+	}()
+	go func() {
+		m.proxy(src, dst, limiter)
+		done <- struct{}{}
+	}()
+
+	select {
+	case <-ctx.Done():
+	case <-done:
+	}
+}
+
+func (m *PortForwardManager) runUDP(ctx context.Context, pc net.PacketConn, target string, limiter *RateLimiter) {
+	defer func() { _ = pc.Close() }()
+	targetAddr, _ := net.ResolveUDPAddr("udp", target)
+	sessions := make(map[string]net.Conn)
+	var smu sync.Mutex
+
+	buf := make([]byte, 64*1024)
+	for {
+		n, addr, err := pc.ReadFrom(buf)
+		if err != nil {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				continue
+			}
+		}
+
+		smu.Lock()
+		client, ok := sessions[addr.String()]
+		if !ok {
+			client, _ = net.Dial("udp", targetAddr.String())
+			sessions[addr.String()] = client
+			go func(a net.Addr, c net.Conn) {
+				defer func() {
+					smu.Lock()
+					delete(sessions, a.String())
+					smu.Unlock()
+					_ = c.Close()
+				}()
+				rBuf := make([]byte, 64*1024)
+				for {
+					_ = c.SetReadDeadline(time.Now().Add(60 * time.Second))
+					rn, err := c.Read(rBuf)
+					if err != nil {
+						return
+					}
+					if limiter != nil {
+						limiter.Wait(rn)
+					}
+					_, _ = pc.WriteTo(rBuf[:rn], a)
+				}
+			}(addr, client)
+		}
+		smu.Unlock()
+
+		if limiter != nil {
+			limiter.Wait(n)
+		}
+		_, _ = client.Write(buf[:n])
+	}
+}
+
+func (m *PortForwardManager) proxy(dst io.Writer, src io.Reader, limiter *RateLimiter) {
+	if limiter != nil {
+		dst = &LimitedWriter{w: dst, limiter: limiter}
+	}
+	_, _ = io.Copy(dst, src)
+}

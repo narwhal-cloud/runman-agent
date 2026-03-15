@@ -1,0 +1,242 @@
+syntax = "proto3";
+package agent;
+option go_package = "runman-v2/proto/agent";
+
+// ================================================================
+// AgentGateway — Agent 与平台之间的双向流式通信服务。
+// Agent 主动连接，通过 gRPC metadata 的 authorization 字段携带
+// Bearer <agent_token> 完成身份验证。
+// ================================================================
+
+service AgentGateway {
+  // Agent 主动调用此方法建立持久化双向流。
+  // 连接断开后 Agent 应自动重连，平台侧会重放未确认的命令。
+  rpc Connect(stream AgentEnvelope) returns (stream PlatformEnvelope);
+}
+
+// ================================================================
+// 公共枚举
+// ================================================================
+
+// VM 运行状态
+enum VMStatus {
+  VM_STATUS_UNSPECIFIED = 0; // 未知
+  VM_STATUS_CREATING    = 1; // 创建中（等待 Agent 回报）
+  VM_STATUS_RUNNING     = 2; // 运行中
+  VM_STATUS_STOPPED     = 3; // 已停止
+  VM_STATUS_EXPIRED     = 4; // 已到期
+  VM_STATUS_DELETED     = 5; // 已删除
+  VM_STATUS_ERROR       = 6; // 异常
+}
+
+// 端口转发协议
+enum Protocol {
+  PROTOCOL_UNSPECIFIED = 0;
+  PROTOCOL_TCP         = 1;
+  PROTOCOL_UDP         = 2;
+}
+
+// ================================================================
+// 上行消息：Agent → Platform
+// ================================================================
+
+// Agent 发往平台的信封，每条消息携带唯一 message_id 用于追踪。
+message AgentEnvelope {
+  // 客户端生成的唯一消息 ID（用于去重 / 链路追踪）
+  string message_id = 1;
+
+  oneof payload {
+    Heartbeat         heartbeat       = 2; // 心跳（每 30 秒上报一次）
+    VMStatusUpdate    vm_update       = 3; // VM 状态变化主动上报
+    CommandResult     cmd_result      = 4; // 平台命令的执行结果
+    PortForwardReport port_fwd_report = 5; // 端口转发规则全量上报（启动 & 定期同步）
+  }
+}
+
+// 心跳包 — 携带宿主机实时负载与 VM 摘要列表。
+message Heartbeat {
+  int64  timestamp    = 1; // Unix 秒
+  float  cpu_pct      = 2; // CPU 使用率（0-100）
+  int64  ram_used_mb  = 3; // 已用内存（MB）
+  int64  disk_used_gb = 4; // 已用磁盘（GB）
+  int64  net_in_bps   = 5; // 宿主机实时入口速率（bytes/s）
+  int64  net_out_bps  = 6; // 宿主机实时出口速率（bytes/s）
+
+  // 当前宿主机上所有 VM 的简要状态，用于平台侧对账。
+  repeated VMSummary vms = 7;
+
+  // 宿主机入口地址（IPv4 / DDNS 域名），变化时才需要填写。
+  string entry_host  = 8;
+  // 宿主机 IPv6 地址（可选），变化时才需要填写。
+  string entry_ipv6  = 9;
+
+  // 宿主机支持的操作系统镜像列表。
+  repeated OSImageInfo os_images = 10;
+}
+
+// 操作系统镜像信息
+message OSImageInfo {
+  string id   = 1; // 镜像唯一标识符
+  string name = 2; // 镜像显示名称
+}
+
+// VM 状态摘要（心跳中内嵌）
+message VMSummary {
+  string   vm_id           = 1; // VM UUID
+  VMStatus status          = 2; // 当前状态
+  float    cpu_pct         = 3; // CPU 使用率（0-100）
+  int64    ram_used_mb     = 4; // 已用内存（MB）
+  int64    traffic_in_bytes  = 5; // 累计入站流量（bytes，自 VM 创建起）
+  int64    traffic_out_bytes = 6; // 累计出站流量（bytes，自 VM 创建起）
+  string   ip                = 7; // VM 内部/公网 IP
+  int64    monthly_traffic_in  = 8; // 本月累计入站流量 (bytes)
+  int64    monthly_traffic_out = 9; // 本月累计出站流量 (bytes)
+}
+
+// 端口转发规则条目
+message PortForwardEntry {
+  string   vm_id      = 1; // VM UUID
+  Protocol protocol   = 2; // 协议
+  int32    host_port  = 3; // 宿主机端口
+  int32    guest_port = 4; // VM 内部端口
+}
+
+// Agent 主动上报当前实际生效的全量端口转发规则。
+// 平台收到后与 DB 对比，推送差量命令（新增 / 删除）。
+// 触发时机：Agent 启动时 & 定期（建议每 5 分钟）。
+message PortForwardReport {
+  // 宿主机上所有 VM 当前实际生效的端口转发规则
+  repeated PortForwardEntry entries = 1;
+}
+
+// VM 状态变化主动上报（不等心跳，状态变更时立即发送）
+message VMStatusUpdate {
+  string   vm_id   = 1; // VM UUID
+  VMStatus status  = 2; // 最新状态
+  string   message = 3; // 附加说明（如错误原因）
+  string   ip      = 4; // VM 内部/公网 IP
+}
+
+// 平台命令的执行结果
+message CommandResult {
+  string command_id = 1; // 对应 PlatformEnvelope.command_id
+  bool   success    = 2; // 是否成功
+  string error      = 3; // 失败原因（success=false 时填写）
+  bytes  data       = 4; // JSON 编码的附加结果数据
+}
+
+// ================================================================
+// 下行消息：Platform → Agent
+// ================================================================
+
+// 平台发往 Agent 的信封，每条命令携带唯一 command_id。
+// Agent 执行完毕后须通过 CommandResult 回报结果。
+message PlatformEnvelope {
+  // 平台生成的唯一命令 ID（持久化到 DB，用于重放）
+  string command_id = 1;
+
+  oneof payload {
+    CmdCreateVM        create_vm       = 2;  // 创建 VM
+    CmdStartVM         start_vm        = 3;  // 启动 VM
+    CmdStopVM          stop_vm         = 4;  // 关闭 VM
+    CmdRestartVM       restart_vm      = 5;  // 重启 VM
+    CmdDeleteVM        delete_vm       = 6;  // 销毁 VM
+    CmdResetPassword   reset_password  = 7;  // 重置 root 密码
+    CmdSetPortForward  set_port_fwd    = 8;  // 新增单条端口转发规则
+    CmdDelPortForward  del_port_fwd    = 9;  // 删除单条端口转发规则
+    CmdGetVMInfo       get_vm_info     = 10; // 查询 VM 详情
+    CmdSyncPortForwards sync_port_fwds = 11; // 全量同步某 VM 的端口转发规则（Agent 以此为准）
+    CmdUpdateVM        update_vm       = 12; // 修改 VM 配置 (机主/管理员)
+    CmdReinstallVM     reinstall_vm    = 13; // 重装 VM 系统
+  }
+}
+
+// 重装 VM
+message CmdReinstallVM {
+  string vm_id         = 1; // VM UUID
+  string os_image      = 2; // 新操作系统镜像 ID
+  string root_password = 3; // 新 root 密码
+}
+
+// 修改 VM 配置
+message CmdUpdateVM {
+  string vm_id          = 1; // VM UUID
+  int32  cpu            = 2; // 新 CPU 核数 (0 表示不修改)
+  int64  ram_mb         = 3; // 新内存 MB (0 表示不修改)
+  int64  disk_gb        = 4; // 新磁盘 GB (0 表示不修改)
+  int32  bandwidth_mbps = 5; // 新带宽 Mbps (负数表示不修改)
+}
+
+// 创建 VM
+message CmdCreateVM {
+  string vm_id          = 1; // VM UUID（Agent 侧用作标识符）
+  int32  cpu            = 2; // CPU 核数
+  int64  ram_mb         = 3; // 内存（MB）
+  int64  disk_gb        = 4; // 磁盘（GB）
+  int32  bandwidth_mbps = 5; // 带宽限速（Mbps），0 = 不限
+  string os_image       = 6; // 操作系统镜像 ID / 名称
+  string root_password  = 7; // root 初始密码
+}
+
+// 启动 VM
+message CmdStartVM {
+  string vm_id = 1; // VM UUID
+}
+
+// 关闭 VM
+message CmdStopVM {
+  string vm_id = 1; // VM UUID
+  bool   force = 2; // true = 强制关机（等同于断电）
+}
+
+// 重启 VM
+message CmdRestartVM {
+  string vm_id = 1; // VM UUID
+}
+
+// 销毁 VM（不可恢复，释放所有资源）
+message CmdDeleteVM {
+  string vm_id = 1; // VM UUID
+}
+
+// 重置 root 密码
+message CmdResetPassword {
+  string vm_id        = 1; // VM UUID
+  string new_password = 2; // 新密码（明文，Agent 负责写入）
+}
+
+// 新增端口转发规则（宿主机端口 → VM 内部端口）
+message CmdSetPortForward {
+  string   vm_id      = 1; // VM UUID
+  Protocol protocol   = 2; // 协议
+  int32    host_port  = 3; // 宿主机端口（1024-65535）
+  int32    guest_port = 4; // VM 内部端口
+}
+
+// 删除端口转发规则
+message CmdDelPortForward {
+  string   vm_id     = 1; // VM UUID
+  Protocol protocol  = 2; // 协议
+  int32    host_port = 3; // 要删除的宿主机端口
+}
+
+// 查询 VM 详情（返回结果通过 CommandResult.data 以 JSON 编码回传）
+message CmdGetVMInfo {
+  string vm_id = 1; // VM UUID
+}
+
+// 全量同步某 VM 的端口转发规则。
+// Agent 收到后以此列表为权威，补充缺失、清除多余。
+message CmdSyncPortForwards {
+  string vm_id = 1; // VM UUID
+
+  // 该 VM 期望生效的完整端口转发规则列表（空列表 = 清除全部）
+  repeated PortForwardRule rules = 2;
+}
+
+// 单条端口转发规则（用于 CmdSyncPortForwards）
+message PortForwardRule {
+  Protocol protocol   = 1; // 协议
+  int32    host_port  = 2; // 宿主机端口（1024-65535）
+  int32    guest_port = 3; // VM 内部端口
+}
