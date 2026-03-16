@@ -1,13 +1,18 @@
+//go:build containers_image_openpgp
+
 package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"io"
 	"log"
 	"net/http"
 	"runman-agent/db"
 	"runman-agent/manager"
+	"runman-agent/manager/podman"
+	"runman-agent/manager/portforward"
 	"runman-agent/monitor"
 	"runman-agent/proto/agent"
 	"runman-agent/web"
@@ -19,11 +24,13 @@ import (
 	"google.golang.org/grpc/metadata"
 )
 
+// Agent 是运行在宿主机上的代理进程，负责管理容器生命周期、
+// 收集监控指标并通过 gRPC 双向流与平台保持长连接。
 type Agent struct {
 	db      *db.DB
 	mgr     manager.VMManager
 	hostMon *monitor.HostMonitor
-	pf      *manager.PortForwardManager
+	pf      *portforward.Manager
 	config  *db.Config
 }
 
@@ -39,41 +46,49 @@ func main() {
 		log.Fatalf("init db: %v", err)
 	}
 
+	// 首次启动时将命令行指定的虚拟化类型写入数据库
 	conf, _ := database.GetConfig()
 	if conf.VirtType == "" {
 		conf.VirtType = *virtType
 		_ = database.SaveConfig(conf)
 	}
 
-	var mgr manager.VMManager
+	var rawMgr manager.VMManager
 	if conf.VirtType == "podman" {
-		mgr, err = manager.NewPodmanManager(*socketPath)
+		rawMgr, err = podman.New(*socketPath)
 	}
 	if err != nil {
 		log.Fatalf("init manager: %v", err)
 	}
 
+	// VMService 作为服务层包装底层驱动，负责 ID 转换和托管 VM 过滤
+	svc := manager.NewVMService(rawMgr, database)
+
 	hostMon := monitor.NewHostMonitor()
 
 	a := &Agent{
 		db:      database,
-		mgr:     mgr,
+		mgr:     svc,
 		hostMon: hostMon,
-		pf:      manager.NewPortForwardManager(mgr),
+		pf:      portforward.New(svc),
 		config:  conf,
 	}
 
-	ws := web.NewServer(database, mgr, hostMon)
+	// 启动本地 Web 状态页，供运维人员直接查看节点信息
+	ws := web.NewServer(database, svc, hostMon)
 	go func() {
 		log.Printf("Starting web server on %s", *webAddr)
 		_ = ws.ListenAndServe(*webAddr)
 	}()
 
+	// 启动时异步测速，结果写入 DB 并附带在心跳中上报
 	go a.measureBandwidth()
 
 	a.run()
 }
 
+// measureBandwidth 通过下载 Cloudflare 测速文件估算出口带宽，
+// 结果保存到数据库并更新 HostMonitor 缓存。
 func (a *Agent) measureBandwidth() {
 	const testURL = "https://speed.cloudflare.com/__down?bytes=10240000"
 	log.Printf("Starting bandwidth test...")
@@ -111,6 +126,8 @@ func (a *Agent) measureBandwidth() {
 	}
 }
 
+// run 是主循环：持续从 DB 读取最新配置，等待 Token 就绪后建立 gRPC 连接，
+// 断连后自动重试。
 func (a *Agent) run() {
 	for {
 		conf, _ := a.db.GetConfig()
@@ -126,6 +143,8 @@ func (a *Agent) run() {
 	}
 }
 
+// connectAndLoop 建立 gRPC 双向流，启动心跳/端口转发上报协程，
+// 然后阻塞读取平台下发的命令直到连接断开。
 func (a *Agent) connectAndLoop() error {
 	conn, err := grpc.NewClient(a.config.ServerAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -142,6 +161,10 @@ func (a *Agent) connectAndLoop() error {
 
 	log.Printf("Connected to platform: %s", a.config.ServerAddr)
 
+	// 连接后立即上报一次状态，无需等待第一个 ticker
+	go a.sendHeartbeat(stream)
+	go a.sendPortForwardReport(stream)
+
 	go a.heartbeatLoop(stream)
 	go a.portForwardReportLoop(stream)
 
@@ -157,6 +180,42 @@ func (a *Agent) connectAndLoop() error {
 	}
 }
 
+// monitorCtx 构造携带监控配置（NIC / 磁盘挂载点）的 context，
+// 供 HostMonitor 按配置采集对应接口和分区的数据。
+func (a *Agent) monitorCtx() context.Context {
+	ctx := context.WithValue(context.Background(), monitor.NICKey, a.config.MonitorNIC)
+	return context.WithValue(ctx, monitor.DiskKey, a.config.MonitorDisk)
+}
+
+// sendHeartbeat 采集宿主机指标和容器列表，累计流量后通过 stream 上报心跳。
+func (a *Agent) sendHeartbeat(stream agent.AgentGateway_ConnectClient) {
+	ctx := a.monitorCtx()
+	hostStats, err := a.hostMon.GetStats(ctx)
+	if err != nil {
+		return
+	}
+	hb := hostStats.Heartbeat
+
+	vms, _ := a.mgr.ListVMs(ctx)
+	images, _ := a.mgr.GetSupportedImages(ctx)
+
+	// 将本次采集到的流量增量累加到 DB，并写回累计值及当月统计
+	currentMonth := time.Now().Format("2006-01")
+	for _, vm := range vms {
+		totalIn, totalOut, monthIn, monthOut, _ := a.db.UpdateTraffic(vm.VmId, vm.TrafficInBytes, vm.TrafficOutBytes, currentMonth)
+		vm.TrafficInBytes, vm.TrafficOutBytes = totalIn, totalOut
+		vm.MonthlyTrafficIn, vm.MonthlyTrafficOut = monthIn, monthOut
+	}
+	hb.Vms = vms
+	hb.OsImages = images
+
+	_ = stream.Send(&agent.AgentEnvelope{
+		MessageId: uuid.NewString(),
+		Payload:   &agent.AgentEnvelope_Heartbeat{Heartbeat: hb},
+	})
+}
+
+// heartbeatLoop 每 30 秒触发一次心跳上报，流断开时退出。
 func (a *Agent) heartbeatLoop(stream agent.AgentGateway_ConnectClient) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
@@ -165,39 +224,15 @@ func (a *Agent) heartbeatLoop(stream agent.AgentGateway_ConnectClient) {
 		case <-stream.Context().Done():
 			return
 		case <-ticker.C:
-			ctx := context.WithValue(context.Background(), "monitor_nic", a.config.MonitorNIC)
-			ctx = context.WithValue(ctx, "monitor_disk", a.config.MonitorDisk)
-
-			// 1. 获取宿主机状态 (独立模块)
-			hostStats, err := a.hostMon.GetStats(ctx)
-			if err != nil {
-				continue
-			}
-			hb := hostStats.Heartbeat
-
-			// 2. 获取 VM 状态与支持镜像 (虚拟化模块)
-			vms, _ := a.mgr.ListVMs(ctx)
-			images, _ := a.mgr.GetSupportedImages(ctx)
-
-			currentMonth := time.Now().Format("2006-01")
-			for _, vm := range vms {
-				totalIn, totalOut, monthIn, monthOut, _ := a.db.UpdateTraffic(vm.VmId, vm.TrafficInBytes, vm.TrafficOutBytes, currentMonth)
-				vm.TrafficInBytes, vm.TrafficOutBytes = totalIn, totalOut
-				vm.MonthlyTrafficIn, vm.MonthlyTrafficOut = monthIn, monthOut
-			}
-			hb.Vms = vms
-			hb.OsImages = images
-
-			_ = stream.Send(&agent.AgentEnvelope{
-				MessageId: uuid.NewString(),
-				Payload:   &agent.AgentEnvelope_Heartbeat{Heartbeat: hb},
-			})
+			a.sendHeartbeat(stream)
 		}
 	}
 }
 
+// portForwardReportLoop 每 5 分钟上报当前所有端口转发规则，流断开时退出。
 func (a *Agent) portForwardReportLoop(stream agent.AgentGateway_ConnectClient) {
 	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-stream.Context().Done():
@@ -208,6 +243,7 @@ func (a *Agent) portForwardReportLoop(stream agent.AgentGateway_ConnectClient) {
 	}
 }
 
+// sendPortForwardReport 将内存中所有活跃的端口转发规则上报给平台。
 func (a *Agent) sendPortForwardReport(stream agent.AgentGateway_ConnectClient) {
 	mappings := a.pf.GetReport()
 	var entries []*agent.PortForwardEntry
@@ -226,51 +262,131 @@ func (a *Agent) sendPortForwardReport(stream agent.AgentGateway_ConnectClient) {
 	})
 }
 
+// handleCommand 处理平台下发的单条命令，执行完毕后通过 stream 回复结果。
+// 每条命令在独立 goroutine 中执行，不阻塞主接收循环。
 func (a *Agent) handleCommand(stream agent.AgentGateway_ConnectClient, env *agent.PlatformEnvelope) {
-	var err error
+	var (
+		err      error
+		respData []byte
+	)
 	ctx := context.Background()
+
 	switch p := env.Payload.(type) {
 	case *agent.PlatformEnvelope_CreateVm:
 		err = a.mgr.CreateVM(ctx, p.CreateVm)
 		if err == nil {
+			// 创建成功后将配置持久化，供端口转发限速等功能读取。
+			// LocalID 记录底层虚拟化实际使用的标识符（podman 下为容器名，与 VmId 相同）。
 			_ = a.db.SaveVMConfig(&db.VMConfig{
-				VMID: p.CreateVm.VmId, BandwidthMbps: int(p.CreateVm.BandwidthMbps),
-				CPU: int(p.CreateVm.Cpu), MemoryMB: p.CreateVm.RamMb, Image: p.CreateVm.OsImage,
+				VMID:          p.CreateVm.VmId,
+				LocalID:       p.CreateVm.VmId,
+				BandwidthMbps: int(p.CreateVm.BandwidthMbps),
+				CPU:           int(p.CreateVm.Cpu),
+				MemoryMB:      p.CreateVm.RamMb,
+				Image:         p.CreateVm.OsImage,
 			})
 		}
+
 	case *agent.PlatformEnvelope_UpdateVm:
 		err = a.mgr.UpdateVM(ctx, p.UpdateVm)
+		if err == nil {
+			if conf, _ := a.db.GetVMConfig(p.UpdateVm.VmId); conf != nil {
+				// 只更新非零字段，保留原有值
+				if p.UpdateVm.Cpu > 0 {
+					conf.CPU = int(p.UpdateVm.Cpu)
+				}
+				if p.UpdateVm.RamMb > 0 {
+					conf.MemoryMB = p.UpdateVm.RamMb
+				}
+				if p.UpdateVm.BandwidthMbps > 0 {
+					conf.BandwidthMbps = int(p.UpdateVm.BandwidthMbps)
+					// 同步更新端口转发限速
+					a.pf.UpdateVMBandwidth(ctx, p.UpdateVm.VmId, int(p.UpdateVm.BandwidthMbps))
+				}
+				_ = a.db.SaveVMConfig(conf)
+			}
+		}
+
+	case *agent.PlatformEnvelope_ReinstallVm:
+		err = a.mgr.ReinstallVM(ctx, p.ReinstallVm)
+		if err == nil {
+			// 重装后更新镜像记录
+			if conf, _ := a.db.GetVMConfig(p.ReinstallVm.VmId); conf != nil {
+				conf.Image = p.ReinstallVm.OsImage
+				_ = a.db.SaveVMConfig(conf)
+			}
+		}
+
 	case *agent.PlatformEnvelope_DeleteVm:
 		err = a.mgr.DeleteVM(ctx, p.DeleteVm.VmId)
+		// 无论删除是否成功都清理 DB 记录，避免残留脏数据
 		_ = a.db.DeleteVMConfig(p.DeleteVm.VmId)
+
 	case *agent.PlatformEnvelope_StartVm:
 		err = a.mgr.StartVM(ctx, p.StartVm.VmId)
+
 	case *agent.PlatformEnvelope_StopVm:
 		err = a.mgr.StopVM(ctx, p.StopVm.VmId, p.StopVm.Force)
+
 	case *agent.PlatformEnvelope_RestartVm:
 		err = a.mgr.RestartVM(ctx, p.RestartVm.VmId)
+
 	case *agent.PlatformEnvelope_ResetPassword:
 		err = a.mgr.ResetPassword(ctx, p.ResetPassword.VmId, p.ResetPassword.NewPassword)
+
+	case *agent.PlatformEnvelope_GetVmInfo:
+		// 查询结果以 JSON 编码写入 CommandResult.Data 返回给平台
+		var info *agent.VMSummary
+		info, err = a.mgr.GetVMInfo(ctx, p.GetVmInfo.VmId)
+		if err == nil {
+			respData, _ = json.Marshal(info)
+		}
+
 	case *agent.PlatformEnvelope_SetPortFwd:
 		proto := "tcp"
 		if p.SetPortFwd.Protocol == agent.Protocol_PROTOCOL_UDP {
 			proto = "udp"
 		}
+		// 从 DB 读取该 VM 的带宽配置用于限速
 		mbps := 0
 		if conf, _ := a.db.GetVMConfig(p.SetPortFwd.VmId); conf != nil {
 			mbps = conf.BandwidthMbps
 		}
 		err = a.pf.AddMapping(ctx, p.SetPortFwd.VmId, proto, int(p.SetPortFwd.HostPort), int(p.SetPortFwd.GuestPort), mbps)
+
 	case *agent.PlatformEnvelope_DelPortFwd:
 		proto := "tcp"
 		if p.DelPortFwd.Protocol == agent.Protocol_PROTOCOL_UDP {
 			proto = "udp"
 		}
 		err = a.pf.RemoveMapping(ctx, p.DelPortFwd.VmId, proto, int(p.DelPortFwd.HostPort))
+
+	case *agent.PlatformEnvelope_SyncPortFwds:
+		// 以平台下发的规则列表为准，全量对齐本地转发状态
+		mbps := 0
+		if conf, _ := a.db.GetVMConfig(p.SyncPortFwds.VmId); conf != nil {
+			mbps = conf.BandwidthMbps
+		}
+		var desired []portforward.DesiredRule
+		for _, e := range p.SyncPortFwds.Rules {
+			proto := "tcp"
+			if e.Protocol == agent.Protocol_PROTOCOL_UDP {
+				proto = "udp"
+			}
+			desired = append(desired, portforward.DesiredRule{
+				Protocol:  proto,
+				HostPort:  int(e.HostPort),
+				GuestPort: int(e.GuestPort),
+			})
+		}
+		err = a.pf.SyncForVM(ctx, p.SyncPortFwds.VmId, desired, mbps)
 	}
+
 	res := &agent.CommandResult{CommandId: env.CommandId, Success: err == nil}
 	if err != nil {
 		res.Error = err.Error()
+	} else if len(respData) > 0 {
+		res.Data = respData
 	}
 	_ = stream.Send(&agent.AgentEnvelope{
 		MessageId: uuid.NewString(),

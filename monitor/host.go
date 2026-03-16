@@ -15,6 +15,14 @@ import (
 	psnet "github.com/shirou/gopsutil/v4/net"
 )
 
+// MonitorNICKey / MonitorDiskKey 是 context 中的监控配置 key
+type contextKey string
+
+const (
+	NICKey  contextKey = "monitor_nic"
+	DiskKey contextKey = "monitor_disk"
+)
+
 type HostStats struct {
 	*agent.Heartbeat
 	NetInTotal  int64 `json:"net_in_total"`
@@ -42,8 +50,8 @@ func (h *HostMonitor) SetBandwidth(mbps int32) {
 }
 
 func (h *HostMonitor) GetStats(ctx context.Context) (*HostStats, error) {
-	targetNIC, _ := ctx.Value("monitor_nic").(string)
-	targetDisk, _ := ctx.Value("monitor_disk").(string)
+	targetNIC, _ := ctx.Value(NICKey).(string)
+	targetDisk, _ := ctx.Value(DiskKey).(string)
 
 	v, _ := mem.VirtualMemory()
 	c, _ := cpu.Percent(0, false)
@@ -76,7 +84,12 @@ func (h *HostMonitor) GetStats(ctx context.Context) (*HostStats, error) {
 			}
 		} else {
 			name := ns.Name
-			if name == "lo" || strings.HasPrefix(name, "veth") || strings.HasPrefix(name, "br-") || strings.HasPrefix(name, "docker") {
+			if name == "lo" ||
+				strings.HasPrefix(name, "veth") ||
+				strings.HasPrefix(name, "br-") ||
+				strings.HasPrefix(name, "docker") ||
+				strings.HasPrefix(name, "podman") ||
+				strings.HasPrefix(name, "cni-") {
 				continue
 			}
 			currentIn += int64(ns.BytesRecv)
@@ -87,8 +100,12 @@ func (h *HostMonitor) GetStats(ctx context.Context) (*HostStats, error) {
 	rateIn := int64(float64(currentIn-h.lastNetIn) / elapsed)
 	rateOut := int64(float64(currentOut-h.lastNetOut) / elapsed)
 
-	if h.lastNetIn == 0 {
-		rateIn, rateOut = 0, 0
+	// 首次采样或计数器重置时速率无意义，归零
+	if h.lastNetIn == 0 || rateIn < 0 {
+		rateIn = 0
+	}
+	if h.lastNetOut == 0 || rateOut < 0 {
+		rateOut = 0
 	}
 
 	bwMbps := h.bandwidthMbps

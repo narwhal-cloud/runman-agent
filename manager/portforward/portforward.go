@@ -1,10 +1,11 @@
-package manager
+package portforward
 
 import (
 	"context"
 	"fmt"
 	"io"
 	"net"
+	"runman-agent/manager"
 	"sync"
 	"time"
 )
@@ -72,7 +73,7 @@ func (lw *LimitedWriter) Write(p []byte) (n int, err error) {
 
 // --- 转发管理实现 ---
 
-type PortForwardEntry struct {
+type Entry struct {
 	VMID      string
 	Protocol  string // "tcp" or "udp"
 	HostPort  int
@@ -82,31 +83,36 @@ type PortForwardEntry struct {
 	ln        io.Closer
 }
 
-type PortForwardManager struct {
-	mu       sync.RWMutex
-	mappings map[string][]*PortForwardEntry
-	mgr      VMManager
+// DesiredRule 用于 SyncForVM 全量同步时描述期望状态
+type DesiredRule struct {
+	Protocol  string
+	HostPort  int
+	GuestPort int
 }
 
-func NewPortForwardManager(mgr VMManager) *PortForwardManager {
-	return &PortForwardManager{
-		mappings: make(map[string][]*PortForwardEntry),
+type Manager struct {
+	mu       sync.RWMutex
+	mappings map[string][]*Entry
+	mgr      manager.VMManager
+}
+
+func New(mgr manager.VMManager) *Manager {
+	return &Manager{
+		mappings: make(map[string][]*Entry),
 		mgr:      mgr,
 	}
 }
 
-// AddMapping 添加转发规则
-func (m *PortForwardManager) AddMapping(ctx context.Context, vmId string, protocol string, hostPort, guestPort int, mbps int) error {
+// AddMapping 添加转发规则，相同规则幂等，配置变更时先删后加
+func (m *Manager) AddMapping(ctx context.Context, vmId string, protocol string, hostPort, guestPort int, mbps int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// 幂等性检查
 	for _, e := range m.mappings[vmId] {
 		if e.Protocol == protocol && e.HostPort == hostPort {
 			if e.GuestPort == guestPort && e.Mbps == mbps {
 				return nil
 			}
-			// 如果配置变了，先删除旧的
 			m.mu.Unlock()
 			_ = m.RemoveMapping(ctx, vmId, protocol, hostPort)
 			m.mu.Lock()
@@ -121,7 +127,7 @@ func (m *PortForwardManager) AddMapping(ctx context.Context, vmId string, protoc
 	targetAddr := fmt.Sprintf("%s:%d", ip, guestPort)
 
 	runCtx, cancel := context.WithCancel(context.Background())
-	entry := &PortForwardEntry{
+	entry := &Entry{
 		VMID:      vmId,
 		Protocol:  protocol,
 		HostPort:  hostPort,
@@ -154,7 +160,7 @@ func (m *PortForwardManager) AddMapping(ctx context.Context, vmId string, protoc
 	return nil
 }
 
-func (m *PortForwardManager) RemoveMapping(ctx context.Context, vmId string, protocol string, hostPort int) error {
+func (m *Manager) RemoveMapping(ctx context.Context, vmId string, protocol string, hostPort int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -172,19 +178,13 @@ func (m *PortForwardManager) RemoveMapping(ctx context.Context, vmId string, pro
 	return nil
 }
 
-// DesiredRule SyncForVM 全量同步某个 VM 的规则
-type DesiredRule struct {
-	Protocol  string
-	HostPort  int
-	GuestPort int
-}
-
-func (m *PortForwardManager) SyncForVM(ctx context.Context, vmId string, desired []DesiredRule, defaultMbps int) error {
+// SyncForVM 以 desired 为准全量对齐某个 VM 的端口转发规则
+func (m *Manager) SyncForVM(ctx context.Context, vmId string, desired []DesiredRule, defaultMbps int) error {
 	m.mu.RLock()
 	current := m.mappings[vmId]
 	m.mu.RUnlock()
 
-	// 1. 删除不在期望列表中的规则
+	// 删除不在期望列表中的规则
 	for _, c := range current {
 		found := false
 		for _, d := range desired {
@@ -198,7 +198,7 @@ func (m *PortForwardManager) SyncForVM(ctx context.Context, vmId string, desired
 		}
 	}
 
-	// 2. 添加或更新期望的规则
+	// 添加或更新期望的规则
 	for _, d := range desired {
 		_ = m.AddMapping(ctx, vmId, d.Protocol, d.HostPort, d.GuestPort, defaultMbps)
 	}
@@ -206,14 +206,27 @@ func (m *PortForwardManager) SyncForVM(ctx context.Context, vmId string, desired
 	return nil
 }
 
-func (m *PortForwardManager) GetReport() []PortForwardEntry {
+// UpdateVMBandwidth 带宽变更时重建该 VM 所有转发规则并应用新限速
+func (m *Manager) UpdateVMBandwidth(ctx context.Context, vmId string, mbps int) {
+	m.mu.RLock()
+	entries := make([]*Entry, len(m.mappings[vmId]))
+	copy(entries, m.mappings[vmId])
+	m.mu.RUnlock()
+
+	for _, e := range entries {
+		_ = m.RemoveMapping(ctx, vmId, e.Protocol, e.HostPort)
+		_ = m.AddMapping(ctx, vmId, e.Protocol, e.HostPort, e.GuestPort, mbps)
+	}
+}
+
+func (m *Manager) GetReport() []Entry {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	var all []PortForwardEntry
+	var all []Entry
 	for _, entries := range m.mappings {
 		for _, e := range entries {
-			all = append(all, PortForwardEntry{
+			all = append(all, Entry{
 				VMID:      e.VMID,
 				Protocol:  e.Protocol,
 				HostPort:  e.HostPort,
@@ -227,7 +240,7 @@ func (m *PortForwardManager) GetReport() []PortForwardEntry {
 
 // --- 内部转发逻辑 ---
 
-func (m *PortForwardManager) runTCP(ctx context.Context, ln net.Listener, target string, limiter *RateLimiter) {
+func (m *Manager) runTCP(ctx context.Context, ln net.Listener, target string, limiter *RateLimiter) {
 	defer func() { _ = ln.Close() }()
 	for {
 		conn, err := ln.Accept()
@@ -244,7 +257,7 @@ func (m *PortForwardManager) runTCP(ctx context.Context, ln net.Listener, target
 	}
 }
 
-func (m *PortForwardManager) handleTCP(ctx context.Context, src net.Conn, target string, limiter *RateLimiter) {
+func (m *Manager) handleTCP(ctx context.Context, src net.Conn, target string, limiter *RateLimiter) {
 	defer func() { _ = src.Close() }()
 	dst, err := net.DialTimeout("tcp", target, 5*time.Second)
 	if err != nil {
@@ -268,7 +281,7 @@ func (m *PortForwardManager) handleTCP(ctx context.Context, src net.Conn, target
 	}
 }
 
-func (m *PortForwardManager) runUDP(ctx context.Context, pc net.PacketConn, target string, limiter *RateLimiter) {
+func (m *Manager) runUDP(ctx context.Context, pc net.PacketConn, target string, limiter *RateLimiter) {
 	defer func() { _ = pc.Close() }()
 	targetAddr, _ := net.ResolveUDPAddr("udp", target)
 	sessions := make(map[string]net.Conn)
@@ -321,7 +334,7 @@ func (m *PortForwardManager) runUDP(ctx context.Context, pc net.PacketConn, targ
 	}
 }
 
-func (m *PortForwardManager) proxy(dst io.Writer, src io.Reader, limiter *RateLimiter) {
+func (m *Manager) proxy(dst io.Writer, src io.Reader, limiter *RateLimiter) {
 	if limiter != nil {
 		dst = &LimitedWriter{w: dst, limiter: limiter}
 	}

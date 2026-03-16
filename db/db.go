@@ -16,7 +16,9 @@ type Config struct {
 }
 
 type VMConfig struct {
-	VMID          string `gorm:"primaryKey"`
+	VMID string `gorm:"primaryKey"`
+	// LocalID 是底层虚拟化系统中实际使用的标识符（podman 容器名、KVM 虚拟机 UUID 等）
+	LocalID       string
 	BandwidthMbps int
 	CPU           int
 	MemoryMB      int64
@@ -87,7 +89,7 @@ func (d *DB) DeleteVMConfig(vmId string) error {
 	return d.orm.Delete(&VMConfig{}, "vm_id = ?", vmId).Error
 }
 
-// 流量统计逻辑
+// UpdateTraffic 流量统计逻辑
 func (d *DB) UpdateTraffic(vmId string, rawIn, rawOut int64, month string) (totalIn, totalOut, monthIn, monthOut int64, err error) {
 	var t Traffic
 	err = d.orm.First(&t, "vm_id = ?", vmId).Error

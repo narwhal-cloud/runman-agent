@@ -67,8 +67,8 @@ func (s *Server) ListenAndServe(addr string) error {
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	conf, _ := s.db.GetConfig()
-	ctx := context.WithValue(r.Context(), "monitor_nic", conf.MonitorNIC)
-	ctx = context.WithValue(ctx, "monitor_disk", conf.MonitorDisk)
+	ctx := context.WithValue(r.Context(), monitor.NICKey, conf.MonitorNIC)
+	ctx = context.WithValue(ctx, monitor.DiskKey, conf.MonitorDisk)
 
 	stats, err := s.hostMon.GetStats(ctx)
 	if err != nil {
@@ -93,6 +93,7 @@ func (s *Server) handleSystemInfo(w http.ResponseWriter, r *http.Request) {
 		mountPoints = append(mountPoints, p.Mountpoint)
 	}
 
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string][]string{
 		"nics":  nicNames,
 		"disks": mountPoints,
