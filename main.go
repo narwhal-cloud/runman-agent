@@ -321,11 +321,26 @@ func (a *Agent) handleCommand(stream agent.AgentGateway_ConnectClient, env *agen
 	case *agent.PlatformEnvelope_ReinstallVm:
 		err = a.mgr.ReinstallVM(ctx, p.ReinstallVm)
 		if err == nil {
-			// 重装后更新镜像记录
-			if conf, _ := a.db.GetVMConfig(p.ReinstallVm.VmId); conf != nil {
-				conf.Image = p.ReinstallVm.OsImage
-				_ = a.db.SaveVMConfig(conf)
+			// 重装后更新配置记录；若 DB 中无记录（母鸡重装系统后配置丢失），则根据下发参数重新创建
+			conf, _ := a.db.GetVMConfig(p.ReinstallVm.VmId)
+			if conf == nil {
+				conf = &db.VMConfig{
+					VMID:    p.ReinstallVm.VmId,
+					LocalID: p.ReinstallVm.VmId,
+				}
 			}
+			conf.Image = p.ReinstallVm.OsImage
+			if p.ReinstallVm.Cpu > 0 {
+				conf.CPU = int(p.ReinstallVm.Cpu)
+			}
+			if p.ReinstallVm.RamMb > 0 {
+				conf.MemoryMB = p.ReinstallVm.RamMb
+			}
+			if p.ReinstallVm.BandwidthMbps > 0 {
+				conf.BandwidthMbps = int(p.ReinstallVm.BandwidthMbps)
+				a.pf.UpdateVMBandwidth(ctx, p.ReinstallVm.VmId, int(p.ReinstallVm.BandwidthMbps))
+			}
+			_ = a.db.SaveVMConfig(conf)
 		}
 
 	case *agent.PlatformEnvelope_DeleteVm:

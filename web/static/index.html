@@ -223,7 +223,7 @@
         async function refreshVMs() {
             try {
                 const res = await fetch('/api/vms');
-                const vms = await res.json();
+                const vms = (await res.json()) || [];
                 document.getElementById('vm-count').innerText = vms.length + ' Total';
                 document.getElementById('vm-table-body').innerHTML = vms.map(vm => `
                     <tr class="hover:bg-slate-50 transition-colors">
@@ -237,16 +237,16 @@
                             </span>
                         </td>
                         <td class="px-6 py-4 text-xs space-y-0.5">
-                            <div class="flex items-center text-slate-500"><span class="w-12 font-bold uppercase text-[9px]">CPU</span> ${vm.cpu_pct.toFixed(1)}%</div>
-                            <div class="flex items-center text-slate-500"><span class="w-12 font-bold uppercase text-[9px]">RAM</span> ${vm.ram_used_mb} MB</div>
+                            <div class="flex items-center text-slate-500"><span class="w-12 font-bold uppercase text-[9px]">CPU</span> ${(vm.cpu_pct || 0).toFixed(1)}%</div>
+                            <div class="flex items-center text-slate-500"><span class="w-12 font-bold uppercase text-[9px]">RAM</span> ${vm.ram_used_mb || 0} MB</div>
                         </td>
                         <td class="px-6 py-4 text-right font-mono text-xs text-slate-400">
-                            <div>↓ ${formatBytes(vm.traffic_in_bytes)}</div>
-                            <div class="mt-0.5">↑ ${formatBytes(vm.traffic_out_bytes)}</div>
+                            <div>↓ ${formatBytes(vm.traffic_in_bytes || 0)}</div>
+                            <div class="mt-0.5">↑ ${formatBytes(vm.traffic_out_bytes || 0)}</div>
                         </td>
                     </tr>
                 `).join('');
-            } catch (e) {}
+            } catch (e) { console.error('refreshVMs:', e); }
         }
 
         async function init() {
@@ -290,6 +290,8 @@
         };
 
         init().then(() => {
+            refreshStatus();
+            refreshVMs();
             setInterval(refreshStatus, 2000);
             setInterval(refreshVMs, 5000);
         });

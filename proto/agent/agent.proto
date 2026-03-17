@@ -1,7 +1,7 @@
 syntax = "proto3";
 package agent;
 option go_package = "runman-v2/proto/agent";
-
+//protoc --go_out=. --go_opt=paths=source_relative --go-grpc_out=. --go-grpc_opt=paths=source_relative proto/agent/agent.proto
 // ================================================================
 // AgentGateway — Agent 与平台之间的双向流式通信服务。
 // Agent 主动连接，通过 gRPC metadata 的 authorization 字段携带
@@ -161,9 +161,13 @@ message PlatformEnvelope {
 
 // 重装 VM
 message CmdReinstallVM {
-  string vm_id         = 1; // VM UUID
-  string os_image      = 2; // 新操作系统镜像 ID
-  string root_password = 3; // 新 root 密码
+  string vm_id          = 1; // VM UUID
+  string os_image       = 2; // 新操作系统镜像 ID
+  string root_password  = 3; // 新 root 密码
+  int32  cpu            = 4; // CPU 核数
+  int64  ram_mb         = 5; // 内存（MB）
+  int64  disk_gb        = 6; // 磁盘（GB）
+  int32  bandwidth_mbps = 7; // 带宽限速（Mbps）
 }
 
 // 修改 VM 配置

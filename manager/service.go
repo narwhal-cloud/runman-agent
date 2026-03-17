@@ -105,6 +105,19 @@ func (s *VMService) ReinstallVM(ctx context.Context, req *agent.CmdReinstallVM) 
 			conf.Cpuset = cpuset
 			_ = s.db.SaveVMConfig(conf)
 		}
+	} else if req.Cpu > 0 {
+		// 母鸡重装系统后 DB 配置丢失，使用下发参数中的 CPU 数量分配 cpuset
+		cpuset, allocErr := s.alloc.Allocate(int(req.Cpu))
+		if allocErr == nil {
+			ctx = WithCpuset(ctx, cpuset)
+			// 预存最小记录，让 main.go 的 GetVMConfig 能读到 cpuset
+			_ = s.db.SaveVMConfig(&db.VMConfig{
+				VMID:    req.VmId,
+				LocalID: req.VmId,
+				CPU:     int(req.Cpu),
+				Cpuset:  cpuset,
+			})
+		}
 	}
 
 	localID := s.localID(req.VmId)

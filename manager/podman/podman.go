@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/containers/podman/v5/pkg/api/handlers"
@@ -329,31 +330,53 @@ func (m *Manager) getUsage(_ context.Context, vmID string) (cpuPct float32, memU
 	return
 }
 
-func (m *Manager) ListVMs(_ context.Context) ([]*agent.VMSummary, error) {
+func (m *Manager) ListVMs(ctx context.Context) ([]*agent.VMSummary, error) {
 	list, err := containers.List(m.timeoutCtx(), &containers.ListOptions{All: ptr(true)})
 	if err != nil {
 		return nil, err
 	}
-	var summaries []*agent.VMSummary
-	for _, c := range list {
-		inspect, err2 := containers.Inspect(m.timeoutCtx(), c.ID, nil)
-		if err2 != nil {
-			continue
-		}
-		ip := inspect.NetworkSettings.IPAddress
-		for _, network := range inspect.NetworkSettings.Networks {
-			if network.IPAddress != "" {
-				ip = network.IPAddress
-				break
+
+	summaries := make([]*agent.VMSummary, len(list))
+	var wg sync.WaitGroup
+	for i, c := range list {
+		wg.Add(1)
+		go func(i int, id string) {
+			defer wg.Done()
+			inspect, err2 := containers.Inspect(m.timeoutCtx(), id, nil)
+			if err2 != nil {
+				return
 			}
-		}
-		summaries = append(summaries, &agent.VMSummary{
-			VmId:   inspect.Name,
-			Status: mapStatus(inspect.State.Status),
-			Ip:     ip,
-		})
+			ip := inspect.NetworkSettings.IPAddress
+			for _, network := range inspect.NetworkSettings.Networks {
+				if network.IPAddress != "" {
+					ip = network.IPAddress
+					break
+				}
+			}
+			s := &agent.VMSummary{
+				VmId:   inspect.Name,
+				Status: mapStatus(inspect.State.Status),
+				Ip:     ip,
+			}
+			if inspect.State.Running {
+				cpuPct, memUsed, netIn, netOut, _ := m.getUsage(ctx, inspect.Name)
+				s.CpuPct = cpuPct
+				s.RamUsedMb = memUsed / 1024 / 1024
+				s.TrafficInBytes = netIn
+				s.TrafficOutBytes = netOut
+			}
+			summaries[i] = s
+		}(i, c.ID)
 	}
-	return summaries, nil
+	wg.Wait()
+
+	var result []*agent.VMSummary
+	for _, s := range summaries {
+		if s != nil {
+			result = append(result, s)
+		}
+	}
+	return result, nil
 }
 
 func mapStatus(s string) agent.VMStatus {

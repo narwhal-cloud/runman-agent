@@ -1115,9 +1115,13 @@ func (*PlatformEnvelope_ReinstallVm) isPlatformEnvelope_Payload() {}
 // 重装 VM
 type CmdReinstallVM struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	VmId          string                 `protobuf:"bytes,1,opt,name=vm_id,json=vmId,proto3" json:"vm_id,omitempty"`                         // VM UUID
-	OsImage       string                 `protobuf:"bytes,2,opt,name=os_image,json=osImage,proto3" json:"os_image,omitempty"`                // 新操作系统镜像 ID
-	RootPassword  string                 `protobuf:"bytes,3,opt,name=root_password,json=rootPassword,proto3" json:"root_password,omitempty"` // 新 root 密码
+	VmId          string                 `protobuf:"bytes,1,opt,name=vm_id,json=vmId,proto3" json:"vm_id,omitempty"`                             // VM UUID
+	OsImage       string                 `protobuf:"bytes,2,opt,name=os_image,json=osImage,proto3" json:"os_image,omitempty"`                    // 新操作系统镜像 ID
+	RootPassword  string                 `protobuf:"bytes,3,opt,name=root_password,json=rootPassword,proto3" json:"root_password,omitempty"`     // 新 root 密码
+	Cpu           int32                  `protobuf:"varint,4,opt,name=cpu,proto3" json:"cpu,omitempty"`                                          // CPU 核数
+	RamMb         int64                  `protobuf:"varint,5,opt,name=ram_mb,json=ramMb,proto3" json:"ram_mb,omitempty"`                         // 内存（MB）
+	DiskGb        int64                  `protobuf:"varint,6,opt,name=disk_gb,json=diskGb,proto3" json:"disk_gb,omitempty"`                      // 磁盘（GB）
+	BandwidthMbps int32                  `protobuf:"varint,7,opt,name=bandwidth_mbps,json=bandwidthMbps,proto3" json:"bandwidth_mbps,omitempty"` // 带宽限速（Mbps）
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1171,6 +1175,34 @@ func (x *CmdReinstallVM) GetRootPassword() string {
 		return x.RootPassword
 	}
 	return ""
+}
+
+func (x *CmdReinstallVM) GetCpu() int32 {
+	if x != nil {
+		return x.Cpu
+	}
+	return 0
+}
+
+func (x *CmdReinstallVM) GetRamMb() int64 {
+	if x != nil {
+		return x.RamMb
+	}
+	return 0
+}
+
+func (x *CmdReinstallVM) GetDiskGb() int64 {
+	if x != nil {
+		return x.DiskGb
+	}
+	return 0
+}
+
+func (x *CmdReinstallVM) GetBandwidthMbps() int32 {
+	if x != nil {
+		return x.BandwidthMbps
+	}
+	return 0
 }
 
 // 修改 VM 配置
@@ -1965,11 +1997,15 @@ const file_proto_agent_agent_proto_rawDesc = "" +
 	"\x0esync_port_fwds\x18\v \x01(\v2\x1a.agent.CmdSyncPortForwardsH\x00R\fsyncPortFwds\x121\n" +
 	"\tupdate_vm\x18\f \x01(\v2\x12.agent.CmdUpdateVMH\x00R\bupdateVm\x12:\n" +
 	"\freinstall_vm\x18\r \x01(\v2\x15.agent.CmdReinstallVMH\x00R\vreinstallVmB\t\n" +
-	"\apayload\"e\n" +
+	"\apayload\"\xce\x01\n" +
 	"\x0eCmdReinstallVM\x12\x13\n" +
 	"\x05vm_id\x18\x01 \x01(\tR\x04vmId\x12\x19\n" +
 	"\bos_image\x18\x02 \x01(\tR\aosImage\x12#\n" +
-	"\rroot_password\x18\x03 \x01(\tR\frootPassword\"\x8b\x01\n" +
+	"\rroot_password\x18\x03 \x01(\tR\frootPassword\x12\x10\n" +
+	"\x03cpu\x18\x04 \x01(\x05R\x03cpu\x12\x15\n" +
+	"\x06ram_mb\x18\x05 \x01(\x03R\x05ramMb\x12\x17\n" +
+	"\adisk_gb\x18\x06 \x01(\x03R\x06diskGb\x12%\n" +
+	"\x0ebandwidth_mbps\x18\a \x01(\x05R\rbandwidthMbps\"\x8b\x01\n" +
 	"\vCmdUpdateVM\x12\x13\n" +
 	"\x05vm_id\x18\x01 \x01(\tR\x04vmId\x12\x10\n" +
 	"\x03cpu\x18\x02 \x01(\x05R\x03cpu\x12\x15\n" +
