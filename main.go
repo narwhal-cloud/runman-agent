@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"runman-agent/db"
 	"runman-agent/manager"
+	"runman-agent/manager/cpualloc"
 	"runman-agent/manager/podman"
 	"runman-agent/manager/portforward"
 	"runman-agent/monitor"
@@ -61,8 +62,16 @@ func main() {
 		log.Fatalf("init manager: %v", err)
 	}
 
-	// VMService 作为服务层包装底层驱动，负责 ID 转换和托管 VM 过滤
-	svc := manager.NewVMService(rawMgr, database)
+	// 初始化 CPU 分配器，从 DB 恢复已有容器的 cpuset 引用计数
+	alloc := cpualloc.New(cpualloc.HostCPUCount())
+	if vmConfigs, err2 := database.ListVMConfigs(); err2 == nil {
+		for _, c := range vmConfigs {
+			alloc.Restore(c.Cpuset)
+		}
+	}
+
+	// VMService 作为服务层包装底层驱动，负责 ID 转换、托管 VM 过滤和 CPU 分配
+	svc := manager.NewVMService(rawMgr, database, alloc)
 
 	hostMon := monitor.NewHostMonitor()
 
@@ -277,6 +286,7 @@ func (a *Agent) handleCommand(stream agent.AgentGateway_ConnectClient, env *agen
 		if err == nil {
 			// 创建成功后将配置持久化，供端口转发限速等功能读取。
 			// LocalID 记录底层虚拟化实际使用的标识符（podman 下为容器名，与 VmId 相同）。
+			// Cpuset 由 VMService.CreateVM 分配并注入 ctx，此处读回持久化。
 			_ = a.db.SaveVMConfig(&db.VMConfig{
 				VMID:          p.CreateVm.VmId,
 				LocalID:       p.CreateVm.VmId,
@@ -284,6 +294,7 @@ func (a *Agent) handleCommand(stream agent.AgentGateway_ConnectClient, env *agen
 				CPU:           int(p.CreateVm.Cpu),
 				MemoryMB:      p.CreateVm.RamMb,
 				Image:         p.CreateVm.OsImage,
+				Cpuset:        manager.CpusetFrom(ctx),
 			})
 		}
 

@@ -24,6 +24,7 @@ type VMConfig struct {
 	MemoryMB      int64
 	Image         string
 	Status        string
+	Cpuset        string // 分配给该 VM 的 cpuset，如 "0-2" 或 "0,3,5"
 }
 
 type Traffic struct {

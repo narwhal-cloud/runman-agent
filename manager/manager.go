@@ -5,6 +5,24 @@ import (
 	"runman-agent/proto/agent"
 )
 
+// cpusetKey 是向 context 注入 cpuset 字符串时使用的键。
+// 由 VMService 写入，由底层驱动（如 podman.Manager）读取。
+type cpusetKey struct{}
+
+// CpusetKey 供底层驱动从 context 中读取分配好的 cpuset。
+var CpusetKey = cpusetKey{}
+
+// WithCpuset 将 cpuset 注入 context。
+func WithCpuset(ctx context.Context, cpuset string) context.Context {
+	return context.WithValue(ctx, CpusetKey, cpuset)
+}
+
+// CpusetFrom 从 context 中取出 cpuset，不存在时返回空字符串。
+func CpusetFrom(ctx context.Context) string {
+	v, _ := ctx.Value(CpusetKey).(string)
+	return v
+}
+
 // VMManager 定义了虚拟化管理器的通用接口
 type VMManager interface {
 	// CreateVM 基础生命周期管理
