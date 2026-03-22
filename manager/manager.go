@@ -2,8 +2,15 @@ package manager
 
 import (
 	"context"
+	"io"
 	"runman-agent/proto/agent"
 )
+
+// ResizeEvent 表示终端尺寸变更事件，由 Web 层通过 WebSocket 控制消息触发。
+type ResizeEvent struct {
+	Cols uint
+	Rows uint
+}
 
 // cpusetKey 是向 context 注入 cpuset 字符串时使用的键。
 // 由 VMService 写入，由底层驱动（如 podman.Manager）读取。
@@ -46,4 +53,10 @@ type VMManager interface {
 
 	// GetSupportedImages 获取该虚拟化支持的镜像列表
 	GetSupportedImages(ctx context.Context) ([]*agent.OSImageInfo, error)
+
+	// AttachTTY 附接到虚拟机/容器的交互式终端。
+	// stdin 来自调用方，stdout 输出回调用方。
+	// resize 通道用于传递终端尺寸变更事件，关闭后不再发送。
+	// 函数阻塞直到会话结束或 ctx 被取消。
+	AttachTTY(ctx context.Context, vmID string, stdin io.Reader, stdout io.Writer, resize <-chan ResizeEvent) error
 }

@@ -90,7 +90,7 @@ func main() {
 	}
 
 	// 启动本地 Web 状态页，供运维人员直接查看节点信息
-	ws := web.NewServer(database, svc, hostMon)
+	ws := web.NewServer(database, svc, hostMon, a.pf)
 	go func() {
 		log.Printf("Starting web server on %s", *webAddr)
 		_ = ws.ListenAndServe(*webAddr)

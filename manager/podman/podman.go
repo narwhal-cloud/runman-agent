@@ -3,8 +3,10 @@
 package podman
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"sync"
@@ -377,6 +379,53 @@ func (m *Manager) ListVMs(ctx context.Context) ([]*agent.VMSummary, error) {
 		}
 	}
 	return result, nil
+}
+
+func (m *Manager) AttachTTY(ctx context.Context, vmID string, stdin io.Reader, stdout io.Writer, resize <-chan manager.ResizeEvent) error {
+	execID, err := containers.ExecCreate(m.timeoutCtx(), vmID, &handlers.ExecCreateConfig{
+		ExecOptions: dockerContainer.ExecOptions{
+			AttachStdin:  true,
+			AttachStdout: true,
+			AttachStderr: true,
+			Tty:          true,
+			Cmd:          []string{"/bin/bash"},
+		},
+	})
+	if err != nil {
+		return err
+	}
+
+	// 合并 podman 连接 context 与请求取消信号：
+	// 请求关闭时取消 attach，但保持底层 podman 连接可用。
+	attachCtx, cancel := context.WithCancel(m.ctx)
+	go func() {
+		select {
+		case <-ctx.Done():
+			cancel()
+		case <-attachCtx.Done():
+		}
+	}()
+	defer cancel()
+
+	// 处理终端尺寸变更
+	go func() {
+		for rs := range resize {
+			h := int(rs.Rows)
+			w := int(rs.Cols)
+			_ = containers.ResizeExecTTY(m.ctx, execID,
+				new(containers.ResizeExecTTYOptions).WithHeight(h).WithWidth(w))
+		}
+	}()
+
+	return containers.ExecStartAndAttach(attachCtx, execID,
+		new(containers.ExecStartAndAttachOptions).
+			WithAttachInput(true).
+			WithAttachOutput(true).
+			WithAttachError(true).
+			WithInputStream(*bufio.NewReader(stdin)).
+			WithOutputStream(stdout).
+			WithErrorStream(stdout),
+	)
 }
 
 func mapStatus(s string) agent.VMStatus {

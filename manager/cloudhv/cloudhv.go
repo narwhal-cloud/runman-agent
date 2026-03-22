@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"runman-agent/manager"
 	"runman-agent/proto/agent"
 )
 
@@ -57,7 +58,7 @@ type cpusConfig struct {
 }
 
 // memoryConfig 对应 cloud-hypervisor MemoryConfig。
-// HotplugMethod 使用 "virtio-mem" 以支持内存双向热调整（ACPI 只能加不能减）。
+// HotplugMethod 使用 "VirtioMem" 以支持内存双向热调整（ACPI 只能加不能减）。
 // HotplugSize 预留虚拟地址空间，不占用实际物理内存，设为 64 GB 作为上限。
 // Mergeable 启用 KSM 内核同页合并，提升多 VM 共存时的内存利用率。
 // Thp 启用透明大页，减少虚拟化缺页中断（默认已开启，此处显式声明）。
@@ -85,8 +86,9 @@ type payloadConfig struct {
 }
 
 // diskConfig 对应 cloud-hypervisor DiskConfig。
-// Direct 启用 O_DIRECT，绕过宿主机页缓存（guest 自有页缓存，避免双重缓存占用内存）。
 // NumQueues 多队列 I/O 提升 SSD 并发吞吐；随机读写密集型负载收益明显。
+// 注意：系统盘使用稀疏文件（cp --sparse=always），不设置 Direct（O_DIRECT），
+// 避免向稀疏文件空洞写入时因内核需异步分配块而导致写失败。
 // RateLimiterConfig 磁盘限速，留空表示不限制。
 type diskConfig struct {
 	Path              string             `json:"path"`
@@ -130,8 +132,9 @@ type rngConfig struct {
 }
 
 type consoleConfig struct {
-	Mode string `json:"mode"`
-	File string `json:"file,omitempty"`
+	Mode   string `json:"mode"`
+	File   string `json:"file,omitempty"`
+	Socket string `json:"socket,omitempty"`
 }
 
 type vmInfoResp struct {
@@ -425,6 +428,10 @@ func (m *Manager) sockPath(vmID string) string {
 	return filepath.Join(runDir, vmID+"-api.sock")
 }
 
+func (m *Manager) serialSockPath(vmID string) string {
+	return filepath.Join(runDir, vmID+"-serial.sock")
+}
+
 func (m *Manager) pidFile(vmID string) string {
 	return filepath.Join(runDir, vmID+".pid")
 }
@@ -449,6 +456,7 @@ func (m *Manager) isRunning(vmID string) bool {
 func (m *Manager) launchProcess(vmID string) error {
 	sockPath := m.sockPath(vmID)
 	_ = os.Remove(sockPath)
+	_ = os.Remove(m.serialSockPath(vmID))
 
 	cmd := exec.Command(m.binary, "--api-socket", "path="+sockPath)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
@@ -599,7 +607,6 @@ func (m *Manager) buildVmConfig(vmID string, icfg *instanceConfig, net *netConfi
 	disks := []diskConfig{
 		{
 			Path:      filepath.Join(m.instDir, vmID, "system.raw"),
-			Direct:    true,
 			NumQueues: diskNumQueues,
 		},
 	}
@@ -622,7 +629,7 @@ func (m *Manager) buildVmConfig(vmID string, icfg *instanceConfig, net *netConfi
 			Size:          memBytes,
 			Mergeable:     true,
 			Thp:           true,
-			HotplugMethod: "virtio-mem",
+			HotplugMethod: "VirtioMem",
 			HotplugSize:   &hotplugSize,
 		},
 		Payload: payloadConfig{
@@ -645,9 +652,11 @@ func (m *Manager) buildVmConfig(vmID string, icfg *instanceConfig, net *netConfi
 			DeflateOnOom:      true,
 			FreePageReporting: true,
 		},
+		// Serial 使用 Socket 模式，允许通过 Unix socket 进行交互式控制台访问。
+		// 进程启动前已清理旧 socket，cloud-hypervisor 会在 VM boot 时创建新 socket。
 		Serial: &consoleConfig{
-			Mode: "File",
-			File: filepath.Join(runDir, vmID+"-serial.log"),
+			Mode:   "Socket",
+			Socket: m.serialSockPath(vmID),
 		},
 		Console: &consoleConfig{Mode: "Off"},
 	}, nil
@@ -838,8 +847,8 @@ func (m *Manager) DeleteVM(_ context.Context, vmID string) error {
 	for _, f := range []string{
 		m.pidFile(vmID),
 		m.sockPath(vmID),
+		m.serialSockPath(vmID),
 		filepath.Join(runDir, vmID+".log"),
-		filepath.Join(runDir, vmID+"-serial.log"),
 	} {
 		_ = os.Remove(f)
 	}
@@ -1136,6 +1145,51 @@ func cmdOutput(name string, args ...string) (string, error) {
 // buildNetRateLimit 将 Mbps 转换为 cloud-hypervisor TokenBucket 网络限速配置。
 // 使用 1000ms 刷新窗口（远大于内置 100ms cool_down_time），保证实际速率贴近目标值。
 // one_time_burst 设为等于桶容量，允许短时突发（TCP 慢启动友好）。
+// AttachTTY 连接到虚拟机的串口控制台（通过 Unix socket）并进行双向数据交互。
+// 需要 VM 以 Socket 模式的 serial 配置启动（buildVmConfig 已配置）。
+// cloud-hypervisor serial console 是原始字节流，不支持 PTY resize，resize 事件会被忽略。
+func (m *Manager) AttachTTY(ctx context.Context, vmID string, stdin io.Reader, stdout io.Writer, resize <-chan manager.ResizeEvent) error {
+	sockPath := m.serialSockPath(vmID)
+
+	conn, err := net.DialTimeout("unix", sockPath, 10*time.Second)
+	if err != nil {
+		return fmt.Errorf("serial console unavailable (is VM running?): %w", err)
+	}
+	defer conn.Close()
+
+	// ctx 取消时关闭连接，终止两个 Copy goroutine
+	go func() {
+		<-ctx.Done()
+		_ = conn.Close()
+	}()
+
+	// 丢弃 resize 事件（串口不支持窗口尺寸协商）
+	go func() {
+		for range resize {
+		}
+	}()
+
+	errc := make(chan error, 2)
+	go func() {
+		_, copyErr := io.Copy(conn, stdin)
+		errc <- copyErr
+	}()
+	go func() {
+		_, copyErr := io.Copy(stdout, conn)
+		errc <- copyErr
+	}()
+
+	select {
+	case <-ctx.Done():
+		return nil
+	case err := <-errc:
+		if ctx.Err() != nil {
+			return nil
+		}
+		return err
+	}
+}
+
 func buildNetRateLimit(mbps int) *rateLimiterConfig {
 	if mbps <= 0 {
 		return nil

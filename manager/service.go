@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"io"
 	"runman-agent/db"
 	"runman-agent/manager/cpualloc"
 	"runman-agent/proto/agent"
@@ -163,6 +164,11 @@ func (s *VMService) ListVMs(ctx context.Context) ([]*agent.VMSummary, error) {
 		result = append(result, vm)
 	}
 	return result, nil
+}
+
+// AttachTTY 将终端附接请求转发给底层驱动。
+func (s *VMService) AttachTTY(ctx context.Context, vmID string, stdin io.Reader, stdout io.Writer, resize <-chan ResizeEvent) error {
+	return s.mgr.AttachTTY(ctx, s.localID(vmID), stdin, stdout, resize)
 }
 
 // --- 其他 ---

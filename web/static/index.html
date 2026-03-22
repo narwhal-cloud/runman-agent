@@ -3,298 +3,749 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>RunMan Agent Dashboard</title>
+    <title>RunMan Agent</title>
     <link rel="icon" type="image/png" href="/logo.png">
     <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css"/>
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
     <style>
-        .status-pulse { animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
-        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
-        body { background-color: #f8fafc; }
+        .pulse { animation: pulse 2s cubic-bezier(0.4,0,0.6,1) infinite; }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+        .modal-bg { background: rgba(0,0,0,0.5); }
+        #terminal-container .xterm { height: 100%; }
+        #terminal-container .xterm-viewport { overflow-y: hidden !important; }
     </style>
 </head>
-<body class="text-slate-800">
-    <nav class="bg-indigo-600 text-white shadow-lg">
-        <div class="container mx-auto px-6 py-4 flex justify-between items-center">
-            <div class="flex items-center space-x-3">
-                <img src="/logo.png" alt="Logo" class="w-8 h-8 rounded shadow-inner">
-                <span class="text-xl font-bold tracking-tight">RunMan Agent</span>
+<body class="bg-slate-100 text-slate-800 min-h-screen">
+
+<!-- ─── Navbar ─────────────────────────────────────────────────────────────── -->
+<nav class="bg-indigo-700 text-white shadow-lg sticky top-0 z-10">
+    <div class="max-w-screen-2xl mx-auto px-6 py-3 flex justify-between items-center">
+        <div class="flex items-center gap-3">
+            <img src="/logo.png" class="w-8 h-8 rounded shadow" alt="logo">
+            <span class="text-lg font-bold tracking-tight">RunMan Agent</span>
+        </div>
+        <div class="flex items-center gap-3 text-sm">
+            <span id="virt-badge" class="bg-indigo-500 px-3 py-1 rounded text-xs font-bold uppercase tracking-widest">VIRT: -</span>
+            <span class="w-2.5 h-2.5 bg-green-400 rounded-full pulse"></span>
+        </div>
+    </div>
+</nav>
+
+<!-- ─── Main ───────────────────────────────────────────────────────────────── -->
+<main class="max-w-screen-2xl mx-auto px-6 py-6 space-y-6">
+
+    <!-- Stats row -->
+    <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
+            <p class="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">CPU Usage</p>
+            <h3 id="cpu-pct" class="text-3xl font-bold text-indigo-600">0%</h3>
+            <div class="w-full bg-slate-100 h-1.5 rounded-full mt-3">
+                <div id="cpu-bar" class="bg-indigo-500 h-1.5 rounded-full transition-all duration-500" style="width:0%"></div>
             </div>
-            <div class="flex items-center space-x-4 text-sm font-medium">
-                <div class="w-3 h-3 bg-green-400 rounded-full status-pulse"></div>
-                <span id="node-id" class="bg-indigo-500 px-3 py-1 rounded">Node: Loading...</span>
+            <p class="text-[10px] text-slate-400 mt-2">Cores: <span id="cpu-cores">-</span> &nbsp;|&nbsp; Load: <span id="load-avg">-</span></p>
+        </div>
+        <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
+            <p class="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Memory</p>
+            <div class="flex items-baseline gap-1">
+                <h3 id="ram-used" class="text-3xl font-bold text-emerald-600">0</h3>
+                <span class="text-slate-400 text-sm">/ <span id="ram-total">0</span> MB</span>
+            </div>
+            <div class="w-full bg-slate-100 h-1.5 rounded-full mt-3">
+                <div id="ram-bar" class="bg-emerald-500 h-1.5 rounded-full transition-all duration-500" style="width:0%"></div>
             </div>
         </div>
-    </nav>
+        <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
+            <p class="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Disk</p>
+            <div class="flex items-baseline gap-1">
+                <h3 id="disk-used" class="text-3xl font-bold text-blue-600">0</h3>
+                <span class="text-slate-400 text-sm">/ <span id="disk-total">0</span> GB</span>
+            </div>
+            <div class="w-full bg-slate-100 h-1.5 rounded-full mt-3">
+                <div id="disk-bar" class="bg-blue-500 h-1.5 rounded-full transition-all duration-500" style="width:0%"></div>
+            </div>
+            <p class="text-[10px] text-slate-400 mt-2 italic" id="disk-label">Partition: /</p>
+        </div>
+        <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
+            <p class="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Network I/O</p>
+            <div class="space-y-1 mt-1">
+                <div class="text-sm font-bold text-indigo-500">↑ <span id="net-out-rate">0 bps</span></div>
+                <div class="text-sm font-bold text-sky-500">↓ <span id="net-in-rate">0 bps</span></div>
+            </div>
+            <div class="flex gap-4 mt-2 text-[10px] font-mono text-slate-400">
+                <span>Total ↑ <span id="net-out-total">0 B</span></span>
+                <span>↓ <span id="net-in-total">0 B</span></span>
+            </div>
+            <p class="text-[10px] text-slate-400 mt-1">BW: <span id="bandwidth">--</span> Mbps &nbsp;|&nbsp; Up: <span id="uptime">--</span></p>
+        </div>
+    </div>
 
-    <main class="container mx-auto px-6 py-8">
-        <!-- Host Stats Grid -->
-        <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-4">
-            <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
-                <p class="text-slate-500 text-sm font-semibold mb-1 uppercase tracking-wider">CPU Usage</p>
-                <h3 id="cpu-pct" class="text-3xl font-bold text-indigo-600">0%</h3>
-                <div class="w-full bg-slate-100 h-2 rounded-full mt-3">
-                    <div id="cpu-bar" class="bg-indigo-500 h-2 rounded-full transition-all duration-500" style="width: 0%"></div>
+    <!-- Content grid: VMs + Config -->
+    <div class="grid grid-cols-1 xl:grid-cols-3 gap-6">
+
+        <!-- VM Panel -->
+        <div class="xl:col-span-2 bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+            <div class="px-6 py-4 border-b border-slate-100 bg-slate-50 flex justify-between items-center">
+                <div class="flex items-center gap-3">
+                    <h2 class="font-bold text-slate-700 uppercase tracking-tight text-sm">Virtual Machines</h2>
+                    <span id="vm-count" class="text-xs bg-indigo-100 text-indigo-600 px-2 py-0.5 rounded-full font-bold">0</span>
                 </div>
-                <p class="text-[10px] text-slate-400 mt-2">Load: <span id="load-avg">- / - / -</span></p>
+                <button onclick="openCreateVM()" class="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold px-3 py-1.5 rounded-lg transition-colors">
+                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 4v16m8-8H4"/></svg>
+                    Create VM
+                </button>
             </div>
-            <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
-                <p class="text-slate-500 text-sm font-semibold mb-1 uppercase tracking-wider">Memory Usage</p>
-                <div class="flex items-baseline space-x-1">
-                    <h3 id="ram-used" class="text-3xl font-bold text-emerald-600">0</h3>
-                    <span class="text-slate-400 text-sm">/ <span id="ram-total">0</span> MB</span>
-                </div>
-                <div class="w-full bg-slate-100 h-2 rounded-full mt-3">
-                    <div id="ram-bar" class="bg-emerald-500 h-2 rounded-full transition-all duration-500" style="width: 0%"></div>
-                </div>
+            <div class="overflow-x-auto">
+                <table class="w-full text-left">
+                    <thead class="bg-slate-50 text-[10px] text-slate-500 uppercase font-bold tracking-widest">
+                        <tr>
+                            <th class="px-4 py-3">VM / IP</th>
+                            <th class="px-4 py-3">Status</th>
+                            <th class="px-4 py-3">Resources</th>
+                            <th class="px-4 py-3">Traffic</th>
+                            <th class="px-4 py-3 text-center">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="vm-table-body" class="divide-y divide-slate-100 text-sm"></tbody>
+                </table>
+                <div id="vm-empty" class="hidden text-center py-12 text-slate-400 text-sm">No virtual machines found.</div>
             </div>
-            <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
-                <p class="text-slate-500 text-sm font-semibold mb-1 uppercase tracking-wider">Disk Usage</p>
-                <div class="flex items-baseline space-x-1">
-                    <h3 id="disk-used" class="text-3xl font-bold text-blue-600">0</h3>
-                    <span class="text-slate-400 text-sm">/ <span id="disk-total">0</span> GB</span>
-                </div>
-                <div class="w-full bg-slate-100 h-2 rounded-full mt-3">
-                    <div id="disk-bar" class="bg-blue-500 h-2 rounded-full transition-all duration-500" style="width: 0%"></div>
-                </div>
-                <p class="text-[10px] text-slate-400 mt-2 italic" id="disk-label">Partition: /</p>
-            </div>
-            <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
-                <p class="text-slate-500 text-sm font-semibold mb-1 uppercase tracking-wider">Net Speed & Traffic</p>
-                <div class="grid grid-cols-2 gap-2">
+        </div>
+
+        <!-- Right panel: Config -->
+        <div class="space-y-6">
+            <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
+                <h2 class="font-bold text-slate-700 mb-5 uppercase text-xs tracking-widest flex items-center gap-2">
+                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><circle cx="12" cy="12" r="3"/></svg>
+                    Agent Config
+                </h2>
+                <form id="configForm" class="space-y-3">
                     <div>
-                        <div class="text-[10px] text-slate-400 font-bold uppercase">Rate</div>
-                        <div class="text-md font-bold text-indigo-500">↑ <span id="net-out-rate">0 bps</span></div>
-                        <div class="text-md font-bold text-blue-500">↓ <span id="net-in-rate">0 bps</span></div>
+                        <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">Platform Server</label>
+                        <input type="text" id="serverAddr" class="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none text-sm">
                     </div>
-                    <div class="border-l border-slate-100 pl-3">
-                        <div class="text-[10px] text-slate-400 font-bold uppercase">Total</div>
-                        <div class="text-[11px] font-mono text-slate-600">↑ <span id="net-out-total">0 B</span></div>
-                        <div class="text-[11px] font-mono text-slate-600">↓ <span id="net-in-total">0 B</span></div>
+                    <div>
+                        <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">API Token</label>
+                        <input type="password" id="token" class="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none text-sm">
                     </div>
-                </div>
-                <p class="text-[10px] text-slate-400 mt-2 uppercase" id="nic-label">Monitoring: Any</p>
-            </div>
-        </div>
-
-        <!-- Secondary Stats Row -->
-        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
-            <div class="bg-white px-5 py-4 rounded-xl shadow-sm border border-slate-200 flex items-center space-x-4">
-                <div class="text-2xl">⚡</div>
-                <div>
-                    <p class="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Bandwidth</p>
-                    <p id="bandwidth" class="text-lg font-bold text-amber-500">-- Mbps</p>
-                </div>
-            </div>
-            <div class="bg-white px-5 py-4 rounded-xl shadow-sm border border-slate-200 flex items-center space-x-4">
-                <div class="text-2xl">🖥️</div>
-                <div>
-                    <p class="text-[10px] text-slate-400 font-bold uppercase tracking-wider">CPU Cores</p>
-                    <p id="cpu-cores" class="text-lg font-bold text-slate-700">-- vCPU</p>
-                </div>
-            </div>
-            <div class="bg-white px-5 py-4 rounded-xl shadow-sm border border-slate-200 flex items-center space-x-4">
-                <div class="text-2xl">🕐</div>
-                <div>
-                    <p class="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Uptime</p>
-                    <p id="uptime" class="text-lg font-bold text-slate-700">--</p>
-                </div>
-            </div>
-            <div class="bg-white px-5 py-4 rounded-xl shadow-sm border border-slate-200 flex items-center space-x-4">
-                <div class="text-2xl">📊</div>
-                <div>
-                    <p class="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Load (1/5/15m)</p>
-                    <p id="load-detail" class="text-sm font-bold text-slate-700">- / - / -</p>
-                </div>
-            </div>
-        </div>
-
-        <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
-            <div class="lg:col-span-2">
-                <div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-                    <div class="px-6 py-4 border-b border-slate-100 bg-slate-50 flex justify-between items-center">
-                        <h2 class="font-bold text-slate-700 uppercase tracking-tight">Virtual Machines</h2>
-                        <span id="vm-count" class="text-xs bg-indigo-100 text-indigo-600 px-2 py-1 rounded-full font-bold">0 Active</span>
-                    </div>
-                    <div class="overflow-x-auto">
-                        <table class="w-full text-left">
-                            <thead class="bg-slate-50 text-slate-500 text-[10px] uppercase font-bold tracking-widest">
-                                <tr>
-                                    <th class="px-6 py-3">Identifier</th>
-                                    <th class="px-6 py-3">Status</th>
-                                    <th class="px-6 py-3">Resource Allocation</th>
-                                    <th class="px-6 py-3 text-right">Traffic Stat</th>
-                                </tr>
-                            </thead>
-                            <tbody id="vm-table-body" class="divide-y divide-slate-100 text-sm"></tbody>
-                        </table>
-                    </div>
-                </div>
-            </div>
-
-            <div class="lg:col-span-1 space-y-6">
-                <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
-                    <h2 class="font-bold text-slate-700 mb-6 flex items-center uppercase text-sm tracking-widest">
-                        <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"></path></svg>
-                        Agent Control
-                    </h2>
-                    <form id="configForm" class="space-y-4">
+                    <div class="grid grid-cols-2 gap-3">
                         <div>
-                            <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">Platform Server</label>
-                            <input type="text" id="serverAddr" class="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm">
+                            <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">Monitor NIC</label>
+                            <select id="monitorNIC" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs outline-none focus:ring-2 focus:ring-indigo-500"></select>
                         </div>
                         <div>
-                            <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">API Token</label>
-                            <input type="password" id="token" class="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm">
+                            <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">Monitor Disk</label>
+                            <select id="monitorDisk" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs outline-none focus:ring-2 focus:ring-indigo-500"></select>
                         </div>
-                        <div class="grid grid-cols-2 gap-4">
-                            <div>
-                                <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">Monitor NIC</label>
-                                <select id="monitorNIC" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs outline-none focus:ring-2 focus:ring-indigo-500"></select>
-                            </div>
-                            <div>
-                                <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">Monitor Disk</label>
-                                <select id="monitorDisk" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs outline-none focus:ring-2 focus:ring-indigo-500"></select>
-                            </div>
-                        </div>
-                        <button type="submit" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 rounded-lg transition-all shadow-lg shadow-indigo-100 uppercase text-xs tracking-widest mt-4">
-                            Save Changes
-                        </button>
-                    </form>
-                </div>
+                    </div>
+                    <button type="submit" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 rounded-lg transition-colors text-xs uppercase tracking-widest mt-2">
+                        Save Changes
+                    </button>
+                </form>
             </div>
         </div>
-    </main>
+    </div>
+</main>
 
-    <script>
-        function formatBytes(bytes, decimals = 2) {
-            if (bytes === 0) return '0 B';
-            const k = 1024;
-            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-            const i = Math.floor(Math.log(bytes) / Math.log(k));
-            return parseFloat((bytes / Math.pow(k, i)).toFixed(decimals)) + ' ' + sizes[i];
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     MODALS
+═══════════════════════════════════════════════════════════════════════════ -->
+
+<!-- ─── Create VM ─────────────────────────────────────────────────────────── -->
+<div id="modal-create" class="fixed inset-0 modal-bg z-50 hidden flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg">
+        <div class="px-6 py-4 border-b border-slate-100 flex justify-between items-center">
+            <h3 class="font-bold text-slate-800">Create Virtual Machine</h3>
+            <button onclick="closeModal('modal-create')" class="text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button>
+        </div>
+        <form id="form-create" class="p-6 space-y-4">
+            <div>
+                <label class="label">OS Image</label>
+                <select id="c-image" class="input" required></select>
+            </div>
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="label">CPU Cores</label>
+                    <input type="number" id="c-cpu" class="input" min="1" value="1" required>
+                </div>
+                <div>
+                    <label class="label">RAM (MB)</label>
+                    <input type="number" id="c-ram" class="input" min="256" value="512" required>
+                </div>
+            </div>
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="label">Disk (GB)</label>
+                    <input type="number" id="c-disk" class="input" min="1" value="20" required>
+                </div>
+                <div>
+                    <label class="label">Bandwidth (Mbps, 0=∞)</label>
+                    <input type="number" id="c-bw" class="input" min="0" value="0">
+                </div>
+            </div>
+            <div>
+                <label class="label">Root Password</label>
+                <input type="text" id="c-pwd" class="input" required placeholder="initial root password">
+            </div>
+            <div>
+                <label class="label">VM ID (optional, auto if empty)</label>
+                <input type="text" id="c-vmid" class="input" placeholder="leave blank to auto-generate">
+            </div>
+            <div id="create-err" class="hidden text-red-500 text-xs bg-red-50 p-2 rounded"></div>
+            <div class="flex gap-3 pt-2">
+                <button type="button" onclick="closeModal('modal-create')" class="flex-1 py-2 border border-slate-200 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-50">Cancel</button>
+                <button type="submit" class="flex-1 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-bold">Create</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- ─── Manage VM ─────────────────────────────────────────────────────────── -->
+<div id="modal-manage" class="fixed inset-0 modal-bg z-50 hidden flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg">
+        <div class="px-6 py-4 border-b border-slate-100 flex justify-between items-center">
+            <div>
+                <h3 class="font-bold text-slate-800">Manage VM</h3>
+                <p id="manage-vmid" class="text-xs text-slate-400 font-mono mt-0.5"></p>
+            </div>
+            <button onclick="closeModal('modal-manage')" class="text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button>
+        </div>
+        <div class="p-6 space-y-5">
+            <!-- Update config -->
+            <div>
+                <h4 class="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3">Update Config</h4>
+                <div class="grid grid-cols-3 gap-3">
+                    <div>
+                        <label class="label">CPU Cores</label>
+                        <input type="number" id="u-cpu" class="input" min="0" placeholder="unchanged">
+                    </div>
+                    <div>
+                        <label class="label">RAM (MB)</label>
+                        <input type="number" id="u-ram" class="input" min="0" placeholder="unchanged">
+                    </div>
+                    <div>
+                        <label class="label">BW (Mbps)</label>
+                        <input type="number" id="u-bw" class="input" min="0" placeholder="unchanged">
+                    </div>
+                </div>
+                <button onclick="doUpdate()" class="mt-3 w-full py-2 bg-slate-700 hover:bg-slate-800 text-white text-xs font-bold rounded-lg">Apply Config</button>
+            </div>
+            <hr class="border-slate-100">
+            <!-- Reset password -->
+            <div>
+                <h4 class="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3">Reset Root Password</h4>
+                <div class="flex gap-2">
+                    <input type="text" id="u-pwd" class="input flex-1" placeholder="new password">
+                    <button onclick="doResetPwd()" class="px-4 py-2 bg-amber-500 hover:bg-amber-600 text-white text-xs font-bold rounded-lg">Reset</button>
+                </div>
+            </div>
+            <hr class="border-slate-100">
+            <!-- Reinstall -->
+            <div>
+                <h4 class="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3">Reinstall OS</h4>
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label class="label">OS Image</label>
+                        <select id="r-image" class="input"></select>
+                    </div>
+                    <div>
+                        <label class="label">Root Password</label>
+                        <input type="text" id="r-pwd" class="input" placeholder="new password">
+                    </div>
+                </div>
+                <button onclick="doReinstall()" class="mt-3 w-full py-2 bg-orange-500 hover:bg-orange-600 text-white text-xs font-bold rounded-lg">Reinstall (destructive)</button>
+            </div>
+            <hr class="border-slate-100">
+            <!-- Danger zone -->
+            <div>
+                <h4 class="text-xs font-bold text-red-400 uppercase tracking-widest mb-3">Danger Zone</h4>
+                <div class="flex gap-3">
+                    <button onclick="doStop(false)" class="flex-1 py-2 bg-yellow-500 hover:bg-yellow-600 text-white text-xs font-bold rounded-lg">Stop</button>
+                    <button onclick="doStop(true)" class="flex-1 py-2 bg-red-400 hover:bg-red-500 text-white text-xs font-bold rounded-lg">Force Stop</button>
+                    <button onclick="doDelete()" class="flex-1 py-2 bg-red-600 hover:bg-red-700 text-white text-xs font-bold rounded-lg">Delete VM</button>
+                </div>
+            </div>
+            <div id="manage-err" class="hidden text-red-500 text-xs bg-red-50 p-2 rounded"></div>
+        </div>
+    </div>
+</div>
+
+<!-- ─── Port Forwards ─────────────────────────────────────────────────────── -->
+<div id="modal-ports" class="fixed inset-0 modal-bg z-50 hidden flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg">
+        <div class="px-6 py-4 border-b border-slate-100 flex justify-between items-center">
+            <div>
+                <h3 class="font-bold text-slate-800">Port Forwards</h3>
+                <p id="ports-vmid" class="text-xs text-slate-400 font-mono mt-0.5"></p>
+            </div>
+            <button onclick="closeModal('modal-ports')" class="text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button>
+        </div>
+        <div class="p-6 space-y-4">
+            <!-- Add rule -->
+            <div class="bg-slate-50 rounded-xl p-4 space-y-3">
+                <p class="text-xs font-bold text-slate-500 uppercase tracking-widest">Add Rule</p>
+                <div class="grid grid-cols-3 gap-3">
+                    <div>
+                        <label class="label">Protocol</label>
+                        <select id="pf-proto" class="input">
+                            <option value="tcp">TCP</option>
+                            <option value="udp">UDP</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="label">Host Port</label>
+                        <input type="number" id="pf-hport" class="input" min="1" max="65535" placeholder="2222">
+                    </div>
+                    <div>
+                        <label class="label">VM Port</label>
+                        <input type="number" id="pf-gport" class="input" min="1" max="65535" placeholder="22">
+                    </div>
+                </div>
+                <button onclick="doAddPortFwd()" class="w-full py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-lg">Add Forward Rule</button>
+            </div>
+            <!-- List -->
+            <div>
+                <p class="text-xs font-bold text-slate-500 uppercase tracking-widest mb-2">Active Rules</p>
+                <div id="pf-list" class="space-y-1.5 max-h-64 overflow-y-auto"></div>
+                <div id="pf-empty" class="hidden text-center text-slate-400 text-xs py-4">No port forward rules.</div>
+            </div>
+            <div id="ports-err" class="hidden text-red-500 text-xs bg-red-50 p-2 rounded"></div>
+        </div>
+    </div>
+</div>
+
+<!-- ─── Console Terminal ───────────────────────────────────────────────────── -->
+<div id="modal-console" class="fixed inset-0 modal-bg z-50 hidden flex items-center justify-center p-4">
+    <div class="bg-gray-950 rounded-2xl shadow-2xl w-full max-w-4xl flex flex-col" style="height:70vh">
+        <div class="px-5 py-3 border-b border-gray-800 flex justify-between items-center shrink-0">
+            <div class="flex items-center gap-3">
+                <div class="flex gap-1.5">
+                    <span class="w-3 h-3 bg-red-500 rounded-full cursor-pointer" onclick="closeConsole()"></span>
+                    <span class="w-3 h-3 bg-yellow-500 rounded-full"></span>
+                    <span class="w-3 h-3 bg-green-500 rounded-full"></span>
+                </div>
+                <span class="text-gray-400 text-xs font-mono" id="console-title">console</span>
+            </div>
+            <button onclick="closeConsole()" class="text-gray-500 hover:text-gray-300 text-xl leading-none">&times;</button>
+        </div>
+        <div id="terminal-container" class="flex-1 p-3 overflow-hidden"></div>
+    </div>
+</div>
+
+<!-- ─── Shared style for form labels / inputs ─────────────────────────────── -->
+<style>
+    .label { display:block; font-size:.625rem; font-weight:700; color:#94a3b8; text-transform:uppercase; letter-spacing:.08em; margin-bottom:.25rem; }
+    .input { width:100%; padding:.5rem .75rem; border:1px solid #e2e8f0; border-radius:.5rem; font-size:.875rem; outline:none; }
+    .input:focus { ring: 2px; border-color:#6366f1; box-shadow:0 0 0 2px rgba(99,102,241,.2); }
+    select.input { background-color:#fff; }
+    .btn-action { display:inline-flex; align-items:center; justify-content:center; width:1.75rem; height:1.75rem; border-radius:.375rem; font-size:.75rem; transition:background-color .15s; cursor:pointer; }
+</style>
+
+<script>
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+
+function formatBytes(b, d=1) {
+    if (!b) return '0 B';
+    const k=1024, s=['B','KB','MB','GB','TB'], i=Math.floor(Math.log(b)/Math.log(k));
+    return (b/k**i).toFixed(d)+' '+s[i];
+}
+function formatBps(b) {
+    if (!b) return '0 bps';
+    const k=1000, s=['bps','Kbps','Mbps','Gbps'], i=Math.floor(Math.log(b)/Math.log(k));
+    return (b/k**i).toFixed(1)+' '+s[i];
+}
+function formatUptime(s) {
+    const d=Math.floor(s/86400), h=Math.floor((s%86400)/3600), m=Math.floor((s%3600)/60);
+    if(d>0) return d+'d '+h+'h';
+    if(h>0) return h+'h '+m+'m';
+    return m+'m';
+}
+function vmStatusLabel(s) {
+    const map = {1:['CREATING','bg-amber-100 text-amber-700'],2:['RUNNING','bg-green-100 text-green-700'],3:['STOPPED','bg-slate-100 text-slate-500'],6:['ERROR','bg-red-100 text-red-600']};
+    const [label,cls] = map[s] || ['UNKNOWN','bg-slate-100 text-slate-400'];
+    return `<span class="px-2 py-0.5 rounded-full text-[9px] font-black tracking-widest uppercase ${cls}">${label}</span>`;
+}
+
+function showErr(id, msg) { $(id).textContent=msg; $(id).classList.remove('hidden'); }
+function hideErr(id) { $(id).classList.add('hidden'); }
+
+async function api(method, path, body) {
+    const opts = { method, headers: {'Content-Type':'application/json'} };
+    if (body) opts.body = JSON.stringify(body);
+    const res = await fetch(path, opts);
+    if (!res.ok) throw new Error(await res.text());
+    if (res.status === 204) return null;
+    return res.json().catch(()=>null);
+}
+
+function openModal(id) { $(id).classList.remove('hidden'); }
+function closeModal(id) { $(id).classList.add('hidden'); }
+
+// ─── State ────────────────────────────────────────────────────────────────────
+let images = [];
+let activeVmId = null;
+let term = null, termWs = null, fitAddon = null;
+
+// ─── Stats ────────────────────────────────────────────────────────────────────
+async function refreshStatus() {
+    try {
+        const d = await api('GET','/api/status');
+        if (!d) return;
+        $('cpu-pct').textContent = (d.cpu_pct||0).toFixed(1)+'%';
+        $('cpu-bar').style.width = Math.min(d.cpu_pct||0,100)+'%';
+        $('cpu-cores').textContent = d.cpus||'-';
+        $('load-avg').textContent = [(d.load1||0).toFixed(1),(d.load5||0).toFixed(1),(d.load15||0).toFixed(1)].join(' / ');
+        $('ram-used').textContent = d.ram_used_mb||0;
+        $('ram-total').textContent = d.ram_total_mb||0;
+        if (d.ram_total_mb) $('ram-bar').style.width = (d.ram_used_mb/d.ram_total_mb*100)+'%';
+        $('disk-used').textContent = d.disk_used_gb||0;
+        $('disk-total').textContent = d.disk_total_gb||0;
+        if (d.disk_total_gb) $('disk-bar').style.width = (d.disk_used_gb/d.disk_total_gb*100)+'%';
+        $('net-out-rate').textContent = formatBps((d.net_out_bps||0)*8);
+        $('net-in-rate').textContent  = formatBps((d.net_in_bps||0)*8);
+        $('net-out-total').textContent = formatBytes(d.net_out_total||0);
+        $('net-in-total').textContent  = formatBytes(d.net_in_total||0);
+        $('bandwidth').textContent = d.bandwidth_mbps||'--';
+        $('uptime').textContent = d.uptime ? formatUptime(d.uptime) : '--';
+    } catch(e){}
+}
+
+// ─── VMs ──────────────────────────────────────────────────────────────────────
+async function refreshVMs() {
+    try {
+        const vms = (await api('GET','/api/vms')) || [];
+        $('vm-count').textContent = vms.length;
+        const running = vms.filter(v=>v.status===2).length;
+        $('vm-count').textContent = `${running} running / ${vms.length} total`;
+
+        const tbody = $('vm-table-body');
+        if (!vms.length) {
+            tbody.innerHTML = '';
+            $('vm-empty').classList.remove('hidden');
+            return;
         }
+        $('vm-empty').classList.add('hidden');
 
-        function formatBps(bps) {
-            if (bps === 0) return '0 bps';
-            const k = 1000;
-            const sizes = ['bps', 'Kbps', 'Mbps', 'Gbps'];
-            const i = Math.floor(Math.log(bps) / Math.log(k));
-            return (bps / Math.pow(k, i)).toFixed(2) + ' ' + sizes[i];
+        tbody.innerHTML = vms.map(vm => `
+        <tr class="hover:bg-slate-50 transition-colors">
+            <td class="px-4 py-3">
+                <div class="font-mono text-xs font-semibold text-slate-700 truncate max-w-[140px]" title="${vm.vm_id}">${vm.vm_id}</div>
+                <div class="text-[10px] text-slate-400 mt-0.5">${vm.ip || '—'}</div>
+            </td>
+            <td class="px-4 py-3">${vmStatusLabel(vm.status)}</td>
+            <td class="px-4 py-3 text-xs space-y-0.5">
+                <div class="text-slate-500"><span class="text-[9px] font-bold uppercase w-8 inline-block">CPU</span> ${(vm.cpu_pct||0).toFixed(1)}%</div>
+                <div class="text-slate-500"><span class="text-[9px] font-bold uppercase w-8 inline-block">RAM</span> ${vm.ram_used_mb||0} MB</div>
+            </td>
+            <td class="px-4 py-3 font-mono text-[10px] text-slate-400 space-y-0.5">
+                <div>↓ ${formatBytes(vm.traffic_in_bytes||0)}</div>
+                <div>↑ ${formatBytes(vm.traffic_out_bytes||0)}</div>
+            </td>
+            <td class="px-4 py-3">
+                <div class="flex items-center justify-center gap-1 flex-wrap">
+                    ${vm.status===2
+                        ? `<button class="btn-action bg-yellow-100 text-yellow-700 hover:bg-yellow-200" title="Stop" onclick="quickStop('${vm.vm_id}')">⏹</button>
+                           <button class="btn-action bg-sky-100 text-sky-700 hover:bg-sky-200" title="Restart" onclick="quickAction('${vm.vm_id}','restart')">⟳</button>`
+                        : `<button class="btn-action bg-green-100 text-green-700 hover:bg-green-200" title="Start" onclick="quickAction('${vm.vm_id}','start')">▶</button>`
+                    }
+                    <button class="btn-action bg-purple-100 text-purple-700 hover:bg-purple-200" title="Port Forwards" onclick="openPortFwds('${vm.vm_id}')">⇄</button>
+                    <button class="btn-action bg-gray-800 text-green-400 hover:bg-gray-700" title="Console" onclick="openConsole('${vm.vm_id}')">⊞</button>
+                    <button class="btn-action bg-indigo-100 text-indigo-700 hover:bg-indigo-200" title="Manage" onclick="openManage('${vm.vm_id}')">⚙</button>
+                </div>
+            </td>
+        </tr>`).join('');
+    } catch(e){ console.error(e); }
+}
+
+// ─── Quick actions ────────────────────────────────────────────────────────────
+async function quickAction(vmId, action) {
+    try {
+        await api('POST', `/api/vms/${vmId}/${action}`);
+        await refreshVMs();
+    } catch(e){ alert('Error: '+e.message); }
+}
+
+async function quickStop(vmId) {
+    await api('POST', `/api/vms/${vmId}/stop`, {force: false});
+    await refreshVMs();
+}
+
+// ─── Create VM ────────────────────────────────────────────────────────────────
+function openCreateVM() {
+    hideErr('create-err');
+    populateImageSelect('c-image');
+    openModal('modal-create');
+}
+
+$('form-create').onsubmit = async (e) => {
+    e.preventDefault();
+    hideErr('create-err');
+    const body = {
+        vm_id:         $('c-vmid').value.trim() || undefined,
+        cpu:           parseInt($('c-cpu').value),
+        ram_mb:        parseInt($('c-ram').value),
+        disk_gb:       parseInt($('c-disk').value),
+        bandwidth_mbps:parseInt($('c-bw').value)||0,
+        os_image:      $('c-image').value,
+        root_password: $('c-pwd').value,
+    };
+    try {
+        const res = await api('POST', '/api/vms', body);
+        closeModal('modal-create');
+        $('form-create').reset();
+        await refreshVMs();
+        alert(`VM created: ${res.vm_id}`);
+    } catch(e){ showErr('create-err', e.message); }
+};
+
+// ─── Manage VM ────────────────────────────────────────────────────────────────
+function openManage(vmId) {
+    activeVmId = vmId;
+    $('manage-vmid').textContent = vmId;
+    $('u-cpu').value=''; $('u-ram').value=''; $('u-bw').value='';
+    $('u-pwd').value=''; $('r-pwd').value='';
+    hideErr('manage-err');
+    populateImageSelect('r-image');
+    openModal('modal-manage');
+}
+
+async function doUpdate() {
+    hideErr('manage-err');
+    const body = {};
+    const cpu=parseInt($('u-cpu').value), ram=parseInt($('u-ram').value), bw=parseInt($('u-bw').value);
+    if (cpu>0) body.cpu=cpu;
+    if (ram>0) body.ram_mb=ram;
+    if (bw>0)  body.bandwidth_mbps=bw;
+    if (!Object.keys(body).length) { showErr('manage-err','No changes specified.'); return; }
+    try {
+        await api('PATCH', `/api/vms/${activeVmId}`, body);
+        closeModal('modal-manage');
+        await refreshVMs();
+    } catch(e){ showErr('manage-err', e.message); }
+}
+
+async function doResetPwd() {
+    hideErr('manage-err');
+    const pwd = $('u-pwd').value.trim();
+    if (!pwd) { showErr('manage-err','Password cannot be empty.'); return; }
+    try {
+        await api('POST', `/api/vms/${activeVmId}/reset-password`, {password: pwd});
+        closeModal('modal-manage');
+        alert('Password reset.');
+    } catch(e){ showErr('manage-err', e.message); }
+}
+
+async function doReinstall() {
+    hideErr('manage-err');
+    const img=$('r-image').value, pwd=$('r-pwd').value.trim();
+    if (!img||!pwd) { showErr('manage-err','Image and password required.'); return; }
+    if (!confirm(`Reinstall VM ${activeVmId}? ALL DATA WILL BE LOST.`)) return;
+    try {
+        await api('POST', `/api/vms/${activeVmId}/reinstall`, {os_image:img, root_password:pwd});
+        closeModal('modal-manage');
+        await refreshVMs();
+    } catch(e){ showErr('manage-err', e.message); }
+}
+
+async function doStop(force) {
+    hideErr('manage-err');
+    try {
+        await api('POST', `/api/vms/${activeVmId}/stop`, {force});
+        closeModal('modal-manage');
+        await refreshVMs();
+    } catch(e){ showErr('manage-err', e.message); }
+}
+
+async function doDelete() {
+    hideErr('manage-err');
+    if (!confirm(`Delete VM ${activeVmId}? This is irreversible.`)) return;
+    try {
+        await api('DELETE', `/api/vms/${activeVmId}`);
+        closeModal('modal-manage');
+        await refreshVMs();
+    } catch(e){ showErr('manage-err', e.message); }
+}
+
+// ─── Port Forwards ────────────────────────────────────────────────────────────
+async function openPortFwds(vmId) {
+    activeVmId = vmId;
+    $('ports-vmid').textContent = vmId;
+    hideErr('ports-err');
+    $('pf-hport').value=''; $('pf-gport').value='';
+    await refreshPortFwds();
+    openModal('modal-ports');
+}
+
+async function refreshPortFwds() {
+    try {
+        const rules = (await api('GET', `/api/vms/${activeVmId}/portfwds`)) || [];
+        const list = $('pf-list');
+        if (!rules.length) {
+            list.innerHTML='';
+            $('pf-empty').classList.remove('hidden');
+            return;
         }
+        $('pf-empty').classList.add('hidden');
+        list.innerHTML = rules.map(r => `
+            <div class="flex items-center justify-between bg-slate-50 rounded-lg px-3 py-2">
+                <div class="font-mono text-xs">
+                    <span class="font-bold text-indigo-600 uppercase">${r.protocol}</span>
+                    <span class="text-slate-600"> :${r.host_port}</span>
+                    <span class="text-slate-400"> → </span>
+                    <span class="text-slate-600">:${r.guest_port}</span>
+                </div>
+                <button onclick="doDelPortFwd('${r.protocol}',${r.host_port})" class="text-red-400 hover:text-red-600 text-xs font-bold px-2 py-0.5 hover:bg-red-50 rounded">✕</button>
+            </div>`).join('');
+    } catch(e){ showErr('ports-err', e.message); }
+}
 
-        function formatUptime(seconds) {
-            const d = Math.floor(seconds / 86400);
-            const h = Math.floor((seconds % 86400) / 3600);
-            const m = Math.floor((seconds % 3600) / 60);
-            if (d > 0) return d + 'd ' + h + 'h ' + m + 'm';
-            if (h > 0) return h + 'h ' + m + 'm';
-            return m + 'm';
+async function doAddPortFwd() {
+    hideErr('ports-err');
+    const proto=$('pf-proto').value, hp=parseInt($('pf-hport').value), gp=parseInt($('pf-gport').value);
+    if (!hp||!gp) { showErr('ports-err','Host port and VM port required.'); return; }
+    try {
+        await api('POST', `/api/vms/${activeVmId}/portfwds`, {protocol:proto, host_port:hp, guest_port:gp});
+        $('pf-hport').value=''; $('pf-gport').value='';
+        await refreshPortFwds();
+    } catch(e){ showErr('ports-err', e.message); }
+}
+
+async function doDelPortFwd(proto, hostPort) {
+    try {
+        await api('DELETE', `/api/vms/${activeVmId}/portfwds/${proto}/${hostPort}`);
+        await refreshPortFwds();
+    } catch(e){ showErr('ports-err', e.message); }
+}
+
+// ─── Console TTY ──────────────────────────────────────────────────────────────
+function openConsole(vmId) {
+    activeVmId = vmId;
+    $('console-title').textContent = `console — ${vmId}`;
+    openModal('modal-console');
+
+    // Clean up previous session
+    if (termWs) { termWs.close(); termWs=null; }
+    if (term)   { term.dispose(); term=null; }
+
+    const container = $('terminal-container');
+    container.innerHTML = '';
+
+    term = new Terminal({
+        cursorBlink: true,
+        fontSize: 14,
+        fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+        theme: { background:'#030712', foreground:'#e5e7eb', cursor:'#6366f1' },
+        convertEol: true,
+    });
+    fitAddon = new FitAddon.FitAddon();
+    term.loadAddon(fitAddon);
+    term.open(container);
+    setTimeout(() => { fitAddon.fit(); connectWS(vmId); }, 80);
+
+    window.addEventListener('resize', onTermResize);
+}
+
+function connectWS(vmId) {
+    const proto = location.protocol==='https:' ? 'wss' : 'ws';
+    termWs = new WebSocket(`${proto}://${location.host}/api/vms/${vmId}/tty`);
+    termWs.binaryType = 'arraybuffer';
+
+    termWs.onopen = () => {
+        term.write('\r\n\x1b[32m[connected]\x1b[0m\r\n');
+        // Send initial terminal size
+        termWs.send(JSON.stringify({type:'resize', cols:term.cols, rows:term.rows}));
+    };
+
+    termWs.onmessage = (e) => {
+        if (e.data instanceof ArrayBuffer) {
+            term.write(new Uint8Array(e.data));
+        } else {
+            term.write(e.data);
         }
+    };
 
-        async function refreshStatus() {
-            try {
-                const res = await fetch('/api/status');
-                const data = await res.json();
-                document.getElementById('cpu-pct').innerText = (data.cpu_pct || 0).toFixed(1) + '%';
-                document.getElementById('cpu-bar').style.width = (data.cpu_pct || 0) + '%';
-                const loadStr = (data.load1 || 0).toFixed(2) + ' / ' + (data.load5 || 0).toFixed(2) + ' / ' + (data.load15 || 0).toFixed(2);
-                document.getElementById('load-avg').innerText = loadStr;
-                document.getElementById('load-detail').innerText = loadStr;
+    termWs.onclose = () => term && term.write('\r\n\x1b[31m[disconnected]\x1b[0m\r\n');
+    termWs.onerror = () => term && term.write('\r\n\x1b[31m[connection error]\x1b[0m\r\n');
 
-                document.getElementById('ram-used').innerText = data.ram_used_mb || 0;
-                document.getElementById('ram-total').innerText = data.ram_total_mb || 0;
-                if (data.ram_total_mb) document.getElementById('ram-bar').style.width = (data.ram_used_mb / data.ram_total_mb * 100) + '%';
-
-                document.getElementById('disk-used').innerText = data.disk_used_gb || 0;
-                document.getElementById('disk-total').innerText = data.disk_total_gb || 0;
-                if (data.disk_total_gb) document.getElementById('disk-bar').style.width = (data.disk_used_gb / data.disk_total_gb * 100) + '%';
-
-                document.getElementById('net-in-rate').innerText = formatBps((data.net_in_bps || 0) * 8);
-                document.getElementById('net-out-rate').innerText = formatBps((data.net_out_bps || 0) * 8);
-                document.getElementById('net-in-total').innerText = formatBytes(data.net_in_total || 0);
-                document.getElementById('net-out-total').innerText = formatBytes(data.net_out_total || 0);
-
-                document.getElementById('cpu-cores').innerText = (data.cpus || '--') + ' vCPU';
-                document.getElementById('uptime').innerText = data.uptime ? formatUptime(data.uptime) : '--';
-                document.getElementById('bandwidth').innerText = data.bandwidth_mbps ? data.bandwidth_mbps + ' Mbps' : '测速中...';
-            } catch (e) {}
+    term.onData(data => {
+        if (termWs && termWs.readyState===WebSocket.OPEN) {
+            termWs.send(new TextEncoder().encode(data));
         }
+    });
 
-        async function refreshVMs() {
-            try {
-                const res = await fetch('/api/vms');
-                const vms = (await res.json()) || [];
-                document.getElementById('vm-count').innerText = vms.length + ' Total';
-                document.getElementById('vm-table-body').innerHTML = vms.map(vm => `
-                    <tr class="hover:bg-slate-50 transition-colors">
-                        <td class="px-6 py-4 font-medium text-slate-900 truncate max-w-[150px]" title="${vm.vm_id}">
-                            ${vm.vm_id.substring(0, 12)}
-                            <div class="text-[10px] text-slate-400 font-normal mt-0.5 tracking-tight">${vm.ip || 'INTERNAL NETWORK'}</div>
-                        </td>
-                        <td class="px-6 py-4">
-                            <span class="px-2 py-0.5 rounded-full text-[9px] font-black tracking-widest uppercase ${vm.status === 2 ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'}">
-                                ${vm.status === 2 ? 'RUNNING' : 'STOPPED'}
-                            </span>
-                        </td>
-                        <td class="px-6 py-4 text-xs space-y-0.5">
-                            <div class="flex items-center text-slate-500"><span class="w-12 font-bold uppercase text-[9px]">CPU</span> ${(vm.cpu_pct || 0).toFixed(1)}%</div>
-                            <div class="flex items-center text-slate-500"><span class="w-12 font-bold uppercase text-[9px]">RAM</span> ${vm.ram_used_mb || 0} MB</div>
-                        </td>
-                        <td class="px-6 py-4 text-right font-mono text-xs text-slate-400">
-                            <div>↓ ${formatBytes(vm.traffic_in_bytes || 0)}</div>
-                            <div class="mt-0.5">↑ ${formatBytes(vm.traffic_out_bytes || 0)}</div>
-                        </td>
-                    </tr>
-                `).join('');
-            } catch (e) { console.error('refreshVMs:', e); }
+    term.onResize(({cols, rows}) => {
+        if (termWs && termWs.readyState===WebSocket.OPEN) {
+            termWs.send(JSON.stringify({type:'resize', cols, rows}));
         }
+    });
+}
 
-        async function init() {
-            // Load System Info
-            const sysRes = await fetch('/api/system/info');
-            const sys = await sysRes.json();
-            
-            const nicSel = document.getElementById('monitorNIC');
-            nicSel.innerHTML = '<option value="">All Interfaces</option>' + sys.nics.map(n => `<option value="${n}">${n}</option>`).join('');
-            
-            const diskSel = document.getElementById('monitorDisk');
-            diskSel.innerHTML = sys.disks.map(d => `<option value="${d}">${d}</option>`).join('');
+function onTermResize() {
+    if (fitAddon) fitAddon.fit();
+}
 
-            // Load Config
-            const confRes = await fetch('/api/config');
-            const conf = await confRes.json();
-            document.getElementById('serverAddr').value = conf.server_addr;
-            document.getElementById('token').value = conf.token;
-            document.getElementById('monitorNIC').value = conf.monitor_nic;
-            document.getElementById('monitorDisk').value = conf.monitor_disk;
-            document.getElementById('node-id').innerText = "VIRT: " + conf.virt_type.toUpperCase();
-            document.getElementById('nic-label').innerText = "Monitoring: " + (conf.monitor_nic || "All Interfaces");
-            document.getElementById('disk-label').innerText = "Disk: " + conf.monitor_disk;
-        }
+function closeConsole() {
+    window.removeEventListener('resize', onTermResize);
+    if (termWs) { termWs.close(); termWs=null; }
+    if (term)   { term.dispose(); term=null; }
+    closeModal('modal-console');
+}
 
-        document.getElementById('configForm').onsubmit = async (e) => {
-            e.preventDefault();
-            const config = {
-                server_addr: document.getElementById('serverAddr').value,
-                token: document.getElementById('token').value,
-                monitor_nic: document.getElementById('monitorNIC').value,
-                monitor_disk: document.getElementById('monitorDisk').value
-            };
-            await fetch('/api/config', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(config)
-            });
-            alert('Settings updated');
-            window.location.reload();
-        };
+// Close modal on background click
+['modal-create','modal-manage','modal-ports'].forEach(id => {
+    $(id).addEventListener('click', e => { if(e.target===e.currentTarget) closeModal(id); });
+});
+$('modal-console').addEventListener('click', e => { if(e.target===e.currentTarget) closeConsole(); });
 
-        init().then(() => {
-            refreshStatus();
-            refreshVMs();
-            setInterval(refreshStatus, 2000);
-            setInterval(refreshVMs, 5000);
-        });
-    </script>
+// ─── Images ───────────────────────────────────────────────────────────────────
+function populateImageSelect(selectId) {
+    const sel = $(selectId);
+    sel.innerHTML = images.map(img => `<option value="${img.id}">${img.name}</option>`).join('');
+}
+
+// ─── Config ───────────────────────────────────────────────────────────────────
+$('configForm').onsubmit = async (e) => {
+    e.preventDefault();
+    await api('POST', '/api/config', {
+        server_addr:  $('serverAddr').value,
+        token:        $('token').value,
+        monitor_nic:  $('monitorNIC').value,
+        monitor_disk: $('monitorDisk').value,
+    });
+    alert('Saved.');
+    window.location.reload();
+};
+
+// ─── Init ─────────────────────────────────────────────────────────────────────
+async function init() {
+    const [sys, conf, imgs] = await Promise.all([
+        api('GET','/api/system/info'),
+        api('GET','/api/config'),
+        api('GET','/api/images').catch(()=>[]),
+    ]);
+
+    images = imgs || [];
+
+    const nicSel = $('monitorNIC');
+    nicSel.innerHTML = '<option value="">All Interfaces</option>' + sys.nics.map(n=>`<option value="${n}">${n}</option>`).join('');
+    $('monitorDisk').innerHTML = sys.disks.map(d=>`<option value="${d}">${d}</option>`).join('');
+
+    $('serverAddr').value  = conf.server_addr || '';
+    $('token').value       = conf.token       || '';
+    $('monitorNIC').value  = conf.monitor_nic  || '';
+    $('monitorDisk').value = conf.monitor_disk || '';
+    $('virt-badge').textContent = 'VIRT: '+(conf.virt_type||'?').toUpperCase();
+    $('disk-label').textContent = 'Disk: '+(conf.monitor_disk||'/');
+}
+
+init().then(() => {
+    refreshStatus();
+    refreshVMs();
+    setInterval(refreshStatus, 2000);
+    setInterval(refreshVMs, 5000);
+});
+</script>
 </body>
 </html>
