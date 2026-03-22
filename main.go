@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"runman-agent/db"
 	"runman-agent/manager"
+	"runman-agent/manager/cloudhv"
 	"runman-agent/manager/cpualloc"
 	"runman-agent/manager/podman"
 	"runman-agent/manager/portforward"
@@ -55,8 +56,13 @@ func main() {
 	}
 
 	var rawMgr manager.VMManager
-	if conf.VirtType == "podman" {
+	switch conf.VirtType {
+	case "podman":
 		rawMgr, err = podman.New(*socketPath)
+	case "cloudhv":
+		rawMgr, err = cloudhv.New(*socketPath)
+	default:
+		log.Fatalf("unsupported virt type: %q (supported: podman, cloudhv)", conf.VirtType)
 	}
 	if err != nil {
 		log.Fatalf("init manager: %v", err)
