@@ -29,10 +29,11 @@ type VMConfig struct {
 
 // PortForward 持久化端口转发规则。(Protocol, HostPort) 联合主键保证宿主机端口唯一。
 type PortForward struct {
-	Protocol  string `gorm:"primaryKey"`
-	HostPort  int    `gorm:"primaryKey"`
-	VMID      string `gorm:"index"`
-	GuestPort int
+	Protocol    string `gorm:"primaryKey"`
+	HostPort    int    `gorm:"primaryKey"`
+	VMID        string `gorm:"index"`
+	GuestPort   int
+	Description string
 }
 
 type Traffic struct {

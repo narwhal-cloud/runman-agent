@@ -75,20 +75,22 @@ func (lw *LimitedWriter) Write(p []byte) (n int, err error) {
 // --- 转发管理实现 ---
 
 type Entry struct {
-	VMID      string
-	Protocol  string // "tcp" or "udp"
-	HostPort  int
-	GuestPort int
-	Mbps      int
-	cancel    context.CancelFunc
-	ln        io.Closer
+	VMID        string
+	Protocol    string // "tcp" or "udp"
+	HostPort    int
+	GuestPort   int
+	Mbps        int
+	Description string
+	cancel      context.CancelFunc
+	ln          io.Closer
 }
 
 // DesiredRule 用于 SyncForVM 全量同步时描述期望状态
 type DesiredRule struct {
-	Protocol  string
-	HostPort  int
-	GuestPort int
+	Protocol    string
+	HostPort    int
+	GuestPort   int
+	Description string
 }
 
 type Manager struct {
@@ -113,19 +115,18 @@ func (m *Manager) Restore(ctx context.Context) {
 		return
 	}
 	for _, pf := range all {
-		mbps := 0
-		_ = m.AddMapping(ctx, pf.VMID, pf.Protocol, pf.HostPort, pf.GuestPort, mbps)
+		_ = m.AddMapping(ctx, pf.VMID, pf.Protocol, pf.HostPort, pf.GuestPort, 0, pf.Description)
 	}
 }
 
 // AddMapping 添加转发规则，相同规则幂等，配置变更时先删后加
-func (m *Manager) AddMapping(ctx context.Context, vmId string, protocol string, hostPort, guestPort int, mbps int) error {
+func (m *Manager) AddMapping(ctx context.Context, vmId string, protocol string, hostPort, guestPort int, mbps int, description string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	for _, e := range m.mappings[vmId] {
 		if e.Protocol == protocol && e.HostPort == hostPort {
-			if e.GuestPort == guestPort && e.Mbps == mbps {
+			if e.GuestPort == guestPort && e.Mbps == mbps && e.Description == description {
 				return nil
 			}
 			m.mu.Unlock()
@@ -143,12 +144,13 @@ func (m *Manager) AddMapping(ctx context.Context, vmId string, protocol string, 
 
 	runCtx, cancel := context.WithCancel(context.Background())
 	entry := &Entry{
-		VMID:      vmId,
-		Protocol:  protocol,
-		HostPort:  hostPort,
-		GuestPort: guestPort,
-		Mbps:      mbps,
-		cancel:    cancel,
+		VMID:        vmId,
+		Protocol:    protocol,
+		HostPort:    hostPort,
+		GuestPort:   guestPort,
+		Mbps:        mbps,
+		Description: description,
+		cancel:      cancel,
 	}
 
 	limiter := NewRateLimiter(int64(mbps) * 1024 * 1024 / 8)
@@ -173,10 +175,11 @@ func (m *Manager) AddMapping(ctx context.Context, vmId string, protocol string, 
 
 	m.mappings[vmId] = append(m.mappings[vmId], entry)
 	_ = m.db.SavePortForward(&db.PortForward{
-		Protocol:  protocol,
-		HostPort:  hostPort,
-		VMID:      vmId,
-		GuestPort: guestPort,
+		Protocol:    protocol,
+		HostPort:    hostPort,
+		VMID:        vmId,
+		GuestPort:   guestPort,
+		Description: description,
 	})
 	return nil
 }
@@ -222,7 +225,7 @@ func (m *Manager) SyncForVM(ctx context.Context, vmId string, desired []DesiredR
 
 	// 添加或更新期望的规则
 	for _, d := range desired {
-		_ = m.AddMapping(ctx, vmId, d.Protocol, d.HostPort, d.GuestPort, defaultMbps)
+		_ = m.AddMapping(ctx, vmId, d.Protocol, d.HostPort, d.GuestPort, defaultMbps, d.Description)
 	}
 
 	return nil
@@ -249,7 +252,7 @@ func (m *Manager) UpdateVMBandwidth(ctx context.Context, vmId string, mbps int) 
 
 	for _, e := range entries {
 		_ = m.RemoveMapping(ctx, vmId, e.Protocol, e.HostPort)
-		_ = m.AddMapping(ctx, vmId, e.Protocol, e.HostPort, e.GuestPort, mbps)
+		_ = m.AddMapping(ctx, vmId, e.Protocol, e.HostPort, e.GuestPort, mbps, e.Description)
 	}
 }
 

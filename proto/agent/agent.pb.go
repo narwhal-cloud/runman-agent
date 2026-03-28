@@ -672,6 +672,7 @@ type PortForwardEntry struct {
 	Protocol      Protocol               `protobuf:"varint,2,opt,name=protocol,proto3,enum=agent.Protocol" json:"protocol,omitempty"` // 协议
 	HostPort      int32                  `protobuf:"varint,3,opt,name=host_port,json=hostPort,proto3" json:"host_port,omitempty"`     // 宿主机端口
 	GuestPort     int32                  `protobuf:"varint,4,opt,name=guest_port,json=guestPort,proto3" json:"guest_port,omitempty"`  // VM 内部端口
+	Description   string                 `protobuf:"bytes,5,opt,name=description,proto3" json:"description,omitempty"`                // 备注
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -732,6 +733,13 @@ func (x *PortForwardEntry) GetGuestPort() int32 {
 		return x.GuestPort
 	}
 	return 0
+}
+
+func (x *PortForwardEntry) GetDescription() string {
+	if x != nil {
+		return x.Description
+	}
+	return ""
 }
 
 // VM 状态变化主动上报（不等心跳，状态变更时立即发送）
@@ -1090,7 +1098,6 @@ type PlatformEnvelope_GetVmInfo struct {
 }
 
 type PlatformEnvelope_UpdateVm struct {
-	// field 11 reserved (CmdSyncPortForwards removed)
 	UpdateVm *CmdUpdateVM `protobuf:"bytes,12,opt,name=update_vm,json=updateVm,proto3,oneof"` // 修改 VM 配置 (机主/管理员)
 }
 
@@ -1637,6 +1644,7 @@ type CmdSetPortForward struct {
 	Protocol      Protocol               `protobuf:"varint,2,opt,name=protocol,proto3,enum=agent.Protocol" json:"protocol,omitempty"` // 协议
 	HostPort      int32                  `protobuf:"varint,3,opt,name=host_port,json=hostPort,proto3" json:"host_port,omitempty"`     // 宿主机端口（1024-65535）
 	GuestPort     int32                  `protobuf:"varint,4,opt,name=guest_port,json=guestPort,proto3" json:"guest_port,omitempty"`  // VM 内部端口
+	Description   string                 `protobuf:"bytes,5,opt,name=description,proto3" json:"description,omitempty"`                // 备注，例如 "SSH"、"Web"
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1697,6 +1705,13 @@ func (x *CmdSetPortForward) GetGuestPort() int32 {
 		return x.GuestPort
 	}
 	return 0
+}
+
+func (x *CmdSetPortForward) GetDescription() string {
+	if x != nil {
+		return x.Description
+	}
+	return ""
 }
 
 // 删除端口转发规则
@@ -1906,13 +1921,14 @@ const file_proto_agent_agent_proto_rawDesc = "" +
 	"\x0fPortForwardList\x12\x1d\n" +
 	"\n" +
 	"command_id\x18\x01 \x01(\tR\tcommandId\x121\n" +
-	"\aentries\x18\x02 \x03(\v2\x17.agent.PortForwardEntryR\aentries\"\x90\x01\n" +
+	"\aentries\x18\x02 \x03(\v2\x17.agent.PortForwardEntryR\aentries\"\xb2\x01\n" +
 	"\x10PortForwardEntry\x12\x13\n" +
 	"\x05vm_id\x18\x01 \x01(\tR\x04vmId\x12+\n" +
 	"\bprotocol\x18\x02 \x01(\x0e2\x0f.agent.ProtocolR\bprotocol\x12\x1b\n" +
 	"\thost_port\x18\x03 \x01(\x05R\bhostPort\x12\x1d\n" +
 	"\n" +
-	"guest_port\x18\x04 \x01(\x05R\tguestPort\"x\n" +
+	"guest_port\x18\x04 \x01(\x05R\tguestPort\x12 \n" +
+	"\vdescription\x18\x05 \x01(\tR\vdescription\"x\n" +
 	"\x0eVMStatusUpdate\x12\x13\n" +
 	"\x05vm_id\x18\x01 \x01(\tR\x04vmId\x12'\n" +
 	"\x06status\x18\x02 \x01(\x0e2\x0f.agent.VMStatusR\x06status\x12\x18\n" +
@@ -1923,7 +1939,7 @@ const file_proto_agent_agent_proto_rawDesc = "" +
 	"command_id\x18\x01 \x01(\tR\tcommandId\x12\x18\n" +
 	"\asuccess\x18\x02 \x01(\bR\asuccess\x12\x14\n" +
 	"\x05error\x18\x03 \x01(\tR\x05error\x12\x12\n" +
-	"\x04data\x18\x04 \x01(\fR\x04data\"\xda\x05\n" +
+	"\x04data\x18\x04 \x01(\fR\x04data\"\xe0\x05\n" +
 	"\x10PlatformEnvelope\x12\x1d\n" +
 	"\n" +
 	"command_id\x18\x01 \x01(\tR\tcommandId\x121\n" +
@@ -1943,7 +1959,7 @@ const file_proto_agent_agent_proto_rawDesc = "" +
 	"\tupdate_vm\x18\f \x01(\v2\x12.agent.CmdUpdateVMH\x00R\bupdateVm\x12:\n" +
 	"\freinstall_vm\x18\r \x01(\v2\x15.agent.CmdReinstallVMH\x00R\vreinstallVm\x12?\n" +
 	"\rget_port_fwds\x18\x0e \x01(\v2\x19.agent.CmdGetPortForwardsH\x00R\vgetPortFwdsB\t\n" +
-	"\apayload\"\xce\x01\n" +
+	"\apayloadJ\x04\b\v\x10\f\"\xce\x01\n" +
 	"\x0eCmdReinstallVM\x12\x13\n" +
 	"\x05vm_id\x18\x01 \x01(\tR\x04vmId\x12\x19\n" +
 	"\bos_image\x18\x02 \x01(\tR\aosImage\x12#\n" +
@@ -1978,13 +1994,14 @@ const file_proto_agent_agent_proto_rawDesc = "" +
 	"\x05vm_id\x18\x01 \x01(\tR\x04vmId\"J\n" +
 	"\x10CmdResetPassword\x12\x13\n" +
 	"\x05vm_id\x18\x01 \x01(\tR\x04vmId\x12!\n" +
-	"\fnew_password\x18\x02 \x01(\tR\vnewPassword\"\x91\x01\n" +
+	"\fnew_password\x18\x02 \x01(\tR\vnewPassword\"\xb3\x01\n" +
 	"\x11CmdSetPortForward\x12\x13\n" +
 	"\x05vm_id\x18\x01 \x01(\tR\x04vmId\x12+\n" +
 	"\bprotocol\x18\x02 \x01(\x0e2\x0f.agent.ProtocolR\bprotocol\x12\x1b\n" +
 	"\thost_port\x18\x03 \x01(\x05R\bhostPort\x12\x1d\n" +
 	"\n" +
-	"guest_port\x18\x04 \x01(\x05R\tguestPort\"r\n" +
+	"guest_port\x18\x04 \x01(\x05R\tguestPort\x12 \n" +
+	"\vdescription\x18\x05 \x01(\tR\vdescription\"r\n" +
 	"\x11CmdDelPortForward\x12\x13\n" +
 	"\x05vm_id\x18\x01 \x01(\tR\x04vmId\x12+\n" +
 	"\bprotocol\x18\x02 \x01(\x0e2\x0f.agent.ProtocolR\bprotocol\x12\x1b\n" +

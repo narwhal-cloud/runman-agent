@@ -351,7 +351,7 @@ func (a *Agent) handleCommand(stream agent.AgentGateway_ConnectClient, env *agen
 		if conf, _ := a.db.GetVMConfig(p.SetPortFwd.VmId); conf != nil {
 			mbps = conf.BandwidthMbps
 		}
-		err = a.pf.AddMapping(ctx, p.SetPortFwd.VmId, proto, int(p.SetPortFwd.HostPort), int(p.SetPortFwd.GuestPort), mbps)
+		err = a.pf.AddMapping(ctx, p.SetPortFwd.VmId, proto, int(p.SetPortFwd.HostPort), int(p.SetPortFwd.GuestPort), mbps, p.SetPortFwd.Description)
 
 	case *agent.PlatformEnvelope_DelPortFwd:
 		proto := "tcp"
@@ -371,10 +371,11 @@ func (a *Agent) handleCommand(stream agent.AgentGateway_ConnectClient, env *agen
 					proto = agent.Protocol_PROTOCOL_UDP
 				}
 				entries = append(entries, &agent.PortForwardEntry{
-					VmId:      pf.VMID,
-					Protocol:  proto,
-					HostPort:  int32(pf.HostPort),
-					GuestPort: int32(pf.GuestPort),
+					VmId:        pf.VMID,
+					Protocol:    proto,
+					HostPort:    int32(pf.HostPort),
+					GuestPort:   int32(pf.GuestPort),
+					Description: pf.Description,
 				})
 			}
 			_ = stream.Send(&agent.AgentEnvelope{

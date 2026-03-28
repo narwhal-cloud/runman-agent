@@ -419,9 +419,10 @@ func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
 
 // portFwdEntry 是端口转发规则的 JSON 表示。
 type portFwdEntry struct {
-	Protocol  string `json:"protocol"`
-	HostPort  int    `json:"host_port"`
-	GuestPort int    `json:"guest_port"`
+	Protocol    string `json:"protocol"`
+	HostPort    int    `json:"host_port"`
+	GuestPort   int    `json:"guest_port"`
+	Description string `json:"description,omitempty"`
 }
 
 func (s *Server) handleListPortFwds(w http.ResponseWriter, r *http.Request) {
@@ -431,9 +432,10 @@ func (s *Server) handleListPortFwds(w http.ResponseWriter, r *http.Request) {
 	for _, e := range all {
 		if e.VMID == vmID {
 			result = append(result, portFwdEntry{
-				Protocol:  e.Protocol,
-				HostPort:  e.HostPort,
-				GuestPort: e.GuestPort,
+				Protocol:    e.Protocol,
+				HostPort:    e.HostPort,
+				GuestPort:   e.GuestPort,
+				Description: e.Description,
 			})
 		}
 	}
@@ -461,7 +463,7 @@ func (s *Server) handleAddPortFwd(w http.ResponseWriter, r *http.Request) {
 		mbps = conf.BandwidthMbps
 	}
 
-	if err := s.pf.AddMapping(r.Context(), vmID, req.Protocol, req.HostPort, req.GuestPort, mbps); err != nil {
+	if err := s.pf.AddMapping(r.Context(), vmID, req.Protocol, req.HostPort, req.GuestPort, mbps, req.Description); err != nil {
 		jsonErr(w, err, 500)
 		return
 	}
@@ -509,9 +511,10 @@ func (s *Server) handleSyncPortFwds(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		desired = append(desired, portforward.DesiredRule{
-			Protocol:  rule.Protocol,
-			HostPort:  rule.HostPort,
-			GuestPort: rule.GuestPort,
+			Protocol:    rule.Protocol,
+			HostPort:    rule.HostPort,
+			GuestPort:   rule.GuestPort,
+			Description: rule.Description,
 		})
 	}
 

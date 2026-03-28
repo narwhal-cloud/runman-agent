@@ -110,10 +110,11 @@ message PortForwardList {
 
 // 端口转发规则条目
 message PortForwardEntry {
-  string   vm_id      = 1; // VM UUID
-  Protocol protocol   = 2; // 协议
-  int32    host_port  = 3; // 宿主机端口
-  int32    guest_port = 4; // VM 内部端口
+  string   vm_id       = 1; // VM UUID
+  Protocol protocol    = 2; // 协议
+  int32    host_port   = 3; // 宿主机端口
+  int32    guest_port  = 4; // VM 内部端口
+  string   description = 5; // 备注
 }
 
 // VM 状态变化主动上报（不等心跳，状态变更时立即发送）
@@ -141,6 +142,8 @@ message CommandResult {
 message PlatformEnvelope {
   // 平台生成的唯一命令 ID（持久化到 DB，用于重放）
   string command_id = 1;
+
+  reserved 11; // 原 sync_port_fwds (CmdSyncPortForwards)，已废弃，禁止复用
 
   oneof payload {
     CmdCreateVM         create_vm       = 2;  // 创建 VM
@@ -218,10 +221,11 @@ message CmdResetPassword {
 
 // 新增端口转发规则（宿主机端口 → VM 内部端口）
 message CmdSetPortForward {
-  string   vm_id      = 1; // VM UUID
-  Protocol protocol   = 2; // 协议
-  int32    host_port  = 3; // 宿主机端口（1024-65535）
-  int32    guest_port = 4; // VM 内部端口
+  string   vm_id       = 1; // VM UUID
+  Protocol protocol    = 2; // 协议
+  int32    host_port   = 3; // 宿主机端口（1024-65535）
+  int32    guest_port  = 4; // VM 内部端口
+  string   description = 5; // 备注，例如 "SSH"、"Web"
 }
 
 // 删除端口转发规则
