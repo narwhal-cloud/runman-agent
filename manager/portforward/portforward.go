@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"runman-agent/db"
 	"runman-agent/manager"
 	"sync"
 	"time"
@@ -94,12 +95,26 @@ type Manager struct {
 	mu       sync.RWMutex
 	mappings map[string][]*Entry
 	mgr      manager.VMManager
+	db       *db.DB
 }
 
-func New(mgr manager.VMManager) *Manager {
+func New(mgr manager.VMManager, database *db.DB) *Manager {
 	return &Manager{
 		mappings: make(map[string][]*Entry),
 		mgr:      mgr,
+		db:       database,
+	}
+}
+
+// Restore 启动时从 DB 恢复所有持久化的端口转发规则。
+func (m *Manager) Restore(ctx context.Context) {
+	all, err := m.db.ListAllPortForwards()
+	if err != nil {
+		return
+	}
+	for _, pf := range all {
+		mbps := 0
+		_ = m.AddMapping(ctx, pf.VMID, pf.Protocol, pf.HostPort, pf.GuestPort, mbps)
 	}
 }
 
@@ -157,6 +172,12 @@ func (m *Manager) AddMapping(ctx context.Context, vmId string, protocol string, 
 	}
 
 	m.mappings[vmId] = append(m.mappings[vmId], entry)
+	_ = m.db.SavePortForward(&db.PortForward{
+		Protocol:  protocol,
+		HostPort:  hostPort,
+		VMID:      vmId,
+		GuestPort: guestPort,
+	})
 	return nil
 }
 
@@ -172,6 +193,7 @@ func (m *Manager) RemoveMapping(ctx context.Context, vmId string, protocol strin
 				e.ln.Close()
 			}
 			m.mappings[vmId] = append(entries[:i], entries[i+1:]...)
+			_ = m.db.DeletePortForward(protocol, hostPort)
 			return nil
 		}
 	}
@@ -204,6 +226,18 @@ func (m *Manager) SyncForVM(ctx context.Context, vmId string, desired []DesiredR
 	}
 
 	return nil
+}
+
+// DeleteVM 删除某 VM 的所有转发规则（内存 + DB）
+func (m *Manager) DeleteVM(ctx context.Context, vmId string) {
+	m.mu.RLock()
+	entries := make([]*Entry, len(m.mappings[vmId]))
+	copy(entries, m.mappings[vmId])
+	m.mu.RUnlock()
+	for _, e := range entries {
+		_ = m.RemoveMapping(ctx, vmId, e.Protocol, e.HostPort)
+	}
+	_ = m.db.DeletePortForwardsForVM(vmId)
 }
 
 // UpdateVMBandwidth 带宽变更时重建该 VM 所有转发规则并应用新限速

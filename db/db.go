@@ -27,6 +27,14 @@ type VMConfig struct {
 	Cpuset        string // 分配给该 VM 的 cpuset，如 "0-2" 或 "0,3,5"
 }
 
+// PortForward 持久化端口转发规则。(Protocol, HostPort) 联合主键保证宿主机端口唯一。
+type PortForward struct {
+	Protocol  string `gorm:"primaryKey"`
+	HostPort  int    `gorm:"primaryKey"`
+	VMID      string `gorm:"index"`
+	GuestPort int
+}
+
 type Traffic struct {
 	VMID     string `gorm:"primaryKey"`
 	RawIn    int64
@@ -47,7 +55,7 @@ func Init(path string) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	_ = db.AutoMigrate(&Traffic{}, &VMConfig{}, &Config{})
+	_ = db.AutoMigrate(&Traffic{}, &VMConfig{}, &Config{}, &PortForward{})
 
 	// Ensure default config exists
 	var count int64
@@ -88,6 +96,31 @@ func (d *DB) ListVMConfigs() ([]*VMConfig, error) {
 
 func (d *DB) DeleteVMConfig(vmId string) error {
 	return d.orm.Delete(&VMConfig{}, "vm_id = ?", vmId).Error
+}
+
+// 端口转发持久化
+func (d *DB) SavePortForward(pf *PortForward) error {
+	return d.orm.Save(pf).Error
+}
+
+func (d *DB) DeletePortForward(protocol string, hostPort int) error {
+	return d.orm.Delete(&PortForward{}, "protocol = ? AND host_port = ?", protocol, hostPort).Error
+}
+
+func (d *DB) ListPortForwards(vmId string) ([]*PortForward, error) {
+	var list []*PortForward
+	err := d.orm.Where("vm_id = ?", vmId).Find(&list).Error
+	return list, err
+}
+
+func (d *DB) ListAllPortForwards() ([]*PortForward, error) {
+	var list []*PortForward
+	err := d.orm.Find(&list).Error
+	return list, err
+}
+
+func (d *DB) DeletePortForwardsForVM(vmId string) error {
+	return d.orm.Delete(&PortForward{}, "vm_id = ?", vmId).Error
 }
 
 // UpdateTraffic 流量统计逻辑

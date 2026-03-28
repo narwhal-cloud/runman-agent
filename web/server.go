@@ -179,7 +179,20 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListVMs(w http.ResponseWriter, r *http.Request) {
 	vms, _ := s.mgr.ListVMs(r.Context())
-	jsonOK(w, vms)
+
+	type vmItem struct {
+		*agent.VMSummary
+		RamTotalMb int64 `json:"ram_total_mb,omitempty"`
+	}
+	items := make([]vmItem, len(vms))
+	for i, vm := range vms {
+		item := vmItem{VMSummary: vm}
+		if conf, _ := s.db.GetVMConfig(vm.VmId); conf != nil {
+			item.RamTotalMb = conf.MemoryMB
+		}
+		items[i] = item
+	}
+	jsonOK(w, items)
 }
 
 // createVMRequest 对应 POST /api/vms 请求体。
@@ -224,16 +237,7 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 与 main.go handleCommand 保持一致：创建成功后持久化 VMConfig
-	_ = s.db.SaveVMConfig(&db.VMConfig{
-		VMID:          req.VmId,
-		LocalID:       req.VmId,
-		BandwidthMbps: int(req.BandwidthMbps),
-		CPU:           int(req.Cpu),
-		MemoryMB:      req.RamMb,
-		Image:         req.OsImage,
-		Cpuset:        manager.CpusetFrom(ctx),
-	})
+	// VMService.CreateVM 内部已持久化 VMConfig（含 cpuset）
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)

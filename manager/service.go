@@ -44,8 +44,16 @@ func (s *VMService) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error 
 		s.alloc.Release(cpuset)
 		return err
 	}
-	// cpuset 持久化到 DB，由调用方（main.go handleCommand）在 SaveVMConfig 时写入
-	// 这里通过 context 传回，调用方从 ctx 中读取
+	_ = s.db.SaveVMConfig(&db.VMConfig{
+		VMID:          req.VmId,
+		LocalID:       req.VmId,
+		BandwidthMbps: int(req.BandwidthMbps),
+		CPU:           int(req.Cpu),
+		MemoryMB:      req.RamMb,
+		Image:         req.OsImage,
+		Cpuset:        cpuset,
+		Status:        "running",
+	})
 	return nil
 }
 

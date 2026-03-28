@@ -46,10 +46,10 @@ message AgentEnvelope {
   string message_id = 1;
 
   oneof payload {
-    Heartbeat         heartbeat       = 2; // 心跳（每 30 秒上报一次）
-    VMStatusUpdate    vm_update       = 3; // VM 状态变化主动上报
-    CommandResult     cmd_result      = 4; // 平台命令的执行结果
-    PortForwardReport port_fwd_report = 5; // 端口转发规则全量上报（启动 & 定期同步）
+    Heartbeat       heartbeat     = 2; // 心跳（每 30 秒上报一次）
+    VMStatusUpdate  vm_update     = 3; // VM 状态变化主动上报
+    CommandResult   cmd_result    = 4; // 平台命令的执行结果
+    PortForwardList port_fwd_list = 5; // CmdGetPortForwards 的响应
   }
 }
 
@@ -69,6 +69,7 @@ message Heartbeat {
   int64  ram_total_mb = 16; // 总内存 (MB)
   int64  disk_total_gb = 17; // 总磁盘 (GB)
   int32  bandwidth_mbps = 18; // 总带宽 (Mbps)
+  string virt_type      = 19; // 虚拟化类型 (podman / cloudhv)
 
   // 当前宿主机上所有 VM 的简要状态，用于平台侧对账。
   repeated VMSummary vms = 7;
@@ -101,20 +102,18 @@ message VMSummary {
   int64    monthly_traffic_out = 9; // 本月累计出站流量 (bytes)
 }
 
+// CmdGetPortForwards 的响应，携带 command_id 与请求关联
+message PortForwardList {
+  string                  command_id = 1;
+  repeated PortForwardEntry entries  = 2;
+}
+
 // 端口转发规则条目
 message PortForwardEntry {
   string   vm_id      = 1; // VM UUID
   Protocol protocol   = 2; // 协议
   int32    host_port  = 3; // 宿主机端口
   int32    guest_port = 4; // VM 内部端口
-}
-
-// Agent 主动上报当前实际生效的全量端口转发规则。
-// 平台收到后与 DB 对比，推送差量命令（新增 / 删除）。
-// 触发时机：Agent 启动时 & 定期（建议每 5 分钟）。
-message PortForwardReport {
-  // 宿主机上所有 VM 当前实际生效的端口转发规则
-  repeated PortForwardEntry entries = 1;
 }
 
 // VM 状态变化主动上报（不等心跳，状态变更时立即发送）
@@ -144,18 +143,18 @@ message PlatformEnvelope {
   string command_id = 1;
 
   oneof payload {
-    CmdCreateVM        create_vm       = 2;  // 创建 VM
-    CmdStartVM         start_vm        = 3;  // 启动 VM
-    CmdStopVM          stop_vm         = 4;  // 关闭 VM
-    CmdRestartVM       restart_vm      = 5;  // 重启 VM
-    CmdDeleteVM        delete_vm       = 6;  // 销毁 VM
-    CmdResetPassword   reset_password  = 7;  // 重置 root 密码
-    CmdSetPortForward  set_port_fwd    = 8;  // 新增单条端口转发规则
-    CmdDelPortForward  del_port_fwd    = 9;  // 删除单条端口转发规则
-    CmdGetVMInfo       get_vm_info     = 10; // 查询 VM 详情
-    CmdSyncPortForwards sync_port_fwds = 11; // 全量同步某 VM 的端口转发规则（Agent 以此为准）
-    CmdUpdateVM        update_vm       = 12; // 修改 VM 配置 (机主/管理员)
-    CmdReinstallVM     reinstall_vm    = 13; // 重装 VM 系统
+    CmdCreateVM         create_vm       = 2;  // 创建 VM
+    CmdStartVM          start_vm        = 3;  // 启动 VM
+    CmdStopVM           stop_vm         = 4;  // 关闭 VM
+    CmdRestartVM        restart_vm      = 5;  // 重启 VM
+    CmdDeleteVM         delete_vm       = 6;  // 销毁 VM
+    CmdResetPassword    reset_password  = 7;  // 重置 root 密码
+    CmdSetPortForward   set_port_fwd    = 8;  // 新增单条端口转发规则
+    CmdDelPortForward   del_port_fwd    = 9;  // 删除单条端口转发规则
+    CmdGetVMInfo        get_vm_info     = 10; // 查询 VM 详情
+    CmdUpdateVM         update_vm       = 12; // 修改 VM 配置 (机主/管理员)
+    CmdReinstallVM      reinstall_vm    = 13; // 重装 VM 系统
+    CmdGetPortForwards  get_port_fwds   = 14; // 查询某 VM 的端口转发规则列表
   }
 }
 
@@ -237,18 +236,7 @@ message CmdGetVMInfo {
   string vm_id = 1; // VM UUID
 }
 
-// 全量同步某 VM 的端口转发规则。
-// Agent 收到后以此列表为权威，补充缺失、清除多余。
-message CmdSyncPortForwards {
+// 查询某 VM 的端口转发规则列表（结果通过 CommandResult.data JSON 回传）
+message CmdGetPortForwards {
   string vm_id = 1; // VM UUID
-
-  // 该 VM 期望生效的完整端口转发规则列表（空列表 = 清除全部）
-  repeated PortForwardRule rules = 2;
-}
-
-// 单条端口转发规则（用于 CmdSyncPortForwards）
-message PortForwardRule {
-  Protocol protocol   = 1; // 协议
-  int32    host_port  = 2; // 宿主机端口（1024-65535）
-  int32    guest_port = 3; // VM 内部端口
 }

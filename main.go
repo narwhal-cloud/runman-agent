@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"runman-agent/db"
 	"runman-agent/manager"
 	"runman-agent/manager/cloudhv"
@@ -42,6 +43,7 @@ func main() {
 	socketPath := flag.String("socket", "unix:///run/podman/podman.sock", "podman api socket path")
 	virtType := flag.String("type", "podman", "virtualization type")
 	flag.Parse()
+	log.SetOutput(os.Stdout)
 
 	database, err := db.Init(*dbPath)
 	if err != nil {
@@ -81,11 +83,15 @@ func main() {
 
 	hostMon := monitor.NewHostMonitor()
 
+	pf := portforward.New(svc, database)
+	// 启动时从 DB 恢复已持久化的端口转发规则
+	pf.Restore(context.Background())
+
 	a := &Agent{
 		db:      database,
 		mgr:     svc,
 		hostMon: hostMon,
-		pf:      portforward.New(svc),
+		pf:      pf,
 		config:  conf,
 	}
 
@@ -178,10 +184,8 @@ func (a *Agent) connectAndLoop() error {
 
 	// 连接后立即上报一次状态，无需等待第一个 ticker
 	go a.sendHeartbeat(stream)
-	go a.sendPortForwardReport(stream)
 
 	go a.heartbeatLoop(stream)
-	go a.portForwardReportLoop(stream)
 
 	for {
 		env, err := stream.Recv()
@@ -210,16 +214,24 @@ func (a *Agent) sendHeartbeat(stream agent.AgentGateway_ConnectClient) {
 		return
 	}
 	hb := hostStats.Heartbeat
+	hb.VirtType = a.config.VirtType
 
 	vms, _ := a.mgr.ListVMs(ctx)
 	images, _ := a.mgr.GetSupportedImages(ctx)
 
-	// 将本次采集到的流量增量累加到 DB，并写回累计值及当月统计
+	// 将本次采集到的流量增量累加到 DB，并写回累计值及当月统计；同步容器真实状态
 	currentMonth := time.Now().Format("2006-01")
 	for _, vm := range vms {
 		totalIn, totalOut, monthIn, monthOut, _ := a.db.UpdateTraffic(vm.VmId, vm.TrafficInBytes, vm.TrafficOutBytes, currentMonth)
 		vm.TrafficInBytes, vm.TrafficOutBytes = totalIn, totalOut
 		vm.MonthlyTrafficIn, vm.MonthlyTrafficOut = monthIn, monthOut
+
+		if conf, err := a.db.GetVMConfig(vm.VmId); err == nil {
+			if s := vmStatusString(vm.Status); s != "" && conf.Status != s {
+				conf.Status = s
+				_ = a.db.SaveVMConfig(conf)
+			}
+		}
 	}
 	hb.Vms = vms
 	hb.OsImages = images
@@ -244,39 +256,6 @@ func (a *Agent) heartbeatLoop(stream agent.AgentGateway_ConnectClient) {
 	}
 }
 
-// portForwardReportLoop 每 5 分钟上报当前所有端口转发规则，流断开时退出。
-func (a *Agent) portForwardReportLoop(stream agent.AgentGateway_ConnectClient) {
-	ticker := time.NewTicker(5 * time.Minute)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-stream.Context().Done():
-			return
-		case <-ticker.C:
-			a.sendPortForwardReport(stream)
-		}
-	}
-}
-
-// sendPortForwardReport 将内存中所有活跃的端口转发规则上报给平台。
-func (a *Agent) sendPortForwardReport(stream agent.AgentGateway_ConnectClient) {
-	mappings := a.pf.GetReport()
-	var entries []*agent.PortForwardEntry
-	for _, m := range mappings {
-		protocol := agent.Protocol_PROTOCOL_TCP
-		if m.Protocol == "udp" {
-			protocol = agent.Protocol_PROTOCOL_UDP
-		}
-		entries = append(entries, &agent.PortForwardEntry{
-			VmId: m.VMID, Protocol: protocol, HostPort: int32(m.HostPort), GuestPort: int32(m.GuestPort),
-		})
-	}
-	_ = stream.Send(&agent.AgentEnvelope{
-		MessageId: uuid.NewString(),
-		Payload:   &agent.AgentEnvelope_PortFwdReport{PortFwdReport: &agent.PortForwardReport{Entries: entries}},
-	})
-}
-
 // handleCommand 处理平台下发的单条命令，执行完毕后通过 stream 回复结果。
 // 每条命令在独立 goroutine 中执行，不阻塞主接收循环。
 func (a *Agent) handleCommand(stream agent.AgentGateway_ConnectClient, env *agent.PlatformEnvelope) {
@@ -288,21 +267,8 @@ func (a *Agent) handleCommand(stream agent.AgentGateway_ConnectClient, env *agen
 
 	switch p := env.Payload.(type) {
 	case *agent.PlatformEnvelope_CreateVm:
+		// VMService.CreateVM 内部已持久化 VMConfig（含 cpuset）
 		err = a.mgr.CreateVM(ctx, p.CreateVm)
-		if err == nil {
-			// 创建成功后将配置持久化，供端口转发限速等功能读取。
-			// LocalID 记录底层虚拟化实际使用的标识符（podman 下为容器名，与 VmId 相同）。
-			// Cpuset 由 VMService.CreateVM 分配并注入 ctx，此处读回持久化。
-			_ = a.db.SaveVMConfig(&db.VMConfig{
-				VMID:          p.CreateVm.VmId,
-				LocalID:       p.CreateVm.VmId,
-				BandwidthMbps: int(p.CreateVm.BandwidthMbps),
-				CPU:           int(p.CreateVm.Cpu),
-				MemoryMB:      p.CreateVm.RamMb,
-				Image:         p.CreateVm.OsImage,
-				Cpuset:        manager.CpusetFrom(ctx),
-			})
-		}
 
 	case *agent.PlatformEnvelope_UpdateVm:
 		err = a.mgr.UpdateVM(ctx, p.UpdateVm)
@@ -353,6 +319,7 @@ func (a *Agent) handleCommand(stream agent.AgentGateway_ConnectClient, env *agen
 		err = a.mgr.DeleteVM(ctx, p.DeleteVm.VmId)
 		// 无论删除是否成功都清理 DB 记录，避免残留脏数据
 		_ = a.db.DeleteVMConfig(p.DeleteVm.VmId)
+		a.pf.DeleteVM(ctx, p.DeleteVm.VmId)
 
 	case *agent.PlatformEnvelope_StartVm:
 		err = a.mgr.StartVM(ctx, p.StartVm.VmId)
@@ -393,25 +360,34 @@ func (a *Agent) handleCommand(stream agent.AgentGateway_ConnectClient, env *agen
 		}
 		err = a.pf.RemoveMapping(ctx, p.DelPortFwd.VmId, proto, int(p.DelPortFwd.HostPort))
 
-	case *agent.PlatformEnvelope_SyncPortFwds:
-		// 以平台下发的规则列表为准，全量对齐本地转发状态
-		mbps := 0
-		if conf, _ := a.db.GetVMConfig(p.SyncPortFwds.VmId); conf != nil {
-			mbps = conf.BandwidthMbps
-		}
-		var desired []portforward.DesiredRule
-		for _, e := range p.SyncPortFwds.Rules {
-			proto := "tcp"
-			if e.Protocol == agent.Protocol_PROTOCOL_UDP {
-				proto = "udp"
+	case *agent.PlatformEnvelope_GetPortFwds:
+		var pfList []*db.PortForward
+		pfList, err = a.db.ListPortForwards(p.GetPortFwds.VmId)
+		if err == nil {
+			entries := make([]*agent.PortForwardEntry, 0, len(pfList))
+			for _, pf := range pfList {
+				proto := agent.Protocol_PROTOCOL_TCP
+				if pf.Protocol == "udp" {
+					proto = agent.Protocol_PROTOCOL_UDP
+				}
+				entries = append(entries, &agent.PortForwardEntry{
+					VmId:      pf.VMID,
+					Protocol:  proto,
+					HostPort:  int32(pf.HostPort),
+					GuestPort: int32(pf.GuestPort),
+				})
 			}
-			desired = append(desired, portforward.DesiredRule{
-				Protocol:  proto,
-				HostPort:  int(e.HostPort),
-				GuestPort: int(e.GuestPort),
+			_ = stream.Send(&agent.AgentEnvelope{
+				MessageId: uuid.NewString(),
+				Payload: &agent.AgentEnvelope_PortFwdList{
+					PortFwdList: &agent.PortForwardList{
+						CommandId: env.CommandId,
+						Entries:   entries,
+					},
+				},
 			})
+			return // 已单独回复，跳过末尾的 CommandResult
 		}
-		err = a.pf.SyncForVM(ctx, p.SyncPortFwds.VmId, desired, mbps)
 	}
 
 	res := &agent.CommandResult{CommandId: env.CommandId, Success: err == nil}
@@ -424,4 +400,20 @@ func (a *Agent) handleCommand(stream agent.AgentGateway_ConnectClient, env *agen
 		MessageId: uuid.NewString(),
 		Payload:   &agent.AgentEnvelope_CmdResult{CmdResult: res},
 	})
+}
+
+// vmStatusString 将 proto VMStatus 枚举转为 DB 存储的状态字符串。
+func vmStatusString(s agent.VMStatus) string {
+	switch s {
+	case agent.VMStatus_VM_STATUS_RUNNING:
+		return "running"
+	case agent.VMStatus_VM_STATUS_STOPPED:
+		return "stopped"
+	case agent.VMStatus_VM_STATUS_CREATING:
+		return "creating"
+	case agent.VMStatus_VM_STATUS_ERROR:
+		return "error"
+	default:
+		return ""
+	}
 }

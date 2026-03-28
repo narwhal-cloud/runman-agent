@@ -340,6 +340,7 @@
     .input:focus { ring: 2px; border-color:#6366f1; box-shadow:0 0 0 2px rgba(99,102,241,.2); }
     select.input { background-color:#fff; }
     .btn-action { display:inline-flex; align-items:center; justify-content:center; width:1.75rem; height:1.75rem; border-radius:.375rem; font-size:.75rem; transition:background-color .15s; cursor:pointer; }
+    .btn-txt { display:inline-flex; align-items:center; gap:0.2rem; padding:0.2rem 0.45rem; border-radius:.375rem; font-size:.65rem; font-weight:700; letter-spacing:.02em; transition:background-color .15s; cursor:pointer; white-space:nowrap; }
 </style>
 
 <script>
@@ -437,22 +438,22 @@ async function refreshVMs() {
             <td class="px-4 py-3">${vmStatusLabel(vm.status)}</td>
             <td class="px-4 py-3 text-xs space-y-0.5">
                 <div class="text-slate-500"><span class="text-[9px] font-bold uppercase w-8 inline-block">CPU</span> ${(vm.cpu_pct||0).toFixed(1)}%</div>
-                <div class="text-slate-500"><span class="text-[9px] font-bold uppercase w-8 inline-block">RAM</span> ${vm.ram_used_mb||0} MB</div>
+                <div class="text-slate-500"><span class="text-[9px] font-bold uppercase w-8 inline-block">RAM</span> ${vm.ram_used_mb||0}/${vm.ram_total_mb||'?'} MB</div>
             </td>
             <td class="px-4 py-3 font-mono text-[10px] text-slate-400 space-y-0.5">
                 <div>↓ ${formatBytes(vm.traffic_in_bytes||0)}</div>
                 <div>↑ ${formatBytes(vm.traffic_out_bytes||0)}</div>
             </td>
             <td class="px-4 py-3">
-                <div class="flex items-center justify-center gap-1 flex-wrap">
+                <div class="flex items-center gap-1 flex-wrap">
                     ${vm.status===2
-                        ? `<button class="btn-action bg-yellow-100 text-yellow-700 hover:bg-yellow-200" title="Stop" onclick="quickStop('${vm.vm_id}')">⏹</button>
-                           <button class="btn-action bg-sky-100 text-sky-700 hover:bg-sky-200" title="Restart" onclick="quickAction('${vm.vm_id}','restart')">⟳</button>`
-                        : `<button class="btn-action bg-green-100 text-green-700 hover:bg-green-200" title="Start" onclick="quickAction('${vm.vm_id}','start')">▶</button>`
+                        ? `<button class="btn-txt bg-yellow-100 text-yellow-700 hover:bg-yellow-200" onclick="quickStop('${vm.vm_id}')">⏹ Stop</button>
+                           <button class="btn-txt bg-sky-100 text-sky-700 hover:bg-sky-200" onclick="quickAction('${vm.vm_id}','restart')">↺ Restart</button>`
+                        : `<button class="btn-txt bg-green-100 text-green-700 hover:bg-green-200" onclick="quickAction('${vm.vm_id}','start')">▶ Start</button>`
                     }
-                    <button class="btn-action bg-purple-100 text-purple-700 hover:bg-purple-200" title="Port Forwards" onclick="openPortFwds('${vm.vm_id}')">⇄</button>
-                    <button class="btn-action bg-gray-800 text-green-400 hover:bg-gray-700" title="Console" onclick="openConsole('${vm.vm_id}')">⊞</button>
-                    <button class="btn-action bg-indigo-100 text-indigo-700 hover:bg-indigo-200" title="Manage" onclick="openManage('${vm.vm_id}')">⚙</button>
+                    <button class="btn-txt bg-purple-100 text-purple-700 hover:bg-purple-200" onclick="openPortFwds('${vm.vm_id}')">⇄ Port Fwds</button>
+                    <button class="btn-txt bg-gray-800 text-green-400 hover:bg-gray-700" onclick="openConsole('${vm.vm_id}')">⊞ Console</button>
+                    <button class="btn-txt bg-indigo-100 text-indigo-700 hover:bg-indigo-200" onclick="openManage('${vm.vm_id}')">⚙ Manage</button>
                 </div>
             </td>
         </tr>`).join('');
