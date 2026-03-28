@@ -21,7 +21,7 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// VM 运行状态
+// VM 运行状态（Agent 只上报运行时状态，到期/删除由平台侧管理）
 type VMStatus int32
 
 const (
@@ -29,9 +29,7 @@ const (
 	VMStatus_VM_STATUS_CREATING    VMStatus = 1 // 创建中（等待 Agent 回报）
 	VMStatus_VM_STATUS_RUNNING     VMStatus = 2 // 运行中
 	VMStatus_VM_STATUS_STOPPED     VMStatus = 3 // 已停止
-	VMStatus_VM_STATUS_EXPIRED     VMStatus = 4 // 已到期
-	VMStatus_VM_STATUS_DELETED     VMStatus = 5 // 已删除
-	VMStatus_VM_STATUS_ERROR       VMStatus = 6 // 异常
+	VMStatus_VM_STATUS_ERROR       VMStatus = 4 // 异常
 )
 
 // Enum value maps for VMStatus.
@@ -41,18 +39,14 @@ var (
 		1: "VM_STATUS_CREATING",
 		2: "VM_STATUS_RUNNING",
 		3: "VM_STATUS_STOPPED",
-		4: "VM_STATUS_EXPIRED",
-		5: "VM_STATUS_DELETED",
-		6: "VM_STATUS_ERROR",
+		4: "VM_STATUS_ERROR",
 	}
 	VMStatus_value = map[string]int32{
 		"VM_STATUS_UNSPECIFIED": 0,
 		"VM_STATUS_CREATING":    1,
 		"VM_STATUS_RUNNING":     2,
 		"VM_STATUS_STOPPED":     3,
-		"VM_STATUS_EXPIRED":     4,
-		"VM_STATUS_DELETED":     5,
-		"VM_STATUS_ERROR":       6,
+		"VM_STATUS_ERROR":       4,
 	}
 )
 
@@ -2009,15 +2003,13 @@ const file_proto_agent_agent_proto_rawDesc = "" +
 	"\fCmdGetVMInfo\x12\x13\n" +
 	"\x05vm_id\x18\x01 \x01(\tR\x04vmId\")\n" +
 	"\x12CmdGetPortForwards\x12\x13\n" +
-	"\x05vm_id\x18\x01 \x01(\tR\x04vmId*\xae\x01\n" +
+	"\x05vm_id\x18\x01 \x01(\tR\x04vmId*\x80\x01\n" +
 	"\bVMStatus\x12\x19\n" +
 	"\x15VM_STATUS_UNSPECIFIED\x10\x00\x12\x16\n" +
 	"\x12VM_STATUS_CREATING\x10\x01\x12\x15\n" +
 	"\x11VM_STATUS_RUNNING\x10\x02\x12\x15\n" +
-	"\x11VM_STATUS_STOPPED\x10\x03\x12\x15\n" +
-	"\x11VM_STATUS_EXPIRED\x10\x04\x12\x15\n" +
-	"\x11VM_STATUS_DELETED\x10\x05\x12\x13\n" +
-	"\x0fVM_STATUS_ERROR\x10\x06*H\n" +
+	"\x11VM_STATUS_STOPPED\x10\x03\x12\x13\n" +
+	"\x0fVM_STATUS_ERROR\x10\x04*H\n" +
 	"\bProtocol\x12\x18\n" +
 	"\x14PROTOCOL_UNSPECIFIED\x10\x00\x12\x10\n" +
 	"\fPROTOCOL_TCP\x10\x01\x12\x10\n" +
