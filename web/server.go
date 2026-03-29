@@ -33,14 +33,16 @@ type Server struct {
 	mgr     manager.VMManager
 	hostMon *monitor.HostMonitor
 	pf      *portforward.Manager
+	agent   interface{}
 }
 
-func NewServer(database *db.DB, mgr manager.VMManager, hostMon *monitor.HostMonitor, pf *portforward.Manager) *Server {
+func NewServer(database *db.DB, mgr manager.VMManager, hostMon *monitor.HostMonitor, pf *portforward.Manager, agent interface{}) *Server {
 	return &Server{
 		db:      database,
 		mgr:     mgr,
 		hostMon: hostMon,
 		pf:      pf,
+		agent:   agent,
 	}
 }
 
@@ -51,6 +53,7 @@ func (s *Server) ListenAndServe(addr string) error {
 	mux.HandleFunc("/api/status", s.handleStatus)
 	mux.HandleFunc("/api/config", s.handleConfig)
 	mux.HandleFunc("/api/system/info", s.handleSystemInfo)
+	mux.HandleFunc("/api/connection", s.handleConnection)
 
 	// 镜像列表
 	mux.HandleFunc("GET /api/images", s.handleImages)
@@ -162,6 +165,20 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	conf, _ := s.db.GetConfig()
 	jsonOK(w, conf)
+}
+
+func (s *Server) handleConnection(w http.ResponseWriter, r *http.Request) {
+	var connected bool
+	var errMsg string
+	if s.agent != nil {
+		if a, ok := s.agent.(interface{ GetConnStatus() (bool, string) }); ok {
+			connected, errMsg = a.GetConnStatus()
+		}
+	}
+	jsonOK(w, map[string]interface{}{
+		"connected": connected,
+		"error":     errMsg,
+	})
 }
 
 // ─── 镜像 ──────────────────────────────────────────────────────────────────────

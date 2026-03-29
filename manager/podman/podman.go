@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +26,12 @@ import (
 
 	"runman-agent/manager"
 	"runman-agent/proto/agent"
+)
+
+const (
+	networkName = "narwhal-net"
+	networkCIDR = "192.168.250.0/24"
+	macPrefix   = "52:54:00:00:01"
 )
 
 func ptr[T any](v T) *T { return &v }
@@ -45,13 +52,64 @@ func New(socketPath string) (*Manager, error) {
 	if _, err = bindings.GetClient(pingCtx); err != nil {
 		return nil, err
 	}
-	return &Manager{ctx: ctx}, nil
+
+	mgr := &Manager{ctx: ctx}
+	// 延迟初始化网络：在首次创建容器时检查和创建网络
+
+	return mgr, nil
 }
 
 func (m *Manager) timeoutCtx() context.Context {
 	ctx, cancel := context.WithTimeout(m.ctx, time.Minute)
 	_ = cancel // 调用方无需提前取消；超时本身会清理资源
 	return ctx
+}
+
+// ensureNetwork 确保 Narwhal 网络存在，如果不存在则创建
+func (m *Manager) ensureNetwork() error {
+	// 先尝试检查网络是否已存在
+	ctx := m.timeoutCtx()
+	checkCmd := exec.CommandContext(ctx, "podman", "network", "inspect", networkName)
+	if err := checkCmd.Run(); err == nil {
+		// 网络已存在
+		return nil
+	}
+
+	// 网络不存在，尝试创建
+	cmd := exec.CommandContext(ctx, "podman", "network", "create",
+		"--subnet="+networkCIDR,
+		networkName)
+
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		stdout_ := stdout.String()
+		stderr_ := stderr.String()
+
+		// 检查是否是网络已存在的错误（可能是并发创建）
+		if strings.Contains(stdout_, "already exists") ||
+			strings.Contains(stderr_, "already exists") ||
+			strings.Contains(stdout_, "network already exists") ||
+			strings.Contains(stderr_, "network already exists") {
+			return nil // 网络已存在（可能被其他进程创建），不是错误
+		}
+
+		// 其他错误 - 返回详细信息供用户手动处理
+		errDetail := stderr_
+		if errDetail == "" {
+			errDetail = err.Error()
+		}
+		return fmt.Errorf(
+			"failed to create podman network '%s':\n"+
+				"  Error: %s\n"+
+				"  Please create it manually:\n"+
+				"    sudo podman network create --subnet=%s %s",
+			networkName, errDetail, networkCIDR, networkName,
+		)
+	}
+	return nil
 }
 
 func buildResourceConfig(cpu int64, ramMb int64, cpuset string) specgen.ContainerResourceConfig {
@@ -103,6 +161,11 @@ func lxcfsMounts() []specs.Mount {
 }
 
 func (m *Manager) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error {
+	// 0. 确保网络存在
+	if err := m.ensureNetwork(); err != nil {
+		return fmt.Errorf("ensure network: %w", err)
+	}
+
 	// 1. 拉取镜像
 	_, err := images.Pull(m.timeoutCtx(), req.OsImage, &images.PullOptions{
 		Policy: ptr("newer"),
@@ -111,7 +174,31 @@ func (m *Manager) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error {
 		return err
 	}
 
-	// 2. 创建容器，podman IPAM 自动分配 IP 和 MAC
+	// 获取 context 中的 IP 和 MAC 地址（如果有的话）
+	ipAddr := manager.IPAddressFrom(ctx)
+	macAddr := manager.MacAddressFrom(ctx)
+
+	// 2. 创建容器，如果没有指定就由 podman IPAM 自动分配 IP 和 MAC
+	netOpt := netTypes.PerNetworkOptions{}
+
+	// 如果有指定的 IP 就使用
+	if ipAddr != "" {
+		if parsedIP := net.ParseIP(ipAddr); parsedIP != nil {
+			netOpt.StaticIPs = []net.IP{parsedIP}
+		}
+	}
+
+	// 如果有指定的 MAC 就使用
+	if macAddr != "" {
+		if hwAddr, err := net.ParseMAC(macAddr); err == nil {
+			netOpt.StaticMAC = netTypes.HardwareAddr(hwAddr)
+		}
+	}
+
+	netOpts := map[string]netTypes.PerNetworkOptions{
+		networkName: netOpt,
+	}
+
 	res, err := containers.CreateWithSpec(m.timeoutCtx(), &specgen.SpecGenerator{
 		ContainerBasicConfig: specgen.ContainerBasicConfig{
 			Name:          req.VmId,
@@ -129,9 +216,7 @@ func (m *Manager) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error {
 			Mounts: lxcfsMounts(),
 		},
 		ContainerNetworkConfig: specgen.ContainerNetworkConfig{
-			Networks: map[string]netTypes.PerNetworkOptions{
-				"fuckme": {},
-			},
+			Networks:       netOpts,
 			DNSServers:     []net.IP{net.ParseIP("1.1.1.1"), net.ParseIP("2606:4700:4700::1111")},
 			NetworkOptions: map[string][]string{},
 		},
@@ -259,6 +344,19 @@ func (m *Manager) GetVMIP(_ context.Context, vmID string) (string, error) {
 		}
 	}
 	return inspect.NetworkSettings.IPAddress, nil
+}
+
+func (m *Manager) GetVMMAC(_ context.Context, vmID string) (string, error) {
+	inspect, err := containers.Inspect(m.timeoutCtx(), vmID, nil)
+	if err != nil {
+		return "", err
+	}
+	for _, network := range inspect.NetworkSettings.Networks {
+		if network.MacAddress != "" {
+			return network.MacAddress, nil
+		}
+	}
+	return inspect.NetworkSettings.MacAddress, nil
 }
 
 func (m *Manager) GetSupportedImages(_ context.Context) ([]*agent.OSImageInfo, error) {

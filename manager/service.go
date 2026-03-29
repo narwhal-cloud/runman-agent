@@ -2,13 +2,32 @@ package manager
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"net"
 	"runman-agent/db"
 	"runman-agent/manager/cpualloc"
 	"runman-agent/proto/agent"
 
 	"google.golang.org/protobuf/proto"
 )
+
+// GenerateMACFromIP 根据 IP 地址确定性地生成 MAC 地址
+// MAC 前缀固定为 52:54:00:00:01，最后一个八位字节从 IP 的最后一个八位字节导出
+func GenerateMACFromIP(ipStr string) string {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return ""
+	}
+	// 获取 IPv4 的最后一个八位字节
+	ipv4 := ip.To4()
+	if ipv4 == nil {
+		return ""
+	}
+	lastOctet := ipv4[3]
+	// 生成 MAC 地址：52:54:00:00:01:XX（XX 是 IP 的最后一个八位字节）
+	return fmt.Sprintf("52:54:00:00:01:%02x", lastOctet)
+}
 
 // VMService 是 VMManager 的服务层包装，位于 gRPC 处理层与底层虚拟化驱动之间，负责：
 //  1. 将平台下发的 serverVmID 转换为底层虚拟化驱动实际使用的 localID
@@ -44,6 +63,14 @@ func (s *VMService) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error 
 		s.alloc.Release(cpuset)
 		return err
 	}
+
+	// 创建后获取 IP，如果获取不到 MAC 就从 IP 生成
+	ip, _ := s.mgr.GetVMIP(ctx, req.VmId)
+	mac, _ := s.mgr.GetVMMAC(ctx, req.VmId)
+	if mac == "" && ip != "" {
+		mac = GenerateMACFromIP(ip)
+	}
+
 	_ = s.db.SaveVMConfig(&db.VMConfig{
 		VMID:          req.VmId,
 		LocalID:       req.VmId,
@@ -53,6 +80,8 @@ func (s *VMService) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error 
 		Image:         req.OsImage,
 		Cpuset:        cpuset,
 		Status:        "running",
+		IP:            ip,
+		MAC:           mac,
 	})
 	return nil
 }
@@ -105,7 +134,7 @@ func (s *VMService) UpdateVM(ctx context.Context, req *agent.CmdUpdateVM) error 
 }
 
 func (s *VMService) ReinstallVM(ctx context.Context, req *agent.CmdReinstallVM) error {
-	// 重装保持原有 CPU 数量，重新分配 cpuset
+	// 重装保持原有 CPU 数量，重新分配 cpuset，并复用 IP 和 MAC 地址
 	if conf, err := s.db.GetVMConfig(req.VmId); err == nil {
 		s.alloc.Release(conf.Cpuset)
 		cpuset, allocErr := s.alloc.Allocate(conf.CPU)
@@ -113,6 +142,14 @@ func (s *VMService) ReinstallVM(ctx context.Context, req *agent.CmdReinstallVM) 
 			ctx = WithCpuset(ctx, cpuset)
 			conf.Cpuset = cpuset
 			_ = s.db.SaveVMConfig(conf)
+		}
+		// 如果有旧的 IP 地址，就复用
+		if conf.IP != "" {
+			ctx = WithIPAddress(ctx, conf.IP)
+		}
+		// 如果有旧的 MAC 地址，就复用
+		if conf.MAC != "" {
+			ctx = WithMacAddress(ctx, conf.MAC)
 		}
 	} else if req.Cpu > 0 {
 		// 母鸡重装系统后 DB 配置丢失，使用下发参数中的 CPU 数量分配 cpuset
@@ -183,6 +220,10 @@ func (s *VMService) AttachTTY(ctx context.Context, vmID string, stdin io.Reader,
 
 func (s *VMService) GetVMIP(ctx context.Context, vmID string) (string, error) {
 	return s.mgr.GetVMIP(ctx, s.localID(vmID))
+}
+
+func (s *VMService) GetVMMAC(ctx context.Context, vmID string) (string, error) {
+	return s.mgr.GetVMMAC(ctx, s.localID(vmID))
 }
 
 func (s *VMService) GetSupportedImages(ctx context.Context) ([]*agent.OSImageInfo, error) {

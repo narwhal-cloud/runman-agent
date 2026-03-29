@@ -1007,6 +1007,14 @@ func (m *Manager) GetVMIP(_ context.Context, vmID string) (string, error) {
 	return netCfg.IP, nil
 }
 
+func (m *Manager) GetVMMAC(_ context.Context, vmID string) (string, error) {
+	netCfg, err := m.allocNetwork(vmID)
+	if err != nil {
+		return "", err
+	}
+	return netCfg.MAC, nil
+}
+
 func (m *Manager) GetSupportedImages(_ context.Context) ([]*agent.OSImageInfo, error) {
 	var images []*agent.OSImageInfo
 	for _, distro := range []string{"debian", "alpine"} {

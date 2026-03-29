@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>RunMan Agent</title>
+    <title>Narwhal Cloud</title>
     <link rel="icon" type="image/png" href="/logo.png">
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css"/>
@@ -24,9 +24,13 @@
     <div class="max-w-screen-2xl mx-auto px-6 py-3 flex justify-between items-center">
         <div class="flex items-center gap-3">
             <img src="/logo.png" class="w-8 h-8 rounded shadow" alt="logo">
-            <span class="text-lg font-bold tracking-tight">RunMan Agent</span>
+            <span class="text-lg font-bold tracking-tight">Narwhal Cloud</span>
         </div>
         <div class="flex items-center gap-3 text-sm">
+            <span id="server-badge" class="bg-red-500 px-3 py-1 rounded text-xs font-bold uppercase tracking-widest flex items-center gap-1" title="Click to configure">
+                <span class="w-2 h-2 bg-current rounded-full"></span>
+                <span id="server-status">Not Configured</span>
+            </span>
             <span id="virt-badge" class="bg-indigo-500 px-3 py-1 rounded text-xs font-bold uppercase tracking-widest">VIRT: -</span>
             <span class="w-2.5 h-2.5 bg-green-400 rounded-full pulse"></span>
         </div>
@@ -123,7 +127,10 @@
                 <form id="configForm" class="space-y-3">
                     <div>
                         <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">Platform Server</label>
-                        <input type="text" id="serverAddr" class="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none text-sm">
+                        <input type="text" id="serverAddr" class="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none text-sm" placeholder="e.g., hosting.fuckip.me:443 or api.example.com">
+                        <p class="text-[9px] text-slate-400 mt-1">
+                            💡 TLS auto-detection: :443/:8443 or remote domains use TLS, localhost/127.0.0.1 use insecure
+                        </p>
                     </div>
                     <div>
                         <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">API Token</label>
@@ -372,6 +379,38 @@ function vmStatusLabel(s) {
 function showErr(id, msg) { $(id).textContent=msg; $(id).classList.remove('hidden'); }
 function hideErr(id) { $(id).classList.add('hidden'); }
 
+// ─── Button state management ──────────────────────────────────────────
+const buttonStates = new Map();
+
+function setButtonLoading(btn, loading) {
+    if (!btn) return;
+    if (loading) {
+        buttonStates.set(btn, { disabled: btn.disabled, innerText: btn.innerText });
+        btn.disabled = true;
+        btn.style.opacity = '0.6';
+        btn.style.cursor = 'not-allowed';
+    } else {
+        const state = buttonStates.get(btn);
+        if (state) {
+            btn.disabled = state.disabled;
+            btn.innerText = state.innerText;
+            btn.style.opacity = '';
+            btn.style.cursor = '';
+            buttonStates.delete(btn);
+        }
+    }
+}
+
+function disableAllButtons(disabled) {
+    document.querySelectorAll('button').forEach(btn => {
+        if (disabled) {
+            setButtonLoading(btn, true);
+        } else {
+            setButtonLoading(btn, false);
+        }
+    });
+}
+
 async function api(method, path, body) {
     const opts = { method, headers: {'Content-Type':'application/json'} };
     if (body) opts.body = JSON.stringify(body);
@@ -462,15 +501,21 @@ async function refreshVMs() {
 
 // ─── Quick actions ────────────────────────────────────────────────────────────
 async function quickAction(vmId, action) {
+    disableAllButtons(true);
     try {
         await api('POST', `/api/vms/${vmId}/${action}`);
         await refreshVMs();
     } catch(e){ alert('Error: '+e.message); }
+    finally { disableAllButtons(false); }
 }
 
 async function quickStop(vmId) {
-    await api('POST', `/api/vms/${vmId}/stop`, {force: false});
-    await refreshVMs();
+    disableAllButtons(true);
+    try {
+        await api('POST', `/api/vms/${vmId}/stop`, {force: false});
+        await refreshVMs();
+    } catch(e){ alert('Error: '+e.message); }
+    finally { disableAllButtons(false); }
 }
 
 // ─── Create VM ────────────────────────────────────────────────────────────────
@@ -483,6 +528,7 @@ function openCreateVM() {
 $('form-create').onsubmit = async (e) => {
     e.preventDefault();
     hideErr('create-err');
+    disableAllButtons(true);
     const body = {
         vm_id:         $('c-vmid').value.trim() || undefined,
         cpu:           parseInt($('c-cpu').value),
@@ -499,6 +545,7 @@ $('form-create').onsubmit = async (e) => {
         await refreshVMs();
         alert(`VM created: ${res.vm_id}`);
     } catch(e){ showErr('create-err', e.message); }
+    finally { disableAllButtons(false); }
 };
 
 // ─── Manage VM ────────────────────────────────────────────────────────────────
@@ -514,28 +561,32 @@ function openManage(vmId) {
 
 async function doUpdate() {
     hideErr('manage-err');
+    disableAllButtons(true);
     const body = {};
     const cpu=parseInt($('u-cpu').value), ram=parseInt($('u-ram').value), bw=parseInt($('u-bw').value);
     if (cpu>0) body.cpu=cpu;
     if (ram>0) body.ram_mb=ram;
     if (bw>0)  body.bandwidth_mbps=bw;
-    if (!Object.keys(body).length) { showErr('manage-err','No changes specified.'); return; }
+    if (!Object.keys(body).length) { showErr('manage-err','No changes specified.'); disableAllButtons(false); return; }
     try {
         await api('PATCH', `/api/vms/${activeVmId}`, body);
         closeModal('modal-manage');
         await refreshVMs();
     } catch(e){ showErr('manage-err', e.message); }
+    finally { disableAllButtons(false); }
 }
 
 async function doResetPwd() {
     hideErr('manage-err');
     const pwd = $('u-pwd').value.trim();
     if (!pwd) { showErr('manage-err','Password cannot be empty.'); return; }
+    disableAllButtons(true);
     try {
         await api('POST', `/api/vms/${activeVmId}/reset-password`, {password: pwd});
         closeModal('modal-manage');
         alert('Password reset.');
     } catch(e){ showErr('manage-err', e.message); }
+    finally { disableAllButtons(false); }
 }
 
 async function doReinstall() {
@@ -543,30 +594,36 @@ async function doReinstall() {
     const img=$('r-image').value, pwd=$('r-pwd').value.trim();
     if (!img||!pwd) { showErr('manage-err','Image and password required.'); return; }
     if (!confirm(`Reinstall VM ${activeVmId}? ALL DATA WILL BE LOST.`)) return;
+    disableAllButtons(true);
     try {
         await api('POST', `/api/vms/${activeVmId}/reinstall`, {os_image:img, root_password:pwd});
         closeModal('modal-manage');
         await refreshVMs();
     } catch(e){ showErr('manage-err', e.message); }
+    finally { disableAllButtons(false); }
 }
 
 async function doStop(force) {
     hideErr('manage-err');
+    disableAllButtons(true);
     try {
         await api('POST', `/api/vms/${activeVmId}/stop`, {force});
         closeModal('modal-manage');
         await refreshVMs();
     } catch(e){ showErr('manage-err', e.message); }
+    finally { disableAllButtons(false); }
 }
 
 async function doDelete() {
     hideErr('manage-err');
     if (!confirm(`Delete VM ${activeVmId}? This is irreversible.`)) return;
+    disableAllButtons(true);
     try {
         await api('DELETE', `/api/vms/${activeVmId}`);
         closeModal('modal-manage');
         await refreshVMs();
     } catch(e){ showErr('manage-err', e.message); }
+    finally { disableAllButtons(false); }
 }
 
 // ─── Port Forwards ────────────────────────────────────────────────────────────
@@ -606,18 +663,22 @@ async function doAddPortFwd() {
     hideErr('ports-err');
     const proto=$('pf-proto').value, hp=parseInt($('pf-hport').value), gp=parseInt($('pf-gport').value);
     if (!hp||!gp) { showErr('ports-err','Host port and VM port required.'); return; }
+    disableAllButtons(true);
     try {
         await api('POST', `/api/vms/${activeVmId}/portfwds`, {protocol:proto, host_port:hp, guest_port:gp});
         $('pf-hport').value=''; $('pf-gport').value='';
         await refreshPortFwds();
     } catch(e){ showErr('ports-err', e.message); }
+    finally { disableAllButtons(false); }
 }
 
 async function doDelPortFwd(proto, hostPort) {
+    disableAllButtons(true);
     try {
         await api('DELETE', `/api/vms/${activeVmId}/portfwds/${proto}/${hostPort}`);
         await refreshPortFwds();
     } catch(e){ showErr('ports-err', e.message); }
+    finally { disableAllButtons(false); }
 }
 
 // ─── Console TTY ──────────────────────────────────────────────────────────────
@@ -709,17 +770,64 @@ function populateImageSelect(selectId) {
 // ─── Config ───────────────────────────────────────────────────────────────────
 $('configForm').onsubmit = async (e) => {
     e.preventDefault();
-    await api('POST', '/api/config', {
-        server_addr:  $('serverAddr').value,
-        token:        $('token').value,
-        monitor_nic:  $('monitorNIC').value,
-        monitor_disk: $('monitorDisk').value,
-    });
-    alert('Saved.');
-    window.location.reload();
+    disableAllButtons(true);
+    try {
+        const newConf = {
+            server_addr:  $('serverAddr').value,
+            token:        $('token').value,
+            monitor_nic:  $('monitorNIC').value,
+            monitor_disk: $('monitorDisk').value,
+        };
+        await api('POST', '/api/config', newConf);
+        currentConf = newConf;
+        updateServerStatus(newConf, null);
+        alert('Saved.');
+    } finally {
+        disableAllButtons(false);
+    }
 };
 
+// ─── Server Status ────────────────────────────────────────────────────────────
+function updateServerStatus(conf, connStatus) {
+    const badge = $('server-badge');
+    const status = $('server-status');
+
+    if (!conf.server_addr) {
+        badge.className = 'bg-red-500 px-3 py-1 rounded text-xs font-bold uppercase tracking-widest flex items-center gap-1';
+        status.textContent = 'Not Configured';
+        status.title = 'No server configured';
+    } else if (!conf.token) {
+        badge.className = 'bg-yellow-500 px-3 py-1 rounded text-xs font-bold uppercase tracking-widest flex items-center gap-1';
+        status.textContent = 'Not Registered';
+        status.title = 'Server: ' + conf.server_addr;
+    } else if (connStatus && connStatus.connected) {
+        badge.className = 'bg-green-500 px-3 py-1 rounded text-xs font-bold uppercase tracking-widest flex items-center gap-1';
+        status.textContent = 'Connected';
+        status.title = 'Server: ' + conf.server_addr;
+    } else {
+        badge.className = 'bg-orange-500 px-3 py-1 rounded text-xs font-bold uppercase tracking-widest flex items-center gap-1';
+        status.textContent = 'Connecting...';
+        status.title = (connStatus && connStatus.error) ? 'Error: ' + connStatus.error : 'Attempting to connect...';
+    }
+}
+
+// 定期检测连接状态
+async function refreshConnectionStatus(conf) {
+    try {
+        const connStatus = await api('GET', '/api/connection');
+        updateServerStatus(conf, connStatus);
+    } catch(e) {
+        // 如果API调用失败，显示连接中的状态
+        const badge = $('server-badge');
+        const status = $('server-status');
+        badge.className = 'bg-orange-500 px-3 py-1 rounded text-xs font-bold uppercase tracking-widest flex items-center gap-1';
+        status.textContent = 'Connecting...';
+    }
+}
+
 // ─── Init ─────────────────────────────────────────────────────────────────────
+let currentConf = null;
+
 async function init() {
     const [sys, conf, imgs] = await Promise.all([
         api('GET','/api/system/info'),
@@ -728,6 +836,7 @@ async function init() {
     ]);
 
     images = imgs || [];
+    currentConf = conf;
 
     const nicSel = $('monitorNIC');
     nicSel.innerHTML = '<option value="">All Interfaces</option>' + sys.nics.map(n=>`<option value="${n}">${n}</option>`).join('');
@@ -739,6 +848,8 @@ async function init() {
     $('monitorDisk').value = conf.monitor_disk || '';
     $('virt-badge').textContent = 'VIRT: '+(conf.virt_type||'?').toUpperCase();
     $('disk-label').textContent = 'Disk: '+(conf.monitor_disk||'/');
+
+    refreshConnectionStatus(conf);
 }
 
 init().then(() => {
@@ -746,6 +857,7 @@ init().then(() => {
     refreshVMs();
     setInterval(refreshStatus, 2000);
     setInterval(refreshVMs, 5000);
+    setInterval(() => refreshConnectionStatus(currentConf), 3000);
 });
 </script>
 </body>

@@ -30,6 +30,40 @@ func CpusetFrom(ctx context.Context) string {
 	return v
 }
 
+// macAddressKey 用于向 context 注入 MAC 地址。
+// 由 VMService 或调用者写入，由底层驱动读取。
+type macAddressKey struct{}
+
+var MacAddressKey = macAddressKey{}
+
+// WithMacAddress 将 MAC 地址注入 context。
+func WithMacAddress(ctx context.Context, mac string) context.Context {
+	return context.WithValue(ctx, MacAddressKey, mac)
+}
+
+// MacAddressFrom 从 context 中取出 MAC 地址，不存在时返回空字符串。
+func MacAddressFrom(ctx context.Context) string {
+	v, _ := ctx.Value(MacAddressKey).(string)
+	return v
+}
+
+// ipAddressKey 用于向 context 注入 IP 地址。
+// 由 VMService 或调用者写入，由底层驱动读取。
+type ipAddressKey struct{}
+
+var IPAddressKey = ipAddressKey{}
+
+// WithIPAddress 将 IP 地址注入 context。
+func WithIPAddress(ctx context.Context, ip string) context.Context {
+	return context.WithValue(ctx, IPAddressKey, ip)
+}
+
+// IPAddressFrom 从 context 中取出 IP 地址，不存在时返回空字符串。
+func IPAddressFrom(ctx context.Context) string {
+	v, _ := ctx.Value(IPAddressKey).(string)
+	return v
+}
+
 // VMManager 定义了虚拟化管理器的通用接口
 type VMManager interface {
 	// CreateVM 基础生命周期管理
@@ -50,6 +84,9 @@ type VMManager interface {
 
 	// GetVMIP 获取 VM 内部 IP (用于端口转发)
 	GetVMIP(ctx context.Context, vmID string) (string, error)
+
+	// GetVMMAC 获取 VM MAC 地址
+	GetVMMAC(ctx context.Context, vmID string) (string, error)
 
 	// GetSupportedImages 获取该虚拟化支持的镜像列表
 	GetSupportedImages(ctx context.Context) ([]*agent.OSImageInfo, error)

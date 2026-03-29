@@ -25,6 +25,8 @@ type VMConfig struct {
 	Image         string
 	Status        string
 	Cpuset        string // 分配给该 VM 的 cpuset，如 "0-2" 或 "0,3,5"
+	MAC           string // 固定的MAC地址
+	IP            string // 固定的IP地址
 }
 
 // PortForward 持久化端口转发规则。(Protocol, HostPort) 联合主键保证宿主机端口唯一。

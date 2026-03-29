@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"io"
@@ -19,10 +20,13 @@ import (
 	"runman-agent/monitor"
 	"runman-agent/proto/agent"
 	"runman-agent/web"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 )
@@ -30,11 +34,15 @@ import (
 // Agent 是运行在宿主机上的代理进程，负责管理容器生命周期、
 // 收集监控指标并通过 gRPC 双向流与平台保持长连接。
 type Agent struct {
-	db      *db.DB
-	mgr     manager.VMManager
-	hostMon *monitor.HostMonitor
-	pf      *portforward.Manager
-	config  *db.Config
+	db            *db.DB
+	mgr           manager.VMManager
+	hostMon       *monitor.HostMonitor
+	pf            *portforward.Manager
+	config        *db.Config
+	mu            sync.RWMutex
+	connected     bool
+	lastError     string
+	lastConnected time.Time
 }
 
 func main() {
@@ -96,7 +104,7 @@ func main() {
 	}
 
 	// 启动本地 Web 状态页，供运维人员直接查看节点信息
-	ws := web.NewServer(database, svc, hostMon, a.pf)
+	ws := web.NewServer(database, svc, hostMon, a.pf, a)
 	go func() {
 		log.Printf("Starting web server on %s", *webAddr)
 		_ = ws.ListenAndServe(*webAddr)
@@ -111,7 +119,7 @@ func main() {
 // measureBandwidth 通过下载 Cloudflare 测速文件估算出口带宽，
 // 结果保存到数据库并更新 HostMonitor 缓存。
 func (a *Agent) measureBandwidth() {
-	const testURL = "https://speed.cloudflare.com/__down?bytes=10240000"
+	const testURL = "https://speed.cloudflare.com/__down?bytes=40960000"
 	log.Printf("Starting bandwidth test...")
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -155,19 +163,64 @@ func (a *Agent) run() {
 		a.config = conf
 		if a.config.Token == "" {
 			log.Printf("Waiting for configuration...")
+			a.setConnected(false, "No token configured")
 			time.Sleep(10 * time.Second)
 			continue
 		}
 		err := a.connectAndLoop()
 		log.Printf("Disconnected: %v, retrying in 5s...", err)
+		a.setConnected(false, err.Error())
 		time.Sleep(5 * time.Second)
 	}
+}
+
+// setConnected 线程安全地更新连接状态
+func (a *Agent) setConnected(connected bool, errMsg string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.connected = connected
+	a.lastError = errMsg
+	if connected {
+		a.lastConnected = time.Now()
+	}
+}
+
+// GetConnStatus 返回连接状态和错误信息
+func (a *Agent) GetConnStatus() (bool, string) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.connected, a.lastError
+}
+
+// isSecureConnection 判断是否需要 TLS
+// 规则：如果端口是 443 或 8443，或者没有显式指定端口但域名看起来是生产环境，使用 TLS
+func (a *Agent) isSecureConnection() bool {
+	addr := a.config.ServerAddr
+	// 如果是 :443 或 :8443，需要 TLS
+	if strings.HasSuffix(addr, ":443") || strings.HasSuffix(addr, ":8443") {
+		return true
+	}
+	// 如果没有端口号，且不是 localhost/127.0.0.1，默认使用 TLS（生产环境）
+	if !strings.Contains(addr, ":") && !strings.Contains(addr, "localhost") && !strings.Contains(addr, "127.0.0.1") {
+		return true
+	}
+	return false
 }
 
 // connectAndLoop 建立 gRPC 双向流，启动心跳/端口转发上报协程，
 // 然后阻塞读取平台下发的命令直到连接断开。
 func (a *Agent) connectAndLoop() error {
-	conn, err := grpc.NewClient(a.config.ServerAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	// 根据连接地址判断是否需要 TLS
+	var dialOpt grpc.DialOption
+	if a.isSecureConnection() {
+		// 使用 TLS（标准证书验证）
+		dialOpt = grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{}))
+	} else {
+		// 本地开发或内网环境，使用 insecure
+		dialOpt = grpc.WithTransportCredentials(insecure.NewCredentials())
+	}
+
+	conn, err := grpc.NewClient(a.config.ServerAddr, dialOpt)
 	if err != nil {
 		return err
 	}
@@ -181,6 +234,7 @@ func (a *Agent) connectAndLoop() error {
 	}
 
 	log.Printf("Connected to platform: %s", a.config.ServerAddr)
+	a.setConnected(true, "")
 
 	// 连接后立即上报一次状态，无需等待第一个 ticker
 	go a.sendHeartbeat(stream)
@@ -312,6 +366,14 @@ func (a *Agent) handleCommand(stream agent.AgentGateway_ConnectClient, env *agen
 				conf.BandwidthMbps = int(p.ReinstallVm.BandwidthMbps)
 				a.pf.UpdateVMBandwidth(ctx, p.ReinstallVm.VmId, int(p.ReinstallVm.BandwidthMbps))
 			}
+			// 重装后获取新的 IP，如果获取不到 MAC 就从 IP 生成
+			ip, _ := a.mgr.GetVMIP(ctx, p.ReinstallVm.VmId)
+			mac, _ := a.mgr.GetVMMAC(ctx, p.ReinstallVm.VmId)
+			if mac == "" && ip != "" {
+				mac = manager.GenerateMACFromIP(ip)
+			}
+			conf.IP = ip
+			conf.MAC = mac
 			_ = a.db.SaveVMConfig(conf)
 		}
 
