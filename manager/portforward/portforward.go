@@ -119,6 +119,22 @@ func (m *Manager) Restore(ctx context.Context) {
 	}
 }
 
+// RefreshVM 重新解析 VM 的 IP 并重建其所有端口转发规则。
+// 用于 VM 重装后 IP 可能发生变化的场景。
+func (m *Manager) RefreshVM(ctx context.Context, vmID string) {
+	rules, err := m.db.ListPortForwards(vmID)
+	if err != nil || len(rules) == 0 {
+		return
+	}
+	// 先全部移除（释放 listener），再重新 AddMapping（重新调 GetVMIP）
+	for _, r := range rules {
+		_ = m.RemoveMapping(ctx, vmID, r.Protocol, r.HostPort)
+	}
+	for _, r := range rules {
+		_ = m.AddMapping(ctx, vmID, r.Protocol, r.HostPort, r.GuestPort, 0, r.Description)
+	}
+}
+
 // AddMapping 添加转发规则，相同规则幂等，配置变更时先删后加
 func (m *Manager) AddMapping(ctx context.Context, vmId string, protocol string, hostPort, guestPort int, mbps int, description string) error {
 	m.mu.Lock()

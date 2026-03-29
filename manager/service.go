@@ -37,6 +37,10 @@ type VMService struct {
 	mgr   VMManager
 	db    *db.DB
 	alloc *cpualloc.Allocator
+
+	// OnCreated 在 VM 成功创建并写入 DB 后被调用，可用于自动添加端口转发等。
+	// bandwidthMbps 为 0 时表示不限速。
+	OnCreated func(ctx context.Context, vmID string, bandwidthMbps int)
 }
 
 func NewVMService(mgr VMManager, database *db.DB, alloc *cpualloc.Allocator) *VMService {
@@ -83,6 +87,10 @@ func (s *VMService) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error 
 		IP:            ip,
 		MAC:           mac,
 	})
+
+	if s.OnCreated != nil {
+		s.OnCreated(ctx, req.VmId, int(req.BandwidthMbps))
+	}
 	return nil
 }
 

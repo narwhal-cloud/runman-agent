@@ -7,8 +7,11 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"io"
 	"log"
+	"math/rand"
+	"net"
 	"net/http"
 	"os"
 	"runman-agent/db"
@@ -131,6 +134,20 @@ func main() {
 	pf := portforward.New(svc, database)
 	// 启动时从 DB 恢复已持久化的端口转发规则
 	pf.Restore(context.Background())
+
+	// VM 创建后自动添加一条随机端口 → 22 的 SSH 转发
+	svc.OnCreated = func(ctx context.Context, vmID string, bandwidthMbps int) {
+		port, err := pickFreePort(20000, 60000)
+		if err != nil {
+			log.Printf("auto SSH portfwd: %v", err)
+			return
+		}
+		if err := pf.AddMapping(ctx, vmID, "tcp", port, 22, bandwidthMbps, "ssh"); err != nil {
+			log.Printf("auto SSH portfwd %d→22 for %s: %v", port, vmID, err)
+			return
+		}
+		log.Printf("auto SSH portfwd: %s %d→22", vmID, port)
+	}
 
 	a := &Agent{
 		db:      database,
@@ -426,6 +443,9 @@ func (a *Agent) handleCommand(stream agent.AgentGateway_ConnectClient, env *agen
 			conf.IP = ip
 			conf.MAC = mac
 			_ = a.db.SaveVMConfig(conf)
+
+			// 重装后 IP 可能变化，刷新端口转发规则使其指向新 IP
+			a.pf.RefreshVM(ctx, p.ReinstallVm.VmId)
 		}
 
 	case *agent.PlatformEnvelope_DeleteVm:
@@ -530,4 +550,17 @@ func vmStatusString(s agent.VMStatus) string {
 	default:
 		return ""
 	}
+}
+
+// pickFreePort 在 [min, max) 范围内随机选一个当前未被占用的 TCP 端口。
+func pickFreePort(min, max int) (int, error) {
+	for i := 0; i < 30; i++ {
+		port := min + rand.Intn(max-min)
+		ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+		if err == nil {
+			ln.Close()
+			return port, nil
+		}
+	}
+	return 0, fmt.Errorf("no free port found in [%d, %d)", min, max)
 }
