@@ -18,6 +18,7 @@ import (
 	"runman-agent/manager/podman"
 	"runman-agent/manager/portforward"
 	"runman-agent/monitor"
+	"runman-agent/ndp"
 	"runman-agent/proto/agent"
 	"runman-agent/web"
 	"strings"
@@ -30,6 +31,8 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 )
+
+var version = "dev"
 
 // Agent 是运行在宿主机上的代理进程，负责管理容器生命周期、
 // 收集监控指标并通过 gRPC 双向流与平台保持长连接。
@@ -50,18 +53,37 @@ func main() {
 	webAddr := flag.String("web", ":8792", "web status server address")
 	socketPath := flag.String("socket", "unix:///run/podman/podman.sock", "podman api socket path")
 	virtType := flag.String("type", "podman", "virtualization type")
+	serverAddr := flag.String("server", "", "platform gRPC address (overwrites DB if non-empty)")
+	token := flag.String("token", "", "agent token (overwrites DB if non-empty)")
+	ndpIface := flag.String("ndp-iface", "", "uplink interface for NDP responder (IPv6, e.g. eth0)")
+	ndpSubnets := flag.String("ndp-subnet", "", "IPv6 CIDRs for NDP responder, comma-separated (e.g. 2001:db8::/112)")
+	ndpNetwork := flag.String("ndp-network", "", "Podman network name for NDP responder (e.g. narwhal-net)")
 	flag.Parse()
 	log.SetOutput(os.Stdout)
+	log.Printf("runman-agent %s", version)
 
 	database, err := db.Init(*dbPath)
 	if err != nil {
 		log.Fatalf("init db: %v", err)
 	}
 
-	// 首次启动时将命令行指定的虚拟化类型写入数据库
+	// 首次启动时将命令行指定的虚拟化类型写入数据库；
+	// 若提供了 --server / --token 则直接覆盖 DB（方便脚本一次性配置）。
 	conf, _ := database.GetConfig()
+	changed := false
 	if conf.VirtType == "" {
 		conf.VirtType = *virtType
+		changed = true
+	}
+	if *serverAddr != "" && conf.ServerAddr == "" {
+		conf.ServerAddr = *serverAddr
+		changed = true
+	}
+	if *token != "" && conf.Token == "" {
+		conf.Token = *token
+		changed = true
+	}
+	if changed {
 		_ = database.SaveConfig(conf)
 	}
 
@@ -112,6 +134,20 @@ func main() {
 
 	// 启动时异步测速，结果写入 DB 并附带在心跳中上报
 	go a.measureBandwidth()
+
+	// 按需启动 NDP 应答器（公网 IPv6 场景）
+	if *ndpIface != "" {
+		nr, err := ndp.New(*ndpIface, *ndpSubnets, *ndpNetwork, *socketPath)
+		if err != nil {
+			log.Printf("NDP responder init error: %v", err)
+		} else {
+			go func() {
+				if err := nr.Run(context.Background()); err != nil && err != context.Canceled {
+					log.Printf("NDP responder exited: %v", err)
+				}
+			}()
+		}
+	}
 
 	a.run()
 }
