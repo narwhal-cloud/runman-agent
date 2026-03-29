@@ -19,6 +19,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/shirou/gopsutil/v4/disk"
 	psnet "github.com/shirou/gopsutil/v4/net"
+	"golang.org/x/crypto/bcrypt"
 )
 
 //go:embed static/*
@@ -44,6 +45,26 @@ func NewServer(database *db.DB, mgr manager.VMManager, hostMon *monitor.HostMoni
 		pf:      pf,
 		agent:   agent,
 	}
+}
+
+// authMiddleware enforces HTTP Basic Auth when WebUser is configured.
+// If no credentials are stored in DB the request passes through.
+func (s *Server) authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conf, _ := s.db.GetConfig()
+		if conf == nil || conf.WebUser == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != conf.WebUser ||
+			bcrypt.CompareHashAndPassword([]byte(conf.WebPassHash), []byte(pass)) != nil {
+			w.Header().Set("WWW-Authenticate", `Basic realm="runman-agent"`)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) ListenAndServe(addr string) error {
@@ -101,7 +122,7 @@ func (s *Server) ListenAndServe(addr string) error {
 		w.Write(data)
 	})
 
-	return http.ListenAndServe(addr, mux)
+	return http.ListenAndServe(addr, s.authMiddleware(mux))
 }
 
 // ─── 辅助 ──────────────────────────────────────────────────────────────────────
@@ -145,9 +166,26 @@ func (s *Server) handleSystemInfo(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string][]string{"nics": nicNames, "disks": mountPoints})
 }
 
+type configRequest struct {
+	ServerAddr  string `json:"server_addr"`
+	Token       string `json:"token"`
+	MonitorNIC  string `json:"monitor_nic"`
+	MonitorDisk string `json:"monitor_disk"`
+	WebUser     string `json:"web_user"`
+	WebPass     string `json:"web_pass"` // plaintext，服务端 bcrypt 后存储
+}
+
+type configResponse struct {
+	ServerAddr  string `json:"server_addr"`
+	Token       string `json:"token"`
+	MonitorNIC  string `json:"monitor_nic"`
+	MonitorDisk string `json:"monitor_disk"`
+	WebUser     string `json:"web_user"`
+}
+
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "POST" {
-		var req db.Config
+		var req configRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), 400)
 			return
@@ -158,13 +196,30 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			existing.Token = req.Token
 			existing.MonitorNIC = req.MonitorNIC
 			existing.MonitorDisk = req.MonitorDisk
+			if req.WebUser != "" {
+				existing.WebUser = req.WebUser
+			}
+			if req.WebPass != "" {
+				hash, err := bcrypt.GenerateFromPassword([]byte(req.WebPass), bcrypt.DefaultCost)
+				if err != nil {
+					http.Error(w, "failed to hash password", 500)
+					return
+				}
+				existing.WebPassHash = string(hash)
+			}
 			s.db.SaveConfig(existing)
 		}
 		w.WriteHeader(200)
 		return
 	}
 	conf, _ := s.db.GetConfig()
-	jsonOK(w, conf)
+	jsonOK(w, configResponse{
+		ServerAddr:  conf.ServerAddr,
+		Token:       conf.Token,
+		MonitorNIC:  conf.MonitorNIC,
+		MonitorDisk: conf.MonitorDisk,
+		WebUser:     conf.WebUser,
+	})
 }
 
 func (s *Server) handleConnection(w http.ResponseWriter, r *http.Request) {

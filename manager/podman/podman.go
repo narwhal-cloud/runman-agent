@@ -30,8 +30,7 @@ import (
 
 const (
 	networkName = "narwhal-net"
-	networkCIDR = "192.168.250.0/24"
-	macPrefix   = "52:54:00:00:01"
+	networkCIDR = "10.91.0.0/24"
 )
 
 func ptr[T any](v T) *T { return &v }

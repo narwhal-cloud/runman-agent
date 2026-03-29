@@ -13,6 +13,8 @@ type Config struct {
 	MonitorDisk   string `json:"monitor_disk"`   // 指定监控磁盘/挂载点
 	VirtType      string `json:"virt_type"`      // 固定虚拟化类型 (podman/kvm)
 	BandwidthMbps int32  `json:"bandwidth_mbps"` // 启动测速结果 (Mbps)
+	WebUser       string `json:"web_user"`       // 面板用户名
+	WebPassHash   string `json:"-"`              // bcrypt hash，不暴露到 API
 }
 
 type VMConfig struct {
