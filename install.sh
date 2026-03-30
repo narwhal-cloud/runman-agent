@@ -334,6 +334,7 @@ if [ "$IPV6_CONFIG" = "local" ]; then
         --ipv6 \
         --subnet=fd91:cafe:cafe:10::/64 \
         --gateway=fd91:cafe:cafe:10::1 \
+        --opt snat_ipv6=true \
         "$PODMAN_NETWORK"
     log "$(t "✓ Podman network created (local IPv6)." "✓ Podman 网络创建完成（本地 IPv6）。")"
 
@@ -378,19 +379,13 @@ EOF
         --subnet=10.91.0.0/20  --gateway=10.91.0.1 \
         --ipv6 \
         --subnet="${CONTAINER_BASE}/112" --gateway="$CONTAINER_GW" \
+        --opt snat_ipv6=false \
         "$PODMAN_NETWORK"
 
-    for i in $(seq 1 10); do
-        [ -f "/etc/containers/networks/${PODMAN_NETWORK}.json" ] && break
-        sleep 1
-    done
-
-    NET_JSON="/etc/containers/networks/${PODMAN_NETWORK}.json"
-    if [ -f "$NET_JSON" ]; then
-        jq '.options = {"snat_ipv4": "true", "snat_ipv6": "false"}' "$NET_JSON" > "${NET_JSON}.tmp" \
-            && mv "${NET_JSON}.tmp" "$NET_JSON"
-        log "$(t "✓ IPv6 SNAT disabled in netavark." "✓ netavark IPv6 SNAT 已禁用。")"
-    fi
+    NDP_EXTRA_FLAGS=" \\
+  --ndp-iface $IPV6_IFACE \\
+  --ndp-subnet ${CONTAINER_BASE}/112 \\
+  --ndp-network $PODMAN_NETWORK"
 
     if download_with_retry "$NETAVARK_BASE/netavark-$ARCH" "/usr/libexec/podman/netavark"; then
         chmod +x /usr/libexec/podman/netavark

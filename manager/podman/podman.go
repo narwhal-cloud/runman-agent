@@ -30,7 +30,7 @@ import (
 
 const (
 	networkName = "narwhal-net"
-	networkCIDR = "10.91.0.0/24"
+	networkCIDR = "10.91.0.0/20" // 与 install.sh 保持一致
 )
 
 func ptr[T any](v T) *T { return &v }
@@ -75,8 +75,15 @@ func (m *Manager) ensureNetwork() error {
 	}
 
 	// 网络不存在，尝试创建
+	// 本地 IPv6 网段 (ULA) 需要开启 SNAT 才能访问公网
 	cmd := exec.CommandContext(ctx, "podman", "network", "create",
+		"--driver=bridge",
 		"--subnet="+networkCIDR,
+		"--gateway=10.91.0.1",
+		"--ipv6",
+		"--subnet=fd91:cafe:cafe:10::/64",
+		"--gateway=fd91:cafe:cafe:10::1",
+		"--opt", "snat_ipv6=true",
 		networkName)
 
 	var stdout, stderr strings.Builder
@@ -198,6 +205,23 @@ func (m *Manager) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error {
 		networkName: netOpt,
 	}
 
+	// 处理限速选项
+	networkOptions := map[string][]string{}
+	if req.BandwidthMbps > 0 {
+		rate := int64(req.BandwidthMbps) * 1000000 // bits per second
+		burst := rate / 10                         // 简单设定为 1/10 (即 100ms 突发)
+		if burst < 1000000 {
+			burst = 1000000 // 最小值 1MB
+		}
+		latency := 50 // 默认延迟 50ms
+
+		networkOptions[networkName] = []string{
+			fmt.Sprintf("bandwidth_rate=%d", rate),
+			fmt.Sprintf("bandwidth_burst=%d", burst),
+			fmt.Sprintf("bandwidth_latency=%d", latency),
+		}
+	}
+
 	res, err := containers.CreateWithSpec(m.timeoutCtx(), &specgen.SpecGenerator{
 		ContainerBasicConfig: specgen.ContainerBasicConfig{
 			Name:          req.VmId,
@@ -217,7 +241,7 @@ func (m *Manager) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error {
 		ContainerNetworkConfig: specgen.ContainerNetworkConfig{
 			Networks:       netOpts,
 			DNSServers:     []net.IP{net.ParseIP("1.1.1.1"), net.ParseIP("2606:4700:4700::1111")},
-			NetworkOptions: map[string][]string{},
+			NetworkOptions: networkOptions,
 		},
 		ContainerResourceConfig: buildResourceConfig(int64(req.Cpu), req.RamMb, manager.CpusetFrom(ctx)),
 		ContainerHealthCheckConfig: specgen.ContainerHealthCheckConfig{
@@ -228,6 +252,7 @@ func (m *Manager) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error {
 			HealthLogDestination: "/tmp",
 		},
 	}, nil)
+
 	if err != nil {
 		return err
 	}
@@ -322,9 +347,13 @@ func (m *Manager) ReinstallVM(ctx context.Context, req *agent.CmdReinstallVM) er
 	_ = m.StopVM(ctx, req.VmId, true)
 	_ = m.DeleteVM(ctx, req.VmId)
 	return m.CreateVM(ctx, &agent.CmdCreateVM{
-		VmId:         req.VmId,
-		OsImage:      req.OsImage,
-		RootPassword: req.RootPassword,
+		VmId:          req.VmId,
+		OsImage:       req.OsImage,
+		RootPassword:  req.RootPassword,
+		Cpu:           req.Cpu,
+		RamMb:         req.RamMb,
+		DiskGb:        req.DiskGb,
+		BandwidthMbps: req.BandwidthMbps,
 	})
 }
 
