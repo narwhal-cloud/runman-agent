@@ -11,7 +11,6 @@ AGENT_DATA_DIR="/var/lib/runman-agent"
 AGENT_DB="$AGENT_DATA_DIR/agent.db"
 AGENT_WEB_PORT="8792"
 PODMAN_NETWORK="narwhal-net"
-DEFAULT_SERVER="hosting.fuckip.me:443"
 
 DOWNLOAD_BASE="https://github.com/narwhal-cloud/runman-agent/releases/latest/download"
 NETAVARK_BASE="https://github.com/narwhal-cloud/netavark/releases/latest/download"
@@ -112,26 +111,36 @@ ipv6_plus_one() {
 
 # Returns "local" or "IFACE|ADDR|PREFIX"
 detect_and_configure_ipv6() {
-    log "$(t "Detecting public IPv6..." "开始检测公网 IPv6...")"
+    log "$(t "Detecting public IPv6..." "开始检测公网 IPv6...")" >&2
     if ! curl -6 -s --max-time 10 ip.sb >/dev/null 2>&1; then
-        log "$(t "No public IPv6 detected." "未检测到公网 IPv6。")"; echo "local"; return 0
+        log "$(t "No public IPv6 detected." "未检测到公网 IPv6。")" >&2
+        echo "local"; return 0
     fi
-    log "$(t "✓ Public IPv6 available." "✓ 公网 IPv6 可用。")"
+    log "$(t "✓ Public IPv6 available." "✓ 公网 IPv6 可用。")" >&2
 
     local iface
     iface=$(ip -6 route show default 2>/dev/null | head -1 | awk '{print $5}')
-    [ -z "$iface" ] && { log "$(t "No default IPv6 route found." "未找到默认 IPv6 路由。")"; echo "local"; return 0; }
-    log "$(t "Default IPv6 interface: $iface" "默认 IPv6 网卡: $iface")"
+    if [ -z "$iface" ]; then
+        log "$(t "No default IPv6 route found." "未找到默认 IPv6 路由。")" >&2
+        echo "local"; return 0
+    fi
+    log "$(t "Default IPv6 interface: $iface" "默认 IPv6 网卡: $iface")" >&2
 
     local ipv6_full ipv6_addr prefix_len
     ipv6_full=$(ip -6 addr show dev "$iface" 2>/dev/null | grep -v "fe80" | grep "scope global" | head -1 | awk '{print $2}')
-    [ -z "$ipv6_full" ] && { log "$(t "No global IPv6 address found." "未找到全局 IPv6 地址。")"; echo "local"; return 0; }
+    if [ -z "$ipv6_full" ]; then
+        log "$(t "No global IPv6 address found." "未找到全局 IPv6 地址。")" >&2
+        echo "local"; return 0
+    fi
 
     ipv6_addr=$(echo "$ipv6_full" | cut -d'/' -f1)
     prefix_len=$(echo "$ipv6_full" | cut -d'/' -f2)
-    log "$(t "IPv6 address: $ipv6_addr/$prefix_len" "IPv6 地址: $ipv6_addr/$prefix_len")"
+    log "$(t "IPv6 address: $ipv6_addr/$prefix_len" "IPv6 地址: $ipv6_addr/$prefix_len")" >&2
 
-    [ "$prefix_len" -gt 112 ] && { log "$(t "Prefix /$prefix_len too small for subnetting." "前缀 /$prefix_len 不足以分配子网。")"; echo "local"; return 0; }
+    if [ "$prefix_len" -gt 112 ]; then
+        log "$(t "Prefix /$prefix_len too small for subnetting." "前缀 /$prefix_len 不足以分配子网。")" >&2
+        echo "local"; return 0
+    fi
 
     local test_addr
     test_addr=$(ipv6_plus_one "$ipv6_addr")
@@ -142,10 +151,10 @@ detect_and_configure_ipv6() {
     ip addr del "$test_addr/$prefix_len" dev "$iface" 2>/dev/null
 
     if [ $ok -eq 1 ]; then
-        log "$(t "✓ Public IPv6 test passed." "✓ 公网 IPv6 测试成功。")"
+        log "$(t "✓ Public IPv6 test passed." "✓ 公网 IPv6 测试成功。")" >&2
         echo "$iface|$ipv6_addr|$prefix_len"
     else
-        log "$(t "Public IPv6 test failed, using local subnet." "公网 IPv6 测试失败，使用本地网段。")"
+        log "$(t "Public IPv6 test failed, using local subnet." "公网 IPv6 测试失败，使用本地网段。")" >&2
         echo "local"
     fi
 }
@@ -209,7 +218,6 @@ ExecStart=$AGENT_BINARY \\
   --web :$AGENT_WEB_PORT \\
   --socket unix:///run/podman/podman.sock \\
   --type podman \\
-  --server $DEFAULT_SERVER \\
   --web-user $web_user \\
   --web-pass $web_pass${extra_flags}
 Restart=always

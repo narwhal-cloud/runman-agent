@@ -15,6 +15,7 @@ type Config struct {
 	BandwidthMbps int32  `json:"bandwidth_mbps"` // 启动测速结果 (Mbps)
 	WebUser       string `json:"web_user"`       // 面板用户名
 	WebPassHash   string `json:"-"`              // bcrypt hash，不暴露到 API
+	Host          string `json:"host"`           // 上报给服务端的入口地址（IPv4/DDNS），空则由服务端自取
 }
 
 type VMConfig struct {
@@ -66,7 +67,7 @@ func Init(path string) (*DB, error) {
 	var count int64
 	db.Model(&Config{}).Count(&count)
 	if count == 0 {
-		db.Create(&Config{ServerAddr: "localhost:9090"})
+		db.Create(&Config{ServerAddr: "hosting.fuckip.me:443"})
 	}
 
 	return &DB{orm: db}, nil

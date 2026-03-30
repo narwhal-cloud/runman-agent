@@ -33,6 +33,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -50,6 +51,7 @@ type Agent struct {
 	connected     bool
 	lastError     string
 	lastConnected time.Time
+	entryIPv6     string // 公网 IPv6，定期刷新
 }
 
 func main() {
@@ -57,7 +59,6 @@ func main() {
 	webAddr := flag.String("web", ":8792", "web status server address")
 	socketPath := flag.String("socket", "unix:///run/podman/podman.sock", "podman api socket path")
 	virtType := flag.String("type", "podman", "virtualization type")
-	serverAddr := flag.String("server", "", "platform gRPC address (write to DB only when DB is empty)")
 	token := flag.String("token", "", "agent token (write to DB only when DB is empty)")
 	webUser := flag.String("web-user", "", "web panel username (write to DB only when DB is empty)")
 	webPass := flag.String("web-pass", "", "web panel password in plaintext (bcrypt-hashed before storing)")
@@ -79,10 +80,6 @@ func main() {
 	changed := false
 	if conf.VirtType == "" {
 		conf.VirtType = *virtType
-		changed = true
-	}
-	if *serverAddr != "" && conf.ServerAddr == "" {
-		conf.ServerAddr = *serverAddr
 		changed = true
 	}
 	if *token != "" && conf.Token == "" {
@@ -166,6 +163,9 @@ func main() {
 
 	// 启动时异步测速，结果写入 DB 并附带在心跳中上报
 	go a.measureBandwidth()
+
+	// 启动时检测公网 IPv6，附带在心跳中上报
+	go a.detectIPv6()
 
 	// 按需启动 NDP 应答器（公网 IPv6 场景）
 	if *ndpIface != "" {
@@ -288,7 +288,13 @@ func (a *Agent) connectAndLoop() error {
 		dialOpt = grpc.WithTransportCredentials(insecure.NewCredentials())
 	}
 
-	conn, err := grpc.NewClient(a.config.ServerAddr, dialOpt)
+	conn, err := grpc.NewClient(a.config.ServerAddr, dialOpt,
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{
+			Time:                20 * time.Second, // 每 20s 发一次 HTTP/2 PING
+			Timeout:             10 * time.Second, // 等待 PING ACK 超时
+			PermitWithoutStream: true,             // 无 RPC 时也发 PING
+		}),
+	)
 	if err != nil {
 		return err
 	}
@@ -337,6 +343,10 @@ func (a *Agent) sendHeartbeat(stream agent.AgentGateway_ConnectClient) {
 	}
 	hb := hostStats.Heartbeat
 	hb.VirtType = a.config.VirtType
+	hb.EntryHost = a.config.Host
+	a.mu.RLock()
+	hb.EntryIpv6 = a.entryIPv6
+	a.mu.RUnlock()
 
 	vms, _ := a.mgr.ListVMs(ctx)
 	images, _ := a.mgr.GetSupportedImages(ctx)
@@ -550,6 +560,37 @@ func vmStatusString(s agent.VMStatus) string {
 	default:
 		return ""
 	}
+}
+
+// detectIPv6 启动时获取一次公网 IPv6 并缓存。
+func (a *Agent) detectIPv6() {
+	ip := fetchPublicIPv6()
+	a.mu.Lock()
+	a.entryIPv6 = ip
+	a.mu.Unlock()
+	if ip != "" {
+		log.Printf("Public IPv6: %s", ip)
+	}
+}
+
+// fetchPublicIPv6 通过 api-ipv6.ip.sb 获取本机公网 IPv6 地址。
+func fetchPublicIPv6() string {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", "https://api-ipv6.ip.sb/ip", nil)
+	if err != nil {
+		return ""
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
 }
 
 // pickFreePort 在 [min, max) 范围内随机选一个当前未被占用的 TCP 端口。

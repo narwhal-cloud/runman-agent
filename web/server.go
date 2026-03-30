@@ -167,20 +167,21 @@ func (s *Server) handleSystemInfo(w http.ResponseWriter, r *http.Request) {
 }
 
 type configRequest struct {
-	ServerAddr  string `json:"server_addr"`
 	Token       string `json:"token"`
 	MonitorNIC  string `json:"monitor_nic"`
 	MonitorDisk string `json:"monitor_disk"`
 	WebUser     string `json:"web_user"`
 	WebPass     string `json:"web_pass"` // plaintext，服务端 bcrypt 后存储
+	Host        string `json:"host"`
 }
 
 type configResponse struct {
-	ServerAddr  string `json:"server_addr"`
 	Token       string `json:"token"`
 	MonitorNIC  string `json:"monitor_nic"`
 	MonitorDisk string `json:"monitor_disk"`
 	WebUser     string `json:"web_user"`
+	VirtType    string `json:"virt_type"`
+	Host        string `json:"host"`
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
@@ -192,10 +193,10 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		existing, _ := s.db.GetConfig()
 		if existing != nil {
-			existing.ServerAddr = req.ServerAddr
 			existing.Token = req.Token
 			existing.MonitorNIC = req.MonitorNIC
 			existing.MonitorDisk = req.MonitorDisk
+			existing.Host = req.Host
 			if req.WebUser != "" {
 				existing.WebUser = req.WebUser
 			}
@@ -214,11 +215,11 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	conf, _ := s.db.GetConfig()
 	jsonOK(w, configResponse{
-		ServerAddr:  conf.ServerAddr,
 		Token:       conf.Token,
 		MonitorNIC:  conf.MonitorNIC,
 		MonitorDisk: conf.MonitorDisk,
 		WebUser:     conf.WebUser,
+		VirtType:    conf.VirtType,
 	})
 }
 
