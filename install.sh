@@ -2,7 +2,7 @@
 set -e
 
 # ────────────────────────────────────────────────────────────────────────────────
-# runman-agent install / update script
+# NarwhalCloud Agent install / update script
 # ────────────────────────────────────────────────────────────────────────────────
 
 AGENT_BINARY="/usr/local/bin/runman-agent"
@@ -161,7 +161,7 @@ detect_and_configure_ipv6() {
 
 enable_bbr() {
     log "$(t "Configuring BBR..." "配置 BBR...")"
-    cat > /etc/sysctl.d/99-runman.conf <<'EOF'
+    cat > /etc/sysctl.d/99-narwhalcloud.conf <<'EOF'
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
 fs.inotify.max_user_instances=524288
@@ -172,7 +172,7 @@ fs.file-max=2097152
 fs.nr_open=2097152
 vm.swappiness=100
 EOF
-    sysctl -p /etc/sysctl.d/99-runman.conf >/dev/null 2>&1 \
+    sysctl -p /etc/sysctl.d/99-narwhalcloud.conf >/dev/null 2>&1 \
         && log "$(t "✓ BBR configured." "✓ BBR 已配置。")" \
         || log "$(t "BBR will take effect after reboot." "BBR 将在重启后生效。")"
 }
@@ -193,11 +193,11 @@ create_xfs_disk() {
 
 download_agent() {
     local arch=$1
-    log "$(t "Downloading runman-agent ($arch)..." "下载 runman-agent ($arch)...")"
+    log "$(t "Downloading NarwhalCloud Agent ($arch)..." "下载 NarwhalCloud Agent ($arch)...")"
     download_with_retry "$DOWNLOAD_BASE/runman-agent-linux-$arch" "$AGENT_BINARY.new"
     chmod +x "$AGENT_BINARY.new"
     mv "$AGENT_BINARY.new" "$AGENT_BINARY"
-    log "$(t "✓ runman-agent installed to $AGENT_BINARY" "✓ runman-agent 已安装到 $AGENT_BINARY")"
+    log "$(t "✓ NarwhalCloud Agent installed to $AGENT_BINARY" "✓ NarwhalCloud Agent 已安装到 $AGENT_BINARY")"
 }
 
 # write_service_file WEB_USER WEB_PASS [NDP_EXTRA_FLAGS]
@@ -206,7 +206,7 @@ write_service_file() {
     mkdir -p "$AGENT_DATA_DIR"
     cat > "/etc/systemd/system/$AGENT_SERVICE.service" <<EOF
 [Unit]
-Description=Runman Agent
+Description=NarwhalCloud Agent
 After=network-online.target podman.socket
 Wants=network-online.target
 
@@ -234,13 +234,13 @@ EOF
 # ── Update flow ───────────────────────────────────────────────────────────────
 
 if systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null || [ -f "$AGENT_BINARY" ]; then
-    log "$(t "Existing runman-agent detected, updating..." "检测到已安装的 runman-agent，执行更新流程...")"
+    log "$(t "Existing NarwhalCloud Agent detected, updating..." "检测到已安装的 NarwhalCloud Agent，执行更新流程...")"
 
     ARCH=$(detect_arch)
     download_agent "$ARCH"
 
     systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null && systemctl restart "$AGENT_SERVICE"
-    log "$(t "✓ runman-agent updated." "✓ runman-agent 已更新。")"
+    log "$(t "✓ NarwhalCloud Agent updated." "✓ NarwhalCloud Agent 已更新。")"
 
     # Update rfw if installed
     if [ -f "/root/rfw/rfw" ] && [ -f "/etc/systemd/system/rfw.service" ]; then
@@ -366,7 +366,7 @@ else
     else
         cat >> /etc/network/interfaces <<EOF
 
-# IPv6 for containers (runman-agent)
+# IPv6 for containers (narwhalcloud)
 iface $IPV6_IFACE inet6 static
     address $IPV6_ADDR/112
 EOF
@@ -403,7 +403,7 @@ EOF
   --ndp-iface $IPV6_IFACE \\
   --ndp-subnet ${CONTAINER_BASE}/112 \\
   --ndp-network $PODMAN_NETWORK"
-    log "$(t "✓ NDP responder will be handled by runman-agent." "✓ NDP responder 将由 runman-agent 内置处理。")"
+    log "$(t "✓ NDP responder will be handled by NarwhalCloud Agent." "✓ NDP responder 将由 NarwhalCloud Agent 内置处理。")"
 fi
 
 # Podman auto-restart service
@@ -436,7 +436,7 @@ done
 # ── Web panel credentials ─────────────────────────────────────────────────────
 
 echo ""
-log "$(t "Set up web panel credentials (protects port $AGENT_WEB_PORT)" "设置面板访问凭据（保护端口 $AGENT_WEB_PORT）")"
+log "$(t "Set up NarwhalCloud panel credentials (protects port $AGENT_WEB_PORT)" "设置 NarwhalCloud 面板访问凭据（保护端口 $AGENT_WEB_PORT）")"
 read -rp "$(t "Username [admin]: " "用户名 [admin]: ")" WEB_USER
 WEB_USER=${WEB_USER:-admin}
 while true; do
@@ -508,7 +508,7 @@ fi
 IP=$(curl -4 -s --max-time 10 ip.sb 2>/dev/null || echo "N/A")
 echo ""
 log "========================================"
-log "$(t "✓ Installation complete!" "✓ 安装完成！")"
+log "$(t "✓ NarwhalCloud Agent installation complete!" "✓ NarwhalCloud Agent 安装完成！")"
 log "$(t "IP:           $IP" "IP:           $IP")"
 log "$(t "Web panel:    http://$IP:$AGENT_WEB_PORT" "面板地址:     http://$IP:$AGENT_WEB_PORT")"
 log "$(t "Username:     $WEB_USER" "用户名:       $WEB_USER")"

@@ -59,7 +59,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		user, pass, ok := r.BasicAuth()
 		if !ok || user != conf.WebUser ||
 			bcrypt.CompareHashAndPassword([]byte(conf.WebPassHash), []byte(pass)) != nil {
-			w.Header().Set("WWW-Authenticate", `Basic realm="runman-agent"`)
+			w.Header().Set("WWW-Authenticate", `Basic realm="narwhalcloud"`)
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}

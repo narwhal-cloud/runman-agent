@@ -67,7 +67,7 @@ func main() {
 	ndpNetwork := flag.String("ndp-network", "", "Podman network name for NDP responder (e.g. narwhal-net)")
 	flag.Parse()
 	log.SetOutput(os.Stdout)
-	log.Printf("runman-agent %s", version)
+	log.Printf("narwhalcloud-agent %s", version)
 
 	database, err := db.Init(*dbPath)
 	if err != nil {
