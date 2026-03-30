@@ -5,7 +5,6 @@ package main
 import (
 	"context"
 	"crypto/tls"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -32,12 +31,13 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 )
 
 var version = "dev"
+
+const serverAddr = "hosting.fuckip.me:443"
 
 // Agent 是运行在宿主机上的代理进程，负责管理容器生命周期、
 // 收集监控指标并通过 gRPC 双向流与平台保持长连接。
@@ -51,6 +51,7 @@ type Agent struct {
 	connected     bool
 	lastError     string
 	lastConnected time.Time
+	entryIPv4     string // 公网 IPv4，启动时自动检测（config.Host 为空时使用）
 	entryIPv6     string // 公网 IPv6，定期刷新
 }
 
@@ -59,7 +60,6 @@ func main() {
 	webAddr := flag.String("web", ":8792", "web status server address")
 	socketPath := flag.String("socket", "unix:///run/podman/podman.sock", "podman api socket path")
 	virtType := flag.String("type", "podman", "virtualization type")
-	token := flag.String("token", "", "agent token (write to DB only when DB is empty)")
 	webUser := flag.String("web-user", "", "web panel username (write to DB only when DB is empty)")
 	webPass := flag.String("web-pass", "", "web panel password in plaintext (bcrypt-hashed before storing)")
 	ndpIface := flag.String("ndp-iface", "", "uplink interface for NDP responder (IPv6, e.g. eth0)")
@@ -74,16 +74,11 @@ func main() {
 		log.Fatalf("init db: %v", err)
 	}
 
-	// 首次启动时将命令行指定的虚拟化类型写入数据库；
-	// 若提供了 --server / --token 则直接覆盖 DB（方便脚本一次性配置）。
+	// 首次启动时将命令行指定的参数写入数据库。
 	conf, _ := database.GetConfig()
 	changed := false
 	if conf.VirtType == "" {
 		conf.VirtType = *virtType
-		changed = true
-	}
-	if *token != "" && conf.Token == "" {
-		conf.Token = *token
 		changed = true
 	}
 	if *webUser != "" && conf.WebUser == "" {
@@ -164,6 +159,8 @@ func main() {
 	// 启动时异步测速，结果写入 DB 并附带在心跳中上报
 	go a.measureBandwidth()
 
+	// 启动时检测公网 IPv4（仅当未手动配置 Host 时使用）
+	go a.detectIPv4()
 	// 启动时检测公网 IPv6，附带在心跳中上报
 	go a.detectIPv6()
 
@@ -260,39 +257,15 @@ func (a *Agent) GetConnStatus() (bool, string) {
 	return a.connected, a.lastError
 }
 
-// isSecureConnection 判断是否需要 TLS
-// 规则：如果端口是 443 或 8443，或者没有显式指定端口但域名看起来是生产环境，使用 TLS
-func (a *Agent) isSecureConnection() bool {
-	addr := a.config.ServerAddr
-	// 如果是 :443 或 :8443，需要 TLS
-	if strings.HasSuffix(addr, ":443") || strings.HasSuffix(addr, ":8443") {
-		return true
-	}
-	// 如果没有端口号，且不是 localhost/127.0.0.1，默认使用 TLS（生产环境）
-	if !strings.Contains(addr, ":") && !strings.Contains(addr, "localhost") && !strings.Contains(addr, "127.0.0.1") {
-		return true
-	}
-	return false
-}
-
 // connectAndLoop 建立 gRPC 双向流，启动心跳/端口转发上报协程，
 // 然后阻塞读取平台下发的命令直到连接断开。
 func (a *Agent) connectAndLoop() error {
-	// 根据连接地址判断是否需要 TLS
-	var dialOpt grpc.DialOption
-	if a.isSecureConnection() {
-		// 使用 TLS（标准证书验证）
-		dialOpt = grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{}))
-	} else {
-		// 本地开发或内网环境，使用 insecure
-		dialOpt = grpc.WithTransportCredentials(insecure.NewCredentials())
-	}
-
-	conn, err := grpc.NewClient(a.config.ServerAddr, dialOpt,
+	conn, err := grpc.NewClient(serverAddr,
+		grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{})),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
-			Time:                20 * time.Second, // 每 20s 发一次 HTTP/2 PING
-			Timeout:             10 * time.Second, // 等待 PING ACK 超时
-			PermitWithoutStream: true,             // 无 RPC 时也发 PING
+			Time:                20 * time.Second,
+			Timeout:             10 * time.Second,
+			PermitWithoutStream: true,
 		}),
 	)
 	if err != nil {
@@ -307,7 +280,7 @@ func (a *Agent) connectAndLoop() error {
 		return err
 	}
 
-	log.Printf("Connected to platform: %s", a.config.ServerAddr)
+	log.Printf("Connected to platform: %s", serverAddr)
 	a.setConnected(true, "")
 
 	// 连接后立即上报一次状态，无需等待第一个 ticker
@@ -342,9 +315,13 @@ func (a *Agent) sendHeartbeat(stream agent.AgentGateway_ConnectClient) {
 		return
 	}
 	hb := hostStats.Heartbeat
+	hb.Timestamp = time.Now().Unix()
 	hb.VirtType = a.config.VirtType
-	hb.EntryHost = a.config.Host
 	a.mu.RLock()
+	hb.EntryHost = a.config.Host
+	if hb.EntryHost == "" {
+		hb.EntryHost = a.entryIPv4 // 未手动配置时使用自动检测的公网 IPv4
+	}
 	hb.EntryIpv6 = a.entryIPv6
 	a.mu.RUnlock()
 
@@ -476,14 +453,6 @@ func (a *Agent) handleCommand(stream agent.AgentGateway_ConnectClient, env *agen
 	case *agent.PlatformEnvelope_ResetPassword:
 		err = a.mgr.ResetPassword(ctx, p.ResetPassword.VmId, p.ResetPassword.NewPassword)
 
-	case *agent.PlatformEnvelope_GetVmInfo:
-		// 查询结果以 JSON 编码写入 CommandResult.Data 返回给平台
-		var info *agent.VMSummary
-		info, err = a.mgr.GetVMInfo(ctx, p.GetVmInfo.VmId)
-		if err == nil {
-			respData, _ = json.Marshal(info)
-		}
-
 	case *agent.PlatformEnvelope_SetPortFwd:
 		proto := "tcp"
 		if p.SetPortFwd.Protocol == agent.Protocol_PROTOCOL_UDP {
@@ -502,6 +471,9 @@ func (a *Agent) handleCommand(stream agent.AgentGateway_ConnectClient, env *agen
 			proto = "udp"
 		}
 		err = a.pf.RemoveMapping(ctx, p.DelPortFwd.VmId, proto, int(p.DelPortFwd.HostPort))
+
+	case *agent.PlatformEnvelope_Ping:
+		return
 
 	case *agent.PlatformEnvelope_GetPortFwds:
 		var pfList []*db.PortForward
@@ -560,6 +532,37 @@ func vmStatusString(s agent.VMStatus) string {
 	default:
 		return ""
 	}
+}
+
+// detectIPv4 启动时获取一次公网 IPv4 并缓存，供 config.Host 为空时填入心跳。
+func (a *Agent) detectIPv4() {
+	ip := fetchPublicIPv4()
+	a.mu.Lock()
+	a.entryIPv4 = ip
+	a.mu.Unlock()
+	if ip != "" {
+		log.Printf("Public IPv4: %s", ip)
+	}
+}
+
+// fetchPublicIPv4 通过 api-ipv4.ip.sb 获取本机公网 IPv4 地址。
+func fetchPublicIPv4() string {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", "https://api-ipv4.ip.sb/ip", nil)
+	if err != nil {
+		return ""
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
 }
 
 // detectIPv6 启动时获取一次公网 IPv6 并缓存。

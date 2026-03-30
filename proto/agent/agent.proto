@@ -45,7 +45,6 @@ message AgentEnvelope {
 
   oneof payload {
     Heartbeat       heartbeat     = 2; // 心跳（每 30 秒上报一次）
-    VMStatusUpdate  vm_update     = 3; // VM 状态变化主动上报
     CommandResult   cmd_result    = 4; // 平台命令的执行结果
     PortForwardList port_fwd_list = 5; // CmdGetPortForwards 的响应
   }
@@ -115,14 +114,6 @@ message PortForwardEntry {
   string   description = 5; // 备注
 }
 
-// VM 状态变化主动上报（不等心跳，状态变更时立即发送）
-message VMStatusUpdate {
-  string   vm_id   = 1; // VM UUID
-  VMStatus status  = 2; // 最新状态
-  string   message = 3; // 附加说明（如错误原因）
-  string   ip      = 4; // VM 内部/公网 IP
-}
-
 // 平台命令的执行结果
 message CommandResult {
   string command_id = 1; // 对应 PlatformEnvelope.command_id
@@ -141,7 +132,7 @@ message PlatformEnvelope {
   // 平台生成的唯一命令 ID（持久化到 DB，用于重放）
   string command_id = 1;
 
-  reserved 11; // 原 sync_port_fwds (CmdSyncPortForwards)，已废弃，禁止复用
+  reserved 10, 11; // 10: 原 get_vm_info；11: 原 sync_port_fwds，已废弃，禁止复用
 
   oneof payload {
     CmdCreateVM         create_vm       = 2;  // 创建 VM
@@ -152,12 +143,15 @@ message PlatformEnvelope {
     CmdResetPassword    reset_password  = 7;  // 重置 root 密码
     CmdSetPortForward   set_port_fwd    = 8;  // 新增单条端口转发规则
     CmdDelPortForward   del_port_fwd    = 9;  // 删除单条端口转发规则
-    CmdGetVMInfo        get_vm_info     = 10; // 查询 VM 详情
     CmdUpdateVM         update_vm       = 12; // 修改 VM 配置 (机主/管理员)
     CmdReinstallVM      reinstall_vm    = 13; // 重装 VM 系统
     CmdGetPortForwards  get_port_fwds   = 14; // 查询某 VM 的端口转发规则列表
+    Ping                ping            = 15; // 服务端保活 ping，agent 忽略即可
   }
 }
+
+// 服务端定期下发的保活消息，用于维持 CF 代理的下行连接活跃。
+message Ping {}
 
 // 重装 VM
 message CmdReinstallVM {
@@ -231,11 +225,6 @@ message CmdDelPortForward {
   string   vm_id     = 1; // VM UUID
   Protocol protocol  = 2; // 协议
   int32    host_port = 3; // 要删除的宿主机端口
-}
-
-// 查询 VM 详情（返回结果通过 CommandResult.data 以 JSON 编码回传）
-message CmdGetVMInfo {
-  string vm_id = 1; // VM UUID
 }
 
 // 查询某 VM 的端口转发规则列表（结果通过 CommandResult.data JSON 回传）

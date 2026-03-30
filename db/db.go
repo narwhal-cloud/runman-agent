@@ -7,7 +7,6 @@ import (
 
 type Config struct {
 	ID            uint   `gorm:"primaryKey"`
-	ServerAddr    string `json:"server_addr"`
 	Token         string `json:"token"`
 	MonitorNIC    string `json:"monitor_nic"`    // 指定监控网卡
 	MonitorDisk   string `json:"monitor_disk"`   // 指定监控磁盘/挂载点
@@ -67,7 +66,7 @@ func Init(path string) (*DB, error) {
 	var count int64
 	db.Model(&Config{}).Count(&count)
 	if count == 0 {
-		db.Create(&Config{ServerAddr: "hosting.fuckip.me:443"})
+		db.Create(&Config{})
 	}
 
 	return &DB{orm: db}, nil
