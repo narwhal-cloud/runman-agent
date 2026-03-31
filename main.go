@@ -200,7 +200,7 @@ func (a *Agent) measureBandwidth() {
 		log.Printf("Bandwidth test failed: %v", err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	n, err := io.Copy(io.Discard, resp.Body)
 	if err != nil {
@@ -557,7 +557,7 @@ func fetchPublicIPv4() string {
 	if err != nil {
 		return ""
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	b, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return ""
@@ -588,7 +588,7 @@ func fetchPublicIPv6() string {
 	if err != nil {
 		return ""
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	b, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return ""
@@ -602,7 +602,7 @@ func pickFreePort(min, max int) (int, error) {
 		port := min + rand.Intn(max-min)
 		ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 		if err == nil {
-			ln.Close()
+			_ = ln.Close()
 			return port, nil
 		}
 	}
