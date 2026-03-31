@@ -13,7 +13,7 @@ AGENT_WEB_PORT="8792"
 PODMAN_NETWORK="narwhal-net"
 
 DOWNLOAD_BASE="https://github.com/narwhal-cloud/runman-agent/releases/latest/download"
-NETAVARK_URL="https://github.com/narwhal-cloud/netavark/releases/latest/download/netavark-test"
+NETAVARK_BASE="https://github.com/narwhal-cloud/netavark/releases/latest/download"
 RFW_BASE="https://github.com/narwhal-cloud/rfw/releases/latest/download"
 
 # ── Language selection ────────────────────────────────────────────────────────
@@ -44,7 +44,7 @@ install_packages() {
     local max=3 attempt=1
     while [ $attempt -le $max ]; do
         log "$(t "Installing packages (attempt $attempt)..." "安装软件包 (第 $attempt 次)...")"
-        if apt-get update -qq && apt-get install -y curl xfsprogs lxcfs uuid-runtime systemd-zram-generator jq sipcalc podman; then
+        if apt-get update -qq && apt-get install -y curl xfsprogs lxcfs uuid-runtime systemd-zram-generator jq sipcalc podman chrony; then
             log "$(t "Packages installed." "软件包安装成功。")"
             return 0
         fi
@@ -181,13 +181,36 @@ create_xfs_disk() {
     local disk=$1 size=$2 mount=$3 opts=$4
     if [ ! -f "$disk" ]; then
         log "$(t "Creating XFS disk $disk ($size)..." "创建 XFS 磁盘 $disk ($size)...")"
-        fallocate -l "$size" "$disk"
-        mkfs.xfs "$disk"
+        # 确保完全预分配空间，避免稀疏文件导致的高负载下挂载挂起
+        if ! fallocate -l "$size" "$disk" 2>/dev/null; then
+            log "$(t "fallocate failed, using dd..." "fallocate 失败，改用 dd...")"
+            local m_size
+            m_size=$(echo "$size" | sed 's/[Gg]/*1024/;s/[Mm]//' | bc 2>/dev/null || echo "20480")
+            dd if=/dev/zero of="$disk" bs=1M count="$m_size" status=progress
+        fi
+        mkfs.xfs -f "$disk"
     else
         log "$(t "$disk already exists, skipping." "$disk 已存在，跳过。")"
     fi
     mkdir -p "$mount"
-    mountpoint -q "$mount" || mount -o "$opts" "$disk" "$mount"
+
+    # 配置 udev 规则以开启 Direct IO，解决双重缓存导致的内存压力和挂载进程异常问题
+    log "$(t "Configuring udev rules for Direct IO..." "配置 udev 规则以开启 Direct IO...")"
+    cat > /etc/udev/rules.d/99-loop-directio.rules <<EOF
+ACTION=="add|change", SUBSYSTEM=="block", KERNEL=="loop*", ATTR{loop/backing_file}=="$disk", ATTR{loop/direct_io}="1"
+EOF
+    udevadm control --reload-rules && udevadm trigger
+
+    if ! mountpoint -q "$mount"; then
+        log "$(t "Mounting $disk..." "正在挂载 $disk...")"
+        mount -o "$opts" "$disk" "$mount"
+        # 立即尝试对当前设备开启 Direct IO
+        local loop_dev
+        loop_dev=$(mount | grep "$mount" | awk '{print $1}')
+        if [[ "$loop_dev" == /dev/loop* ]]; then
+            echo 1 > "/sys/block/${loop_dev#/dev/}/loop/direct_io" 2>/dev/null || true
+        fi
+    fi
     grep -q "$disk" /etc/fstab || echo "$disk $mount xfs $opts 0 0" >> /etc/fstab
 }
 
@@ -213,6 +236,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
+OOMScoreAdjust=-999
 ExecStart=$AGENT_BINARY \\
   --db $AGENT_DB \\
   --web :$AGENT_WEB_PORT \\
@@ -238,6 +262,15 @@ if systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null || [ -f "$AGENT_BINA
 
     ARCH=$(detect_arch)
     download_agent "$ARCH"
+
+    # Update netavark
+    if [ -f "/usr/libexec/podman/netavark" ]; then
+        if download_with_retry "$NETAVARK_BASE/netavark-new-$ARCH" "/usr/libexec/podman/netavark.new"; then
+            chmod +x /usr/libexec/podman/netavark.new
+            mv /usr/libexec/podman/netavark.new /usr/libexec/podman/netavark
+            log "$(t "✓ Custom netavark updated." "✓ 自定义 netavark 已更新。")"
+        fi
+    fi
 
     systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null && systemctl restart "$AGENT_SERVICE"
     log "$(t "✓ NarwhalCloud Agent updated." "✓ NarwhalCloud Agent 已更新。")"
@@ -275,6 +308,7 @@ log "$(t "Starting fresh installation..." "开始全新安装流程...")"
 
 install_packages
 enable_bbr
+start_service chrony
 start_service lxcfs
 
 cat > /etc/systemd/zram-generator.conf <<'EOF'
@@ -295,11 +329,23 @@ start_service podman.socket
 if [ -f "/xfs_disk.img" ]; then
     log "$(t "Data disk already exists, skipping." "数据盘已存在，跳过。")"
     mkdir -p /data
-    mountpoint -q /data || mount -o defaults,pquota,loop /xfs_disk.img /data
+    # 启用 noatime 减少元数据压力，增加稳定性
+    mountpoint -q /data || mount -o defaults,pquota,loop,noatime /xfs_disk.img /data
+    # 确保对已存在的镜像也应用配置规则
+    cat > /etc/udev/rules.d/99-loop-directio.rules <<EOF
+ACTION=="add|change", SUBSYSTEM=="block", KERNEL=="loop*", ATTR{loop/backing_file}=="/xfs_disk.img", ATTR{loop/direct_io}="1"
+EOF
+    udevadm control --reload-rules && udevadm trigger
+    local _loop_dev
+    _loop_dev=$(mount | grep "/data" | awk '{print $1}')
+    if [[ "$_loop_dev" == /dev/loop* ]]; then
+        echo 1 > "/sys/block/${_loop_dev#/dev/}/loop/direct_io" 2>/dev/null || true
+    fi
 else
     read -rp "$(t "Enter data disk size (e.g. 20G): " "请输入数据盘大小 (例如 20G): ")" xfs_size
     xfs_size=${xfs_size:-20G}
-    create_xfs_disk "/xfs_disk.img" "$xfs_size" "/data" "defaults,pquota,loop"
+    # 增加 noatime 优化性能和稳定性
+    create_xfs_disk "/xfs_disk.img" "$xfs_size" "/data" "defaults,pquota,loop,noatime"
 fi
 
 cat > /etc/containers/storage.conf <<'EOF'
@@ -374,7 +420,7 @@ PYEOF
     log "$(t "✓ All /64 addresses removed, host IPv6 re-added as /128, SLAAC disabled." "✓ 已删除所有 /64 地址，宿主机 IPv6 已改为 /128，SLAAC 已禁用。")"
 
     # 先安装自定义 netavark（支持 snat_ipv6 选项），再操作网络
-    if download_with_retry "$NETAVARK_URL" "/usr/libexec/podman/netavark"; then
+    if download_with_retry "$NETAVARK_BASE/netavark-new-$ARCH" "/usr/libexec/podman/netavark"; then
         chmod +x /usr/libexec/podman/netavark
         log "$(t "✓ Custom netavark installed." "✓ 自定义 netavark 已安装。")"
     else

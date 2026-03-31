@@ -62,7 +62,7 @@ func buildResourceConfig(cpu int64, ramMb int64, cpuset string) specgen.Containe
 	if ramMb > 0 {
 		res.Memory = &specs.LinuxMemory{
 			Limit:            ptr(ramMb * 1024 * 1024),
-			DisableOOMKiller: ptr(false),
+			DisableOOMKiller: ptr(false), // 允许 OOM Killer 杀死失控的容器进程
 		}
 	}
 	if cpu > 0 {
@@ -75,8 +75,8 @@ func buildResourceConfig(cpu int64, ramMb int64, cpuset string) specgen.Containe
 	return specgen.ContainerResourceConfig{
 		ResourceLimits: res,
 		Rlimits: []specs.POSIXRlimit{
-			{Type: "nofile", Soft: 1024, Hard: 1024}, // 文件描述符（含套接字/连接数）
-			{Type: "nproc", Soft: 1024, Hard: 1024},  // 进程/线程数
+			{Type: "RLIMIT_NOFILE", Soft: 65535, Hard: 65535}, // 提高文件描述符上限
+			{Type: "RLIMIT_NPROC", Soft: 65535, Hard: 65535},  // 提高进程数上限
 		},
 	}
 }
