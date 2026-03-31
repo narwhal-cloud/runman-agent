@@ -13,7 +13,7 @@ AGENT_WEB_PORT="8792"
 PODMAN_NETWORK="narwhal-net"
 
 DOWNLOAD_BASE="https://github.com/narwhal-cloud/runman-agent/releases/latest/download"
-NETAVARK_BASE="https://github.com/narwhal-cloud/netavark/releases/latest/download"
+NETAVARK_URL="https://github.com/narwhal-cloud/netavark/releases/latest/download/netavark-test"
 RFW_BASE="https://github.com/narwhal-cloud/rfw/releases/latest/download"
 
 # ── Language selection ────────────────────────────────────────────────────────
@@ -324,9 +324,10 @@ if [[ "${_ipv6:-Y}" =~ ^[Yy]$ ]]; then
     fi
 fi
 
-if [ "$IPV6_CONFIG" = "local" ]; then
+if podman network exists "$PODMAN_NETWORK" 2>/dev/null; then
+    log "$(t "Podman network $PODMAN_NETWORK already exists, skipping." "Podman 网络 $PODMAN_NETWORK 已存在，跳过创建。")"
+elif [ "$IPV6_CONFIG" = "local" ]; then
     log "$(t "Creating Podman network with local IPv6..." "使用本地 IPv6 网段创建 Podman 网络...")"
-    podman network exists "$PODMAN_NETWORK" 2>/dev/null && podman network rm "$PODMAN_NETWORK"
     podman network create \
         --driver=bridge \
         --subnet=10.91.0.0/20 \
@@ -334,7 +335,6 @@ if [ "$IPV6_CONFIG" = "local" ]; then
         --ipv6 \
         --subnet=fd91:cafe:cafe:10::/64 \
         --gateway=fd91:cafe:cafe:10::1 \
-        --opt snat_ipv6=true \
         "$PODMAN_NETWORK"
     log "$(t "✓ Podman network created (local IPv6)." "✓ Podman 网络创建完成（本地 IPv6）。")"
 
@@ -344,55 +344,55 @@ else
     IPV6_PREFIX=$(echo "$IPV6_CONFIG" | cut -d'|' -f3)
     log "$(t "Public IPv6: $IPV6_ADDR/$IPV6_PREFIX on $IPV6_IFACE" "公网 IPv6: $IPV6_ADDR/$IPV6_PREFIX 网卡: $IPV6_IFACE")"
 
-    NETWORK_PREFIX=$(sipcalc "$IPV6_ADDR/$IPV6_PREFIX" 2>/dev/null | grep "Network range" | awk '{print $4}' | cut -d'-' -f1)
-    EXPANDED=$(expand_ipv6 "${NETWORK_PREFIX:-$IPV6_ADDR}")
-    P1=$(echo "$EXPANDED" | cut -d':' -f1); P2=$(echo "$EXPANDED" | cut -d':' -f2)
-    P3=$(echo "$EXPANDED" | cut -d':' -f3); P4=$(echo "$EXPANDED" | cut -d':' -f4)
-    P5=$(echo "$EXPANDED" | cut -d':' -f5); P6=$(echo "$EXPANDED" | cut -d':' -f6)
+    # 用 python3 计算容器子网（Debian 13 标配 python3）
+    # 策略：取宿主机前缀，在其内偏移固定量得到 /112 容器段，避免与 EUI-64/隐私地址冲突
+    read -r CONTAINER_BASE CONTAINER_GW <<< "$(python3 - <<PYEOF
+import ipaddress
+net = ipaddress.IPv6Network('$IPV6_ADDR/$IPV6_PREFIX', strict=False)
+base_int = int(net.network_address)
+prefix = int('$IPV6_PREFIX')
+# 在前缀内取偏移量 0xcafe（51966），放在 /112 边界上
+offset = 0xcafe << (128 - prefix - 16) if prefix <= 112 else 0
+container_int = (base_int | offset) & ~((1 << (128 - 112)) - 1)
+container_net = ipaddress.IPv6Network(f'{ipaddress.IPv6Address(container_int)}/112', strict=False)
+gw = container_net.network_address + 1
+print(str(container_net.network_address), str(gw))
+PYEOF
+)"
+    log "$(t "Container subnet: ${CONTAINER_BASE}/112  gateway: ${CONTAINER_GW}" "容器子网: ${CONTAINER_BASE}/112  网关: ${CONTAINER_GW}")"
 
-    if [ "$IPV6_PREFIX" -le 64 ]; then
-        CONTAINER_BASE="${P1}:${P2}:${P3}:${P4}:cafe:babe:0:0"
-        CONTAINER_GW="${P1}:${P2}:${P3}:${P4}:cafe:babe:0:1"
-    else
-        CONTAINER_BASE="${P1}:${P2}:${P3}:${P4}:${P5}:${P6}:0:0"
-        CONTAINER_GW="${P1}:${P2}:${P3}:${P4}:${P5}:${P6}:0:1"
-    fi
+    # 先禁止 SLAAC 自动配置，防止后续再生成 /64 地址（保留 RA 默认路由）
+    sysctl -w "net.ipv6.conf.$IPV6_IFACE.autoconf=0" > /dev/null
+    echo "net.ipv6.conf.$IPV6_IFACE.autoconf=0" >> /etc/sysctl.d/99-narwhalcloud.conf
+    # 删除该网卡上所有 global scope 的 /64 地址（含隐私地址 mngtmpaddr），
+    # 消除对应的 /64 内核连接路由——netavark 检测到该路由时会拒绝创建子集子网。
+    while IFS= read -r _addr64; do
+        ip addr del "$_addr64" dev "$IPV6_IFACE" 2>/dev/null || true
+    done < <(ip -6 addr show dev "$IPV6_IFACE" scope global | awk '/inet6.*\/64/{print $2}')
+    # 以 /128 重新添加宿主机公网地址，不产生连接路由
+    ip addr add "$IPV6_ADDR/128" dev "$IPV6_IFACE" 2>/dev/null || true
+    log "$(t "✓ All /64 addresses removed, host IPv6 re-added as /128, SLAAC disabled." "✓ 已删除所有 /64 地址，宿主机 IPv6 已改为 /128，SLAAC 已禁用。")"
 
-    ip addr del "$IPV6_ADDR/$IPV6_PREFIX" dev "$IPV6_IFACE" 2>/dev/null || true
-    ip addr add "$IPV6_ADDR/112" dev "$IPV6_IFACE"
-
-    cp /etc/network/interfaces "/etc/network/interfaces.bak.$(date +%Y%m%d%H%M%S)"
-    if grep -q "iface $IPV6_IFACE inet6 static" /etc/network/interfaces; then
-        sed -i "/iface $IPV6_IFACE inet6 static/,/^$/s|address.*|address $IPV6_ADDR/112|" /etc/network/interfaces
-    else
-        cat >> /etc/network/interfaces <<EOF
-
-# IPv6 for containers (narwhalcloud)
-iface $IPV6_IFACE inet6 static
-    address $IPV6_ADDR/112
-EOF
-    fi
-
-    podman network exists "$PODMAN_NETWORK" 2>/dev/null && podman network rm "$PODMAN_NETWORK"
-    podman network create \
-        --driver=bridge \
-        --subnet=10.91.0.0/20  --gateway=10.91.0.1 \
-        --ipv6 \
-        --subnet="${CONTAINER_BASE}/112" --gateway="$CONTAINER_GW" \
-        --opt snat_ipv6=false \
-        "$PODMAN_NETWORK"
-
-    NDP_EXTRA_FLAGS=" \\
-  --ndp-iface $IPV6_IFACE \\
-  --ndp-subnet ${CONTAINER_BASE}/112 \\
-  --ndp-network $PODMAN_NETWORK"
-
-    if download_with_retry "$NETAVARK_BASE/netavark-$ARCH" "/usr/libexec/podman/netavark"; then
+    # 先安装自定义 netavark（支持 snat_ipv6 选项），再操作网络
+    if download_with_retry "$NETAVARK_URL" "/usr/libexec/podman/netavark"; then
         chmod +x /usr/libexec/podman/netavark
         log "$(t "✓ Custom netavark installed." "✓ 自定义 netavark 已安装。")"
     else
         log "$(t "Warning: netavark download failed, using system default." "警告: netavark 下载失败，使用系统默认版本。")"
     fi
+
+    podman network create \
+        --driver=bridge \
+        --subnet=10.91.0.0/20 --gateway=10.91.0.1 \
+        --ipv6 \
+        --subnet="${CONTAINER_BASE}/112" --gateway="$CONTAINER_GW" \
+        "$PODMAN_NETWORK"
+    # snat_ipv6=false 不能通过 CLI 传入（Podman CLI 有白名单校验），直接注入 JSON。
+    NETWORK_JSON="/etc/containers/networks/${PODMAN_NETWORK}.json"
+    jq '.options["snat_ipv6"] = "false"' "$NETWORK_JSON" > "${NETWORK_JSON}.tmp" \
+        && mv "${NETWORK_JSON}.tmp" "$NETWORK_JSON" \
+        && log "$(t "✓ snat_ipv6=false injected into network config." "✓ snat_ipv6=false 已注入网络配置。")" \
+        || log "$(t "Warning: failed to inject snat_ipv6=false." "警告: 注入 snat_ipv6=false 失败。")"
 
     NDP_EXTRA_FLAGS=" \\
   --ndp-iface $IPV6_IFACE \\
