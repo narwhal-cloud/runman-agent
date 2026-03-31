@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -28,10 +27,7 @@ import (
 	"runman-agent/proto/agent"
 )
 
-const (
-	networkName = "narwhal-net"
-	networkCIDR = "10.91.0.0/20" // 与 install.sh 保持一致
-)
+const networkName = "narwhal-net"
 
 func ptr[T any](v T) *T { return &v }
 
@@ -52,70 +48,13 @@ func New(socketPath string) (*Manager, error) {
 		return nil, err
 	}
 
-	mgr := &Manager{ctx: ctx}
-	// 延迟初始化网络：在首次创建容器时检查和创建网络
-
-	return mgr, nil
+	return &Manager{ctx: ctx}, nil
 }
 
 func (m *Manager) timeoutCtx() context.Context {
 	ctx, cancel := context.WithTimeout(m.ctx, time.Minute)
-	_ = cancel // 调用方无需提前取消；超时本身会清理资源
+	_ = cancel // timer goroutine exits when timeout fires; acceptable for short-lived ops
 	return ctx
-}
-
-// ensureNetwork 确保 Narwhal 网络存在，如果不存在则创建
-func (m *Manager) ensureNetwork() error {
-	// 先尝试检查网络是否已存在
-	ctx := m.timeoutCtx()
-	checkCmd := exec.CommandContext(ctx, "podman", "network", "inspect", networkName)
-	if err := checkCmd.Run(); err == nil {
-		// 网络已存在
-		return nil
-	}
-
-	// 网络不存在，尝试创建
-	// 本地 IPv6 网段 (ULA) 需要开启 SNAT 才能访问公网
-	cmd := exec.CommandContext(ctx, "podman", "network", "create",
-		"--driver=bridge",
-		"--subnet="+networkCIDR,
-		"--gateway=10.91.0.1",
-		"--ipv6",
-		"--subnet=fd91:cafe:cafe:10::/64",
-		"--gateway=fd91:cafe:cafe:10::1",
-		"--opt", "snat_ipv6=true",
-		networkName)
-
-	var stdout, stderr strings.Builder
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		stdout_ := stdout.String()
-		stderr_ := stderr.String()
-
-		// 检查是否是网络已存在的错误（可能是并发创建）
-		if strings.Contains(stdout_, "already exists") ||
-			strings.Contains(stderr_, "already exists") ||
-			strings.Contains(stdout_, "network already exists") ||
-			strings.Contains(stderr_, "network already exists") {
-			return nil // 网络已存在（可能被其他进程创建），不是错误
-		}
-
-		// 其他错误 - 返回详细信息供用户手动处理
-		errDetail := stderr_
-		if errDetail == "" {
-			errDetail = err.Error()
-		}
-		return fmt.Errorf(
-			"failed to create podman network '%s':\n"+
-				"  Error: %s\n"+
-				"  Please create it manually:\n"+
-				"    sudo podman network create --subnet=%s %s",
-			networkName, errDetail, networkCIDR, networkName,
-		)
-	}
-	return nil
 }
 
 func buildResourceConfig(cpu int64, ramMb int64, cpuset string) specgen.ContainerResourceConfig {
@@ -167,11 +106,6 @@ func lxcfsMounts() []specs.Mount {
 }
 
 func (m *Manager) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error {
-	// 0. 确保网络存在
-	if err := m.ensureNetwork(); err != nil {
-		return fmt.Errorf("ensure network: %w", err)
-	}
-
 	// 1. 拉取镜像
 	_, err := images.Pull(m.timeoutCtx(), req.OsImage, &images.PullOptions{
 		Policy: ptr("newer"),
@@ -201,25 +135,23 @@ func (m *Manager) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error {
 		}
 	}
 
-	netOpts := map[string]netTypes.PerNetworkOptions{
-		networkName: netOpt,
-	}
-
-	// 处理限速选项
-	networkOptions := map[string][]string{}
+	// 限速选项通过 PerNetworkOptions.Options 传递，Podman 会原样交给 netavark
 	if req.BandwidthMbps > 0 {
 		rate := int64(req.BandwidthMbps) * 1000000 // bits per second
-		burst := rate / 10                         // 简单设定为 1/10 (即 100ms 突发)
+		burst := rate / 10                         // 突发容量 = 100ms 流量
 		if burst < 1000000 {
-			burst = 1000000 // 最小值 1MB
+			burst = 1000000 // 最小 1 Mbit
 		}
-		latency := 50 // 默认延迟 50ms
+		netOpt.Options = map[string]string{
+			"bandwidth_rate":    fmt.Sprintf("%d", rate),
+			"bandwidth_burst":   fmt.Sprintf("%d", burst),
+			"bandwidth_latency": "50",
+		}
+	}
 
-		networkOptions[networkName] = []string{
-			fmt.Sprintf("bandwidth_rate=%d", rate),
-			fmt.Sprintf("bandwidth_burst=%d", burst),
-			fmt.Sprintf("bandwidth_latency=%d", latency),
-		}
+	// netOpt 完整赋值后再放入 map
+	netOpts := map[string]netTypes.PerNetworkOptions{
+		networkName: netOpt,
 	}
 
 	res, err := containers.CreateWithSpec(m.timeoutCtx(), &specgen.SpecGenerator{
@@ -239,9 +171,8 @@ func (m *Manager) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error {
 			Mounts: lxcfsMounts(),
 		},
 		ContainerNetworkConfig: specgen.ContainerNetworkConfig{
-			Networks:       netOpts,
-			DNSServers:     []net.IP{net.ParseIP("1.1.1.1"), net.ParseIP("2606:4700:4700::1111")},
-			NetworkOptions: networkOptions,
+			Networks:   netOpts,
+			DNSServers: []net.IP{net.ParseIP("1.1.1.1"), net.ParseIP("2606:4700:4700::1111")},
 		},
 		ContainerResourceConfig: buildResourceConfig(int64(req.Cpu), req.RamMb, manager.CpusetFrom(ctx)),
 		ContainerHealthCheckConfig: specgen.ContainerHealthCheckConfig{
