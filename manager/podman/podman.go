@@ -75,8 +75,8 @@ func buildResourceConfig(cpu int64, ramMb int64, cpuset string) specgen.Containe
 	return specgen.ContainerResourceConfig{
 		ResourceLimits: res,
 		Rlimits: []specs.POSIXRlimit{
-			{Type: "RLIMIT_NOFILE", Soft: 65535, Hard: 65535}, // 提高文件描述符上限
-			{Type: "RLIMIT_NPROC", Soft: 65535, Hard: 65535},  // 提高进程数上限
+			{Type: "nofile", Soft: 65535, Hard: 65535}, // 提高文件描述符上限
+			{Type: "nproc", Soft: 65535, Hard: 65535},  // 提高进程数上限
 		},
 	}
 }
