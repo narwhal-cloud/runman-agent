@@ -531,12 +531,7 @@ func (s *Server) handleAddPortFwd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mbps := 0
-	if conf, _ := s.db.GetVMConfig(vmID); conf != nil {
-		mbps = conf.BandwidthMbps
-	}
-
-	if err := s.pf.AddMapping(r.Context(), vmID, req.Protocol, req.HostPort, req.GuestPort, mbps, req.Description); err != nil {
+	if err := s.pf.AddMapping(r.Context(), vmID, req.Protocol, req.HostPort, req.GuestPort, req.Description); err != nil {
 		jsonErr(w, err, 500)
 		return
 	}
@@ -573,11 +568,6 @@ func (s *Server) handleSyncPortFwds(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mbps := 0
-	if conf, _ := s.db.GetVMConfig(vmID); conf != nil {
-		mbps = conf.BandwidthMbps
-	}
-
 	desired := make([]portforward.DesiredRule, 0, len(rules))
 	for _, rule := range rules {
 		if rule.Protocol != "tcp" && rule.Protocol != "udp" {
@@ -591,7 +581,7 @@ func (s *Server) handleSyncPortFwds(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	if err := s.pf.SyncForVM(r.Context(), vmID, desired, mbps); err != nil {
+	if err := s.pf.SyncForVM(r.Context(), vmID, desired); err != nil {
 		jsonErr(w, err, 500)
 		return
 	}

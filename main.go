@@ -134,7 +134,7 @@ func main() {
 			log.Printf("auto SSH portfwd: %v", err)
 			return
 		}
-		if err := pf.AddMapping(ctx, vmID, "tcp", port, 22, bandwidthMbps, "ssh"); err != nil {
+		if err := pf.AddMapping(ctx, vmID, "tcp", port, 22, "ssh"); err != nil {
 			log.Printf("auto SSH portfwd %d→22 for %s: %v", port, vmID, err)
 			return
 		}
@@ -458,12 +458,7 @@ func (a *Agent) handleCommand(stream agent.AgentGateway_ConnectClient, env *agen
 		if p.SetPortFwd.Protocol == agent.Protocol_PROTOCOL_UDP {
 			proto = "udp"
 		}
-		// 从 DB 读取该 VM 的带宽配置用于限速
-		mbps := 0
-		if conf, _ := a.db.GetVMConfig(p.SetPortFwd.VmId); conf != nil {
-			mbps = conf.BandwidthMbps
-		}
-		err = a.pf.AddMapping(ctx, p.SetPortFwd.VmId, proto, int(p.SetPortFwd.HostPort), int(p.SetPortFwd.GuestPort), mbps, p.SetPortFwd.Description)
+		err = a.pf.AddMapping(ctx, p.SetPortFwd.VmId, proto, int(p.SetPortFwd.HostPort), int(p.SetPortFwd.GuestPort), p.SetPortFwd.Description)
 
 	case *agent.PlatformEnvelope_DelPortFwd:
 		proto := "tcp"
