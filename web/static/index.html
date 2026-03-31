@@ -473,8 +473,12 @@ async function refreshVMs() {
                 <div class="text-slate-500"><span class="text-[9px] font-bold uppercase w-8 inline-block">RAM</span> ${vm.ram_used_mb||0}/${vm.ram_total_mb||'?'} MB</div>
             </td>
             <td class="px-4 py-3 font-mono text-[10px] text-slate-400 space-y-0.5">
-                <div>↓ ${formatBytes(vm.traffic_in_bytes||0)}</div>
-                <div>↑ ${formatBytes(vm.traffic_out_bytes||0)}</div>
+                <div title="Total Traffic">
+                    ↓ ${formatBytes(vm.traffic_in_bytes||0)} / ↑ ${formatBytes(vm.traffic_out_bytes||0)}
+                </div>
+                <div class="text-indigo-400 font-bold" title="Monthly Traffic">
+                    📅 ↓ ${formatBytes(vm.monthly_traffic_in||0)} / ↑ ${formatBytes(vm.monthly_traffic_out||0)}
+                </div>
             </td>
             <td class="px-4 py-3">
                 <div class="flex items-center gap-1 flex-wrap">

@@ -132,6 +132,12 @@ func (d *DB) DeleteTraffic(vmId string) error {
 	return d.orm.Delete(&Traffic{}, "vm_id = ?", vmId).Error
 }
 
+func (d *DB) GetTraffic(vmId string) (*Traffic, error) {
+	var t Traffic
+	err := d.orm.First(&t, "vm_id = ?", vmId).Error
+	return &t, err
+}
+
 // UpdateTraffic 流量统计逻辑
 func (d *DB) UpdateTraffic(vmId string, rawIn, rawOut int64, month string) (totalIn, totalOut, monthIn, monthOut int64, err error) {
 	var t Traffic

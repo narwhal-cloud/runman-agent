@@ -259,6 +259,15 @@ func (s *Server) handleListVMs(w http.ResponseWriter, r *http.Request) {
 	}
 	items := make([]vmItem, len(vms))
 	for i, vm := range vms {
+		// 从数据库获取月度流量
+		if t, err := s.db.GetTraffic(vm.VmId); err == nil {
+			vm.MonthlyTrafficIn = t.MonthIn
+			vm.MonthlyTrafficOut = t.MonthOut
+			// 累计流量以数据库为准，因为数据库包含了重启前的历史增量
+			vm.TrafficInBytes = t.TotalIn
+			vm.TrafficOutBytes = t.TotalOut
+		}
+
 		item := vmItem{VMSummary: vm}
 		if conf, _ := s.db.GetVMConfig(vm.VmId); conf != nil {
 			item.RamTotalMb = conf.MemoryMB
