@@ -128,22 +128,39 @@ func (d *DB) DeletePortForwardsForVM(vmId string) error {
 	return d.orm.Delete(&PortForward{}, "vm_id = ?", vmId).Error
 }
 
+func (d *DB) DeleteTraffic(vmId string) error {
+	return d.orm.Delete(&Traffic{}, "vm_id = ?", vmId).Error
+}
+
 // UpdateTraffic 流量统计逻辑
 func (d *DB) UpdateTraffic(vmId string, rawIn, rawOut int64, month string) (totalIn, totalOut, monthIn, monthOut int64, err error) {
 	var t Traffic
 	err = d.orm.First(&t, "vm_id = ?", vmId).Error
 	if err != nil {
-		t = Traffic{VMID: vmId, RawIn: rawIn, RawOut: rawOut, Month: month}
+		// 首次看到该 VM，将当前流量作为初始值计入统计
+		t = Traffic{
+			VMID:     vmId,
+			RawIn:    rawIn,
+			RawOut:   rawOut,
+			TotalIn:  rawIn,
+			TotalOut: rawOut,
+			Month:    month,
+			MonthIn:  rawIn,
+			MonthOut: rawOut,
+		}
 		d.orm.Create(&t)
+		return t.TotalIn, t.TotalOut, t.MonthIn, t.MonthOut, nil
 	}
 
+	// 计算增量
 	diffIn := rawIn - t.RawIn
 	if diffIn < 0 {
-		diffIn = 0
+		// 计数器重置（如容器/宿主机重启），将当前 raw 值全量计入增量
+		diffIn = rawIn
 	}
 	diffOut := rawOut - t.RawOut
 	if diffOut < 0 {
-		diffOut = 0
+		diffOut = rawOut
 	}
 
 	t.RawIn = rawIn
@@ -152,6 +169,7 @@ func (d *DB) UpdateTraffic(vmId string, rawIn, rawOut int64, month string) (tota
 	t.TotalOut += diffOut
 
 	if t.Month != month {
+		// 跨月重置
 		t.Month = month
 		t.MonthIn = diffIn
 		t.MonthOut = diffOut

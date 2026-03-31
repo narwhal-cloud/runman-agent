@@ -439,6 +439,7 @@ func (a *Agent) handleCommand(stream agent.AgentGateway_ConnectClient, env *agen
 		err = a.mgr.DeleteVM(ctx, p.DeleteVm.VmId)
 		// 无论删除是否成功都清理 DB 记录，避免残留脏数据
 		_ = a.db.DeleteVMConfig(p.DeleteVm.VmId)
+		_ = a.db.DeleteTraffic(p.DeleteVm.VmId)
 		a.pf.DeleteVM(ctx, p.DeleteVm.VmId)
 
 	case *agent.PlatformEnvelope_StartVm:

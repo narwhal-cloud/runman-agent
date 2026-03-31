@@ -949,17 +949,23 @@ func (m *Manager) GetVMInfo(_ context.Context, vmID string) (*agent.VMSummary, e
 	ip, _ := m.GetVMIP(nil, vmID)
 	status := agent.VMStatus_VM_STATUS_STOPPED
 
+	var in, out int64
 	if m.isRunning(vmID) {
 		var info vmInfoResp
 		if err := m.apiGet(vmID, "vm.info", &info); err == nil {
 			status = mapState(info.State)
 		}
+		if nc, err := m.allocNetwork(vmID); err == nil {
+			in, out = m.getTraffic(nc.Tap)
+		}
 	}
 
 	return &agent.VMSummary{
-		VmId:   vmID,
-		Status: status,
-		Ip:     ip,
+		VmId:            vmID,
+		Status:          status,
+		Ip:              ip,
+		TrafficInBytes:  in,
+		TrafficOutBytes: out,
 	}, nil
 }
 
@@ -984,16 +990,22 @@ func (m *Manager) ListVMs(_ context.Context) ([]*agent.VMSummary, error) {
 
 		ip, _ := m.GetVMIP(nil, vmID)
 		status := agent.VMStatus_VM_STATUS_STOPPED
+		var in, out int64
 		if m.isRunning(vmID) {
-			var info vmInfoResp
-			if m.apiGet(vmID, "vm.info", &info) == nil {
-				status = mapState(info.State)
+			if err := m.apiGet(vmID, "vm.info", nil); err == nil {
+				// 暂时只判断运行中，不细分 created/paused
+				status = agent.VMStatus_VM_STATUS_RUNNING
+				if nc, err := m.allocNetwork(vmID); err == nil {
+					in, out = m.getTraffic(nc.Tap)
+				}
 			}
 		}
 		result = append(result, &agent.VMSummary{
-			VmId:   vmID,
-			Status: status,
-			Ip:     ip,
+			VmId:            vmID,
+			Status:          status,
+			Ip:              ip,
+			TrafficInBytes:  in,
+			TrafficOutBytes: out,
 		})
 	}
 	return result, nil
@@ -1064,6 +1076,21 @@ func mapState(state string) agent.VMStatus {
 	default:
 		return agent.VMStatus_VM_STATUS_STOPPED
 	}
+}
+
+func (m *Manager) getTraffic(tap string) (in, out int64) {
+	in = readInt64(fmt.Sprintf("/sys/class/net/%s/statistics/rx_bytes", tap))
+	out = readInt64(fmt.Sprintf("/sys/class/net/%s/statistics/tx_bytes", tap))
+	return
+}
+
+func readInt64(path string) int64 {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	val, _ := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+	return val
 }
 
 // offlineChpasswd 使用 losetup + mount + chroot 离线修改 root 密码。
