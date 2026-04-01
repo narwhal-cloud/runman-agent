@@ -379,26 +379,6 @@ func (a *Agent) handleCommand(stream agent.AgentGateway_ConnectClient, env *agen
 		// VMService.CreateVM 内部已持久化 VMConfig（含 cpuset）
 		err = a.mgr.CreateVM(ctx, p.CreateVm)
 
-	case *agent.PlatformEnvelope_UpdateVm:
-		err = a.mgr.UpdateVM(ctx, p.UpdateVm)
-		if err == nil {
-			if conf, _ := a.db.GetVMConfig(p.UpdateVm.VmId); conf != nil {
-				// 只更新非零字段，保留原有值
-				if p.UpdateVm.Cpu > 0 {
-					conf.CPU = int(p.UpdateVm.Cpu)
-				}
-				if p.UpdateVm.RamMb > 0 {
-					conf.MemoryMB = p.UpdateVm.RamMb
-				}
-				if p.UpdateVm.BandwidthMbps > 0 {
-					conf.BandwidthMbps = int(p.UpdateVm.BandwidthMbps)
-					// 同步更新端口转发限速
-					a.pf.UpdateVMBandwidth(ctx, p.UpdateVm.VmId, int(p.UpdateVm.BandwidthMbps))
-				}
-				_ = a.db.SaveVMConfig(conf)
-			}
-		}
-
 	case *agent.PlatformEnvelope_ReinstallVm:
 		err = a.mgr.ReinstallVM(ctx, p.ReinstallVm)
 		if err == nil {

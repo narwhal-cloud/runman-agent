@@ -805,7 +805,6 @@ type PlatformEnvelope struct {
 	//	*PlatformEnvelope_ResetPassword
 	//	*PlatformEnvelope_SetPortFwd
 	//	*PlatformEnvelope_DelPortFwd
-	//	*PlatformEnvelope_UpdateVm
 	//	*PlatformEnvelope_ReinstallVm
 	//	*PlatformEnvelope_GetPortFwds
 	//	*PlatformEnvelope_Ping
@@ -930,15 +929,6 @@ func (x *PlatformEnvelope) GetDelPortFwd() *CmdDelPortForward {
 	return nil
 }
 
-func (x *PlatformEnvelope) GetUpdateVm() *CmdUpdateVM {
-	if x != nil {
-		if x, ok := x.Payload.(*PlatformEnvelope_UpdateVm); ok {
-			return x.UpdateVm
-		}
-	}
-	return nil
-}
-
 func (x *PlatformEnvelope) GetReinstallVm() *CmdReinstallVM {
 	if x != nil {
 		if x, ok := x.Payload.(*PlatformEnvelope_ReinstallVm); ok {
@@ -1002,10 +992,6 @@ type PlatformEnvelope_DelPortFwd struct {
 	DelPortFwd *CmdDelPortForward `protobuf:"bytes,9,opt,name=del_port_fwd,json=delPortFwd,proto3,oneof"` // 删除单条端口转发规则
 }
 
-type PlatformEnvelope_UpdateVm struct {
-	UpdateVm *CmdUpdateVM `protobuf:"bytes,12,opt,name=update_vm,json=updateVm,proto3,oneof"` // 修改 VM 配置 (机主/管理员)
-}
-
 type PlatformEnvelope_ReinstallVm struct {
 	ReinstallVm *CmdReinstallVM `protobuf:"bytes,13,opt,name=reinstall_vm,json=reinstallVm,proto3,oneof"` // 重装 VM 系统
 }
@@ -1033,8 +1019,6 @@ func (*PlatformEnvelope_ResetPassword) isPlatformEnvelope_Payload() {}
 func (*PlatformEnvelope_SetPortFwd) isPlatformEnvelope_Payload() {}
 
 func (*PlatformEnvelope_DelPortFwd) isPlatformEnvelope_Payload() {}
-
-func (*PlatformEnvelope_UpdateVm) isPlatformEnvelope_Payload() {}
 
 func (*PlatformEnvelope_ReinstallVm) isPlatformEnvelope_Payload() {}
 
@@ -1172,83 +1156,6 @@ func (x *CmdReinstallVM) GetBandwidthMbps() int32 {
 	return 0
 }
 
-// 修改 VM 配置
-type CmdUpdateVM struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	VmId          string                 `protobuf:"bytes,1,opt,name=vm_id,json=vmId,proto3" json:"vm_id,omitempty"`                             // VM UUID
-	Cpu           int32                  `protobuf:"varint,2,opt,name=cpu,proto3" json:"cpu,omitempty"`                                          // 新 CPU 核数 (0 表示不修改)
-	RamMb         int64                  `protobuf:"varint,3,opt,name=ram_mb,json=ramMb,proto3" json:"ram_mb,omitempty"`                         // 新内存 MB (0 表示不修改)
-	DiskGb        int64                  `protobuf:"varint,4,opt,name=disk_gb,json=diskGb,proto3" json:"disk_gb,omitempty"`                      // 新磁盘 GB (0 表示不修改)
-	BandwidthMbps int32                  `protobuf:"varint,5,opt,name=bandwidth_mbps,json=bandwidthMbps,proto3" json:"bandwidth_mbps,omitempty"` // 新带宽 Mbps (负数表示不修改)
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *CmdUpdateVM) Reset() {
-	*x = CmdUpdateVM{}
-	mi := &file_proto_agent_agent_proto_msgTypes[10]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *CmdUpdateVM) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*CmdUpdateVM) ProtoMessage() {}
-
-func (x *CmdUpdateVM) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[10]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use CmdUpdateVM.ProtoReflect.Descriptor instead.
-func (*CmdUpdateVM) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{10}
-}
-
-func (x *CmdUpdateVM) GetVmId() string {
-	if x != nil {
-		return x.VmId
-	}
-	return ""
-}
-
-func (x *CmdUpdateVM) GetCpu() int32 {
-	if x != nil {
-		return x.Cpu
-	}
-	return 0
-}
-
-func (x *CmdUpdateVM) GetRamMb() int64 {
-	if x != nil {
-		return x.RamMb
-	}
-	return 0
-}
-
-func (x *CmdUpdateVM) GetDiskGb() int64 {
-	if x != nil {
-		return x.DiskGb
-	}
-	return 0
-}
-
-func (x *CmdUpdateVM) GetBandwidthMbps() int32 {
-	if x != nil {
-		return x.BandwidthMbps
-	}
-	return 0
-}
-
 // 创建 VM
 type CmdCreateVM struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -1265,7 +1172,7 @@ type CmdCreateVM struct {
 
 func (x *CmdCreateVM) Reset() {
 	*x = CmdCreateVM{}
-	mi := &file_proto_agent_agent_proto_msgTypes[11]
+	mi := &file_proto_agent_agent_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1277,7 +1184,7 @@ func (x *CmdCreateVM) String() string {
 func (*CmdCreateVM) ProtoMessage() {}
 
 func (x *CmdCreateVM) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[11]
+	mi := &file_proto_agent_agent_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1290,7 +1197,7 @@ func (x *CmdCreateVM) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CmdCreateVM.ProtoReflect.Descriptor instead.
 func (*CmdCreateVM) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{11}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *CmdCreateVM) GetVmId() string {
@@ -1352,7 +1259,7 @@ type CmdStartVM struct {
 
 func (x *CmdStartVM) Reset() {
 	*x = CmdStartVM{}
-	mi := &file_proto_agent_agent_proto_msgTypes[12]
+	mi := &file_proto_agent_agent_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1364,7 +1271,7 @@ func (x *CmdStartVM) String() string {
 func (*CmdStartVM) ProtoMessage() {}
 
 func (x *CmdStartVM) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[12]
+	mi := &file_proto_agent_agent_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1377,7 +1284,7 @@ func (x *CmdStartVM) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CmdStartVM.ProtoReflect.Descriptor instead.
 func (*CmdStartVM) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{12}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *CmdStartVM) GetVmId() string {
@@ -1398,7 +1305,7 @@ type CmdStopVM struct {
 
 func (x *CmdStopVM) Reset() {
 	*x = CmdStopVM{}
-	mi := &file_proto_agent_agent_proto_msgTypes[13]
+	mi := &file_proto_agent_agent_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1410,7 +1317,7 @@ func (x *CmdStopVM) String() string {
 func (*CmdStopVM) ProtoMessage() {}
 
 func (x *CmdStopVM) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[13]
+	mi := &file_proto_agent_agent_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1423,7 +1330,7 @@ func (x *CmdStopVM) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CmdStopVM.ProtoReflect.Descriptor instead.
 func (*CmdStopVM) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{13}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *CmdStopVM) GetVmId() string {
@@ -1450,7 +1357,7 @@ type CmdRestartVM struct {
 
 func (x *CmdRestartVM) Reset() {
 	*x = CmdRestartVM{}
-	mi := &file_proto_agent_agent_proto_msgTypes[14]
+	mi := &file_proto_agent_agent_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1462,7 +1369,7 @@ func (x *CmdRestartVM) String() string {
 func (*CmdRestartVM) ProtoMessage() {}
 
 func (x *CmdRestartVM) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[14]
+	mi := &file_proto_agent_agent_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1475,7 +1382,7 @@ func (x *CmdRestartVM) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CmdRestartVM.ProtoReflect.Descriptor instead.
 func (*CmdRestartVM) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{14}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *CmdRestartVM) GetVmId() string {
@@ -1495,7 +1402,7 @@ type CmdDeleteVM struct {
 
 func (x *CmdDeleteVM) Reset() {
 	*x = CmdDeleteVM{}
-	mi := &file_proto_agent_agent_proto_msgTypes[15]
+	mi := &file_proto_agent_agent_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1507,7 +1414,7 @@ func (x *CmdDeleteVM) String() string {
 func (*CmdDeleteVM) ProtoMessage() {}
 
 func (x *CmdDeleteVM) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[15]
+	mi := &file_proto_agent_agent_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1520,7 +1427,7 @@ func (x *CmdDeleteVM) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CmdDeleteVM.ProtoReflect.Descriptor instead.
 func (*CmdDeleteVM) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{15}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *CmdDeleteVM) GetVmId() string {
@@ -1541,7 +1448,7 @@ type CmdResetPassword struct {
 
 func (x *CmdResetPassword) Reset() {
 	*x = CmdResetPassword{}
-	mi := &file_proto_agent_agent_proto_msgTypes[16]
+	mi := &file_proto_agent_agent_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1553,7 +1460,7 @@ func (x *CmdResetPassword) String() string {
 func (*CmdResetPassword) ProtoMessage() {}
 
 func (x *CmdResetPassword) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[16]
+	mi := &file_proto_agent_agent_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1566,7 +1473,7 @@ func (x *CmdResetPassword) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CmdResetPassword.ProtoReflect.Descriptor instead.
 func (*CmdResetPassword) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{16}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *CmdResetPassword) GetVmId() string {
@@ -1597,7 +1504,7 @@ type CmdSetPortForward struct {
 
 func (x *CmdSetPortForward) Reset() {
 	*x = CmdSetPortForward{}
-	mi := &file_proto_agent_agent_proto_msgTypes[17]
+	mi := &file_proto_agent_agent_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1609,7 +1516,7 @@ func (x *CmdSetPortForward) String() string {
 func (*CmdSetPortForward) ProtoMessage() {}
 
 func (x *CmdSetPortForward) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[17]
+	mi := &file_proto_agent_agent_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1622,7 +1529,7 @@ func (x *CmdSetPortForward) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CmdSetPortForward.ProtoReflect.Descriptor instead.
 func (*CmdSetPortForward) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{17}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *CmdSetPortForward) GetVmId() string {
@@ -1672,7 +1579,7 @@ type CmdDelPortForward struct {
 
 func (x *CmdDelPortForward) Reset() {
 	*x = CmdDelPortForward{}
-	mi := &file_proto_agent_agent_proto_msgTypes[18]
+	mi := &file_proto_agent_agent_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1684,7 +1591,7 @@ func (x *CmdDelPortForward) String() string {
 func (*CmdDelPortForward) ProtoMessage() {}
 
 func (x *CmdDelPortForward) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[18]
+	mi := &file_proto_agent_agent_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1697,7 +1604,7 @@ func (x *CmdDelPortForward) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CmdDelPortForward.ProtoReflect.Descriptor instead.
 func (*CmdDelPortForward) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{18}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *CmdDelPortForward) GetVmId() string {
@@ -1731,7 +1638,7 @@ type CmdGetPortForwards struct {
 
 func (x *CmdGetPortForwards) Reset() {
 	*x = CmdGetPortForwards{}
-	mi := &file_proto_agent_agent_proto_msgTypes[19]
+	mi := &file_proto_agent_agent_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1743,7 +1650,7 @@ func (x *CmdGetPortForwards) String() string {
 func (*CmdGetPortForwards) ProtoMessage() {}
 
 func (x *CmdGetPortForwards) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[19]
+	mi := &file_proto_agent_agent_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1756,7 +1663,7 @@ func (x *CmdGetPortForwards) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CmdGetPortForwards.ProtoReflect.Descriptor instead.
 func (*CmdGetPortForwards) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{19}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *CmdGetPortForwards) GetVmId() string {
@@ -1834,7 +1741,7 @@ const file_proto_agent_agent_proto_rawDesc = "" +
 	"command_id\x18\x01 \x01(\tR\tcommandId\x12\x18\n" +
 	"\asuccess\x18\x02 \x01(\bR\asuccess\x12\x14\n" +
 	"\x05error\x18\x03 \x01(\tR\x05error\x12\x12\n" +
-	"\x04data\x18\x04 \x01(\fR\x04data\"\xd2\x05\n" +
+	"\x04data\x18\x04 \x01(\fR\x04data\"\xa5\x05\n" +
 	"\x10PlatformEnvelope\x12\x1d\n" +
 	"\n" +
 	"command_id\x18\x01 \x01(\tR\tcommandId\x121\n" +
@@ -1848,13 +1755,12 @@ const file_proto_agent_agent_proto_rawDesc = "" +
 	"\fset_port_fwd\x18\b \x01(\v2\x18.agent.CmdSetPortForwardH\x00R\n" +
 	"setPortFwd\x12<\n" +
 	"\fdel_port_fwd\x18\t \x01(\v2\x18.agent.CmdDelPortForwardH\x00R\n" +
-	"delPortFwd\x121\n" +
-	"\tupdate_vm\x18\f \x01(\v2\x12.agent.CmdUpdateVMH\x00R\bupdateVm\x12:\n" +
+	"delPortFwd\x12:\n" +
 	"\freinstall_vm\x18\r \x01(\v2\x15.agent.CmdReinstallVMH\x00R\vreinstallVm\x12?\n" +
 	"\rget_port_fwds\x18\x0e \x01(\v2\x19.agent.CmdGetPortForwardsH\x00R\vgetPortFwds\x12!\n" +
 	"\x04ping\x18\x0f \x01(\v2\v.agent.PingH\x00R\x04pingB\t\n" +
 	"\apayloadJ\x04\b\n" +
-	"\x10\vJ\x04\b\v\x10\f\"\x06\n" +
+	"\x10\vJ\x04\b\v\x10\fJ\x04\b\f\x10\r\"\x06\n" +
 	"\x04Ping\"\xce\x01\n" +
 	"\x0eCmdReinstallVM\x12\x13\n" +
 	"\x05vm_id\x18\x01 \x01(\tR\x04vmId\x12\x19\n" +
@@ -1863,13 +1769,7 @@ const file_proto_agent_agent_proto_rawDesc = "" +
 	"\x03cpu\x18\x04 \x01(\x05R\x03cpu\x12\x15\n" +
 	"\x06ram_mb\x18\x05 \x01(\x03R\x05ramMb\x12\x17\n" +
 	"\adisk_gb\x18\x06 \x01(\x03R\x06diskGb\x12%\n" +
-	"\x0ebandwidth_mbps\x18\a \x01(\x05R\rbandwidthMbps\"\x8b\x01\n" +
-	"\vCmdUpdateVM\x12\x13\n" +
-	"\x05vm_id\x18\x01 \x01(\tR\x04vmId\x12\x10\n" +
-	"\x03cpu\x18\x02 \x01(\x05R\x03cpu\x12\x15\n" +
-	"\x06ram_mb\x18\x03 \x01(\x03R\x05ramMb\x12\x17\n" +
-	"\adisk_gb\x18\x04 \x01(\x03R\x06diskGb\x12%\n" +
-	"\x0ebandwidth_mbps\x18\x05 \x01(\x05R\rbandwidthMbps\"\xcb\x01\n" +
+	"\x0ebandwidth_mbps\x18\a \x01(\x05R\rbandwidthMbps\"\xcb\x01\n" +
 	"\vCmdCreateVM\x12\x13\n" +
 	"\x05vm_id\x18\x01 \x01(\tR\x04vmId\x12\x10\n" +
 	"\x03cpu\x18\x02 \x01(\x05R\x03cpu\x12\x15\n" +
@@ -1930,7 +1830,7 @@ func file_proto_agent_agent_proto_rawDescGZIP() []byte {
 }
 
 var file_proto_agent_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_proto_agent_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
+var file_proto_agent_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
 var file_proto_agent_agent_proto_goTypes = []any{
 	(VMStatus)(0),              // 0: agent.VMStatus
 	(Protocol)(0),              // 1: agent.Protocol
@@ -1944,16 +1844,15 @@ var file_proto_agent_agent_proto_goTypes = []any{
 	(*PlatformEnvelope)(nil),   // 9: agent.PlatformEnvelope
 	(*Ping)(nil),               // 10: agent.Ping
 	(*CmdReinstallVM)(nil),     // 11: agent.CmdReinstallVM
-	(*CmdUpdateVM)(nil),        // 12: agent.CmdUpdateVM
-	(*CmdCreateVM)(nil),        // 13: agent.CmdCreateVM
-	(*CmdStartVM)(nil),         // 14: agent.CmdStartVM
-	(*CmdStopVM)(nil),          // 15: agent.CmdStopVM
-	(*CmdRestartVM)(nil),       // 16: agent.CmdRestartVM
-	(*CmdDeleteVM)(nil),        // 17: agent.CmdDeleteVM
-	(*CmdResetPassword)(nil),   // 18: agent.CmdResetPassword
-	(*CmdSetPortForward)(nil),  // 19: agent.CmdSetPortForward
-	(*CmdDelPortForward)(nil),  // 20: agent.CmdDelPortForward
-	(*CmdGetPortForwards)(nil), // 21: agent.CmdGetPortForwards
+	(*CmdCreateVM)(nil),        // 12: agent.CmdCreateVM
+	(*CmdStartVM)(nil),         // 13: agent.CmdStartVM
+	(*CmdStopVM)(nil),          // 14: agent.CmdStopVM
+	(*CmdRestartVM)(nil),       // 15: agent.CmdRestartVM
+	(*CmdDeleteVM)(nil),        // 16: agent.CmdDeleteVM
+	(*CmdResetPassword)(nil),   // 17: agent.CmdResetPassword
+	(*CmdSetPortForward)(nil),  // 18: agent.CmdSetPortForward
+	(*CmdDelPortForward)(nil),  // 19: agent.CmdDelPortForward
+	(*CmdGetPortForwards)(nil), // 20: agent.CmdGetPortForwards
 }
 var file_proto_agent_agent_proto_depIdxs = []int32{
 	3,  // 0: agent.AgentEnvelope.heartbeat:type_name -> agent.Heartbeat
@@ -1964,27 +1863,26 @@ var file_proto_agent_agent_proto_depIdxs = []int32{
 	0,  // 5: agent.VMSummary.status:type_name -> agent.VMStatus
 	7,  // 6: agent.PortForwardList.entries:type_name -> agent.PortForwardEntry
 	1,  // 7: agent.PortForwardEntry.protocol:type_name -> agent.Protocol
-	13, // 8: agent.PlatformEnvelope.create_vm:type_name -> agent.CmdCreateVM
-	14, // 9: agent.PlatformEnvelope.start_vm:type_name -> agent.CmdStartVM
-	15, // 10: agent.PlatformEnvelope.stop_vm:type_name -> agent.CmdStopVM
-	16, // 11: agent.PlatformEnvelope.restart_vm:type_name -> agent.CmdRestartVM
-	17, // 12: agent.PlatformEnvelope.delete_vm:type_name -> agent.CmdDeleteVM
-	18, // 13: agent.PlatformEnvelope.reset_password:type_name -> agent.CmdResetPassword
-	19, // 14: agent.PlatformEnvelope.set_port_fwd:type_name -> agent.CmdSetPortForward
-	20, // 15: agent.PlatformEnvelope.del_port_fwd:type_name -> agent.CmdDelPortForward
-	12, // 16: agent.PlatformEnvelope.update_vm:type_name -> agent.CmdUpdateVM
-	11, // 17: agent.PlatformEnvelope.reinstall_vm:type_name -> agent.CmdReinstallVM
-	21, // 18: agent.PlatformEnvelope.get_port_fwds:type_name -> agent.CmdGetPortForwards
-	10, // 19: agent.PlatformEnvelope.ping:type_name -> agent.Ping
-	1,  // 20: agent.CmdSetPortForward.protocol:type_name -> agent.Protocol
-	1,  // 21: agent.CmdDelPortForward.protocol:type_name -> agent.Protocol
-	2,  // 22: agent.AgentGateway.Connect:input_type -> agent.AgentEnvelope
-	9,  // 23: agent.AgentGateway.Connect:output_type -> agent.PlatformEnvelope
-	23, // [23:24] is the sub-list for method output_type
-	22, // [22:23] is the sub-list for method input_type
-	22, // [22:22] is the sub-list for extension type_name
-	22, // [22:22] is the sub-list for extension extendee
-	0,  // [0:22] is the sub-list for field type_name
+	12, // 8: agent.PlatformEnvelope.create_vm:type_name -> agent.CmdCreateVM
+	13, // 9: agent.PlatformEnvelope.start_vm:type_name -> agent.CmdStartVM
+	14, // 10: agent.PlatformEnvelope.stop_vm:type_name -> agent.CmdStopVM
+	15, // 11: agent.PlatformEnvelope.restart_vm:type_name -> agent.CmdRestartVM
+	16, // 12: agent.PlatformEnvelope.delete_vm:type_name -> agent.CmdDeleteVM
+	17, // 13: agent.PlatformEnvelope.reset_password:type_name -> agent.CmdResetPassword
+	18, // 14: agent.PlatformEnvelope.set_port_fwd:type_name -> agent.CmdSetPortForward
+	19, // 15: agent.PlatformEnvelope.del_port_fwd:type_name -> agent.CmdDelPortForward
+	11, // 16: agent.PlatformEnvelope.reinstall_vm:type_name -> agent.CmdReinstallVM
+	20, // 17: agent.PlatformEnvelope.get_port_fwds:type_name -> agent.CmdGetPortForwards
+	10, // 18: agent.PlatformEnvelope.ping:type_name -> agent.Ping
+	1,  // 19: agent.CmdSetPortForward.protocol:type_name -> agent.Protocol
+	1,  // 20: agent.CmdDelPortForward.protocol:type_name -> agent.Protocol
+	2,  // 21: agent.AgentGateway.Connect:input_type -> agent.AgentEnvelope
+	9,  // 22: agent.AgentGateway.Connect:output_type -> agent.PlatformEnvelope
+	22, // [22:23] is the sub-list for method output_type
+	21, // [21:22] is the sub-list for method input_type
+	21, // [21:21] is the sub-list for extension type_name
+	21, // [21:21] is the sub-list for extension extendee
+	0,  // [0:21] is the sub-list for field type_name
 }
 
 func init() { file_proto_agent_agent_proto_init() }
@@ -2006,7 +1904,6 @@ func file_proto_agent_agent_proto_init() {
 		(*PlatformEnvelope_ResetPassword)(nil),
 		(*PlatformEnvelope_SetPortFwd)(nil),
 		(*PlatformEnvelope_DelPortFwd)(nil),
-		(*PlatformEnvelope_UpdateVm)(nil),
 		(*PlatformEnvelope_ReinstallVm)(nil),
 		(*PlatformEnvelope_GetPortFwds)(nil),
 		(*PlatformEnvelope_Ping)(nil),
@@ -2017,7 +1914,7 @@ func file_proto_agent_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_agent_agent_proto_rawDesc), len(file_proto_agent_agent_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   20,
+			NumMessages:   19,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

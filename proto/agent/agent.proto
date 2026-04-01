@@ -132,7 +132,7 @@ message PlatformEnvelope {
   // 平台生成的唯一命令 ID（持久化到 DB，用于重放）
   string command_id = 1;
 
-  reserved 10, 11; // 10: 原 get_vm_info；11: 原 sync_port_fwds，已废弃，禁止复用
+  reserved 10, 11, 12; // 10: 原 get_vm_info；11: 原 sync_port_fwds；12: 原 update_vm，已废弃，禁止复用
 
   oneof payload {
     CmdCreateVM         create_vm       = 2;  // 创建 VM
@@ -143,7 +143,6 @@ message PlatformEnvelope {
     CmdResetPassword    reset_password  = 7;  // 重置 root 密码
     CmdSetPortForward   set_port_fwd    = 8;  // 新增单条端口转发规则
     CmdDelPortForward   del_port_fwd    = 9;  // 删除单条端口转发规则
-    CmdUpdateVM         update_vm       = 12; // 修改 VM 配置 (机主/管理员)
     CmdReinstallVM      reinstall_vm    = 13; // 重装 VM 系统
     CmdGetPortForwards  get_port_fwds   = 14; // 查询某 VM 的端口转发规则列表
     Ping                ping            = 15; // 服务端保活 ping，agent 忽略即可
@@ -162,15 +161,6 @@ message CmdReinstallVM {
   int64  ram_mb         = 5; // 内存（MB）
   int64  disk_gb        = 6; // 磁盘（GB）
   int32  bandwidth_mbps = 7; // 带宽限速（Mbps）
-}
-
-// 修改 VM 配置
-message CmdUpdateVM {
-  string vm_id          = 1; // VM UUID
-  int32  cpu            = 2; // 新 CPU 核数 (0 表示不修改)
-  int64  ram_mb         = 3; // 新内存 MB (0 表示不修改)
-  int64  disk_gb        = 4; // 新磁盘 GB (0 表示不修改)
-  int32  bandwidth_mbps = 5; // 新带宽 Mbps (负数表示不修改)
 }
 
 // 创建 VM
