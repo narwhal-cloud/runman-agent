@@ -856,12 +856,12 @@ func (m *Manager) DeleteVM(_ context.Context, vmID string) error {
 	return os.RemoveAll(filepath.Join(m.instDir, vmID))
 }
 
-func (m *Manager) UpdateVM(ctx context.Context, req *agent.CmdUpdateVM) error {
-	if !m.isRunning(req.VmId) {
-		return fmt.Errorf("VM %q is not running", req.VmId)
+func (m *Manager) UpdateVM(ctx context.Context, vmID string, cpu int32, ramMB int64, diskGB int64, bandwidthMBPS int32) error {
+	if !m.isRunning(vmID) {
+		return fmt.Errorf("VM %q is not running", vmID)
 	}
 
-	icfg, err := m.loadInstanceConfig(req.VmId)
+	icfg, err := m.loadInstanceConfig(vmID)
 	if err != nil {
 		return err
 	}
@@ -869,41 +869,41 @@ func (m *Manager) UpdateVM(ctx context.Context, req *agent.CmdUpdateVM) error {
 	resizeReq := &vmResizeReq{}
 	needResize := false
 
-	if req.Cpu > 0 {
-		v := int(req.Cpu)
+	if cpu > 0 {
+		v := int(cpu)
 		resizeReq.DesiredVcpus = &v
 		icfg.CPU = v
 		needResize = true
 	}
-	if req.RamMb > 0 {
-		b := req.RamMb * 1024 * 1024
+	if ramMB > 0 {
+		b := ramMB * 1024 * 1024
 		resizeReq.DesiredRam = &b
-		icfg.MemoryMB = req.RamMb
+		icfg.MemoryMB = ramMB
 		needResize = true
 	}
 
 	// 带宽变更：移除旧网卡，挂载带新限速配置的网卡（会短暂断网）
-	if req.BandwidthMbps > 0 {
-		icfg.BandwidthMbps = int(req.BandwidthMbps)
-		nc, netErr := m.allocNetwork(req.VmId)
+	if bandwidthMBPS > 0 {
+		icfg.BandwidthMbps = int(bandwidthMBPS)
+		nc, netErr := m.allocNetwork(vmID)
 		if netErr == nil {
-			_ = m.apiPut(req.VmId, "vm.remove-device", &vmRemoveDevice{ID: "net0"})
+			_ = m.apiPut(vmID, "vm.remove-device", &vmRemoveDevice{ID: "net0"})
 			newNet := netCfg{
 				Tap:               nc.Tap,
 				Mac:               nc.MAC,
 				ID:                "net0",
 				RateLimiterConfig: buildNetRateLimit(icfg.BandwidthMbps),
 			}
-			_ = m.apiPut(req.VmId, "vm.add-net", &newNet)
+			_ = m.apiPut(vmID, "vm.add-net", &newNet)
 		}
 	}
 
-	_ = m.saveInstanceConfig(req.VmId, icfg)
+	_ = m.saveInstanceConfig(vmID, icfg)
 
 	if !needResize {
 		return nil
 	}
-	return m.apiPut(req.VmId, "vm.resize", resizeReq)
+	return m.apiPut(vmID, "vm.resize", resizeReq)
 }
 
 func (m *Manager) ReinstallVM(ctx context.Context, req *agent.CmdReinstallVM) error {

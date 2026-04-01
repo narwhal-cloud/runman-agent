@@ -116,29 +116,27 @@ func (s *VMService) DeleteVM(ctx context.Context, vmID string) error {
 
 // --- 配置与维护 ---
 
-func (s *VMService) UpdateVM(ctx context.Context, req *agent.CmdUpdateVM) error {
-	localID := s.localID(req.VmId)
+func (s *VMService) UpdateVM(ctx context.Context, vmID string, cpu int32, ramMB int64, diskGB int64, bandwidthMBPS int32) error {
+	localID := s.localID(vmID)
 
 	// CPU 数量变化时重新分配 cpuset
-	if req.Cpu > 0 {
-		if conf, err := s.db.GetVMConfig(req.VmId); err == nil {
+	if cpu > 0 {
+		if conf, err := s.db.GetVMConfig(vmID); err == nil {
 			s.alloc.Release(conf.Cpuset)
 		}
-		cpuset, err := s.alloc.Allocate(int(req.Cpu))
+		cpuset, err := s.alloc.Allocate(int(cpu))
 		if err != nil {
 			return err
 		}
 		ctx = WithCpuset(ctx, cpuset)
 		// 将新 cpuset 持久化
-		if conf, err := s.db.GetVMConfig(req.VmId); err == nil {
+		if conf, err := s.db.GetVMConfig(vmID); err == nil {
 			conf.Cpuset = cpuset
 			_ = s.db.SaveVMConfig(conf)
 		}
 	}
 
-	r := proto.Clone(req).(*agent.CmdUpdateVM)
-	r.VmId = localID
-	return s.mgr.UpdateVM(ctx, r)
+	return s.mgr.UpdateVM(ctx, localID, cpu, ramMB, diskGB, bandwidthMBPS)
 }
 
 func (s *VMService) ReinstallVM(ctx context.Context, req *agent.CmdReinstallVM) error {

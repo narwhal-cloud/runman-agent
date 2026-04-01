@@ -359,16 +359,8 @@ func (s *Server) handleUpdateVM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cmd := &agent.CmdUpdateVM{
-		VmId:          vmID,
-		Cpu:           req.Cpu,
-		RamMb:         req.RamMb,
-		DiskGb:        req.DiskGb,
-		BandwidthMbps: req.BandwidthMbps,
-	}
-
 	ctx := r.Context()
-	if err := s.mgr.UpdateVM(ctx, cmd); err != nil {
+	if err := s.mgr.UpdateVM(ctx, vmID, req.Cpu, req.RamMb, req.DiskGb, req.BandwidthMbps); err != nil {
 		jsonErr(w, err, 500)
 		return
 	}

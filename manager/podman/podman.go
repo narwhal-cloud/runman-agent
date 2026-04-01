@@ -247,20 +247,20 @@ func (m *Manager) DeleteVM(_ context.Context, vmID string) error {
 	return m.deleteByID(vmID)
 }
 
-func (m *Manager) UpdateVM(ctx context.Context, req *agent.CmdUpdateVM) error {
+func (m *Manager) UpdateVM(ctx context.Context, vmID string, cpu int32, ramMB int64, diskGB int64, bandwidthMBPS int32) error {
 	resources := specs.LinuxResources{}
 	changed := false
-	if req.Cpu > 0 {
+	if cpu > 0 {
 		resources.CPU = &specs.LinuxCPU{
-			Quota:  ptr(int64(100000) * int64(req.Cpu)),
+			Quota:  ptr(int64(100000) * int64(cpu)),
 			Period: ptr(uint64(100000)),
 			Cpus:   manager.CpusetFrom(ctx),
 		}
 		changed = true
 	}
-	if req.RamMb > 0 {
+	if ramMB > 0 {
 		resources.Memory = &specs.LinuxMemory{
-			Limit: ptr(1024 * 1024 * req.RamMb),
+			Limit: ptr(1024 * 1024 * ramMB),
 		}
 		changed = true
 	}
@@ -268,7 +268,7 @@ func (m *Manager) UpdateVM(ctx context.Context, req *agent.CmdUpdateVM) error {
 		return nil
 	}
 	_, err := containers.Update(m.timeoutCtx(), &containerTypes.ContainerUpdateOptions{
-		NameOrID:  req.VmId,
+		NameOrID:  vmID,
 		Resources: &resources,
 	})
 	return err
