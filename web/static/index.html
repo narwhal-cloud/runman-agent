@@ -139,6 +139,10 @@
                             <select id="monitorDisk" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs outline-none focus:ring-2 focus:ring-indigo-500"></select>
                         </div>
                     </div>
+                    <div>
+                        <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">Max Port Forward (Per VM)</label>
+                        <input type="number" id="maxPortForward" class="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none text-sm" min="1" max="1000">
+                    </div>
                     <button type="submit" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 rounded-lg transition-colors text-xs uppercase tracking-widest mt-2">
                         Save Changes
                     </button>
@@ -770,9 +774,10 @@ $('configForm').onsubmit = async (e) => {
     disableAllButtons(true);
     try {
         const newConf = {
-            token:        $('token').value,
-            monitor_nic:  $('monitorNIC').value,
-            monitor_disk: $('monitorDisk').value,
+            token:            $('token').value,
+            monitor_nic:      $('monitorNIC').value,
+            monitor_disk:     $('monitorDisk').value,
+            max_port_forward: parseInt($('maxPortForward').value) || 20, // matches db.DefaultMaxPortForward
         };
         await api('POST', '/api/config', newConf);
         currentConf = newConf;
@@ -834,9 +839,10 @@ async function init() {
     nicSel.innerHTML = '<option value="">All Interfaces</option>' + sys.nics.map(n=>`<option value="${n}">${n}</option>`).join('');
     $('monitorDisk').innerHTML = sys.disks.map(d=>`<option value="${d}">${d}</option>`).join('');
 
-    $('token').value       = conf.token       || '';
-    $('monitorNIC').value  = conf.monitor_nic  || '';
-    $('monitorDisk').value = conf.monitor_disk || '';
+    $('token').value          = conf.token           || '';
+    $('monitorNIC').value     = conf.monitor_nic     || '';
+    $('monitorDisk').value    = conf.monitor_disk    || '';
+    $('maxPortForward').value = conf.max_port_forward || 20; // matches db.DefaultMaxPortForward
     $('virt-badge').textContent = 'VIRT: '+(conf.virt_type||'?').toUpperCase();
     $('disk-label').textContent = 'Disk: '+(conf.monitor_disk||'/');
 

@@ -5,16 +5,19 @@ import (
 	"gorm.io/gorm"
 )
 
+const DefaultMaxPortForward = 20
+
 type Config struct {
-	ID            uint   `gorm:"primaryKey"`
-	Token         string `json:"token"`
-	MonitorNIC    string `json:"monitor_nic"`    // 指定监控网卡
-	MonitorDisk   string `json:"monitor_disk"`   // 指定监控磁盘/挂载点
-	VirtType      string `json:"virt_type"`      // 固定虚拟化类型 (podman/kvm)
-	BandwidthMbps int32  `json:"bandwidth_mbps"` // 启动测速结果 (Mbps)
-	WebUser       string `json:"web_user"`       // 面板用户名
-	WebPassHash   string `json:"-"`              // bcrypt hash，不暴露到 API
-	Host          string `json:"host"`           // 上报给服务端的入口地址（IPv4/DDNS），空则由服务端自取
+	ID             uint   `gorm:"primaryKey"`
+	Token          string `json:"token"`
+	MonitorNIC     string `json:"monitor_nic"`      // 指定监控网卡
+	MonitorDisk    string `json:"monitor_disk"`     // 指定监控磁盘/挂载点
+	VirtType       string `json:"virt_type"`        // 固定虚拟化类型 (podman/kvm)
+	BandwidthMbps  int32  `json:"bandwidth_mbps"`   // 启动测速结果 (Mbps)
+	WebUser        string `json:"web_user"`         // 面板用户名
+	WebPassHash    string `json:"-"`                // bcrypt hash，不暴露到 API
+	Host           string `json:"host"`             // 上报给服务端的入口地址（IPv4/DDNS），空则由服务端自取
+	MaxPortForward int32  `json:"max_port_forward"` // 每个 VM 最大转发端口数
 }
 
 type VMConfig struct {
@@ -63,10 +66,15 @@ func Init(path string) (*DB, error) {
 	_ = db.AutoMigrate(&Traffic{}, &VMConfig{}, &Config{}, &PortForward{})
 
 	// Ensure default config exists
-	var count int64
-	db.Model(&Config{}).Count(&count)
-	if count == 0 {
-		db.Create(&Config{})
+	var conf Config
+	err = db.First(&conf).Error
+	if err != nil {
+		// No config found, create default
+		db.Create(&Config{MaxPortForward: DefaultMaxPortForward})
+	} else if conf.MaxPortForward == 0 {
+		// Config exists but MaxPortForward is unset, update it
+		conf.MaxPortForward = DefaultMaxPortForward
+		db.Save(&conf)
 	}
 
 	return &DB{orm: db}, nil

@@ -53,7 +53,7 @@ func (m *Manager) Restore(ctx context.Context) {
 		return
 	}
 	for _, pf := range all {
-		_ = m.AddMapping(ctx, pf.VMID, pf.Protocol, pf.HostPort, pf.GuestPort, pf.Description)
+		_ = m.addMapping(ctx, pf.VMID, pf.Protocol, pf.HostPort, pf.GuestPort, pf.Description, false)
 	}
 }
 
@@ -64,20 +64,25 @@ func (m *Manager) RefreshVM(ctx context.Context, vmID string) {
 	if err != nil || len(rules) == 0 {
 		return
 	}
-	// 先全部移除（释放 listener），再重新 AddMapping（重新调 GetVMIP）
+	// 先全部移除（释放 listener），再重新 addMapping（重新调 GetVMIP）
 	for _, r := range rules {
 		_ = m.RemoveMapping(ctx, vmID, r.Protocol, r.HostPort)
 	}
 	for _, r := range rules {
-		_ = m.AddMapping(ctx, vmID, r.Protocol, r.HostPort, r.GuestPort, r.Description)
+		_ = m.addMapping(ctx, vmID, r.Protocol, r.HostPort, r.GuestPort, r.Description, false)
 	}
 }
 
 // AddMapping 添加转发规则，相同规则幂等，配置变更时先删后加
 func (m *Manager) AddMapping(ctx context.Context, vmId string, protocol string, hostPort, guestPort int, description string) error {
+	return m.addMapping(ctx, vmId, protocol, hostPort, guestPort, description, true)
+}
+
+func (m *Manager) addMapping(ctx context.Context, vmId string, protocol string, hostPort, guestPort int, description string, checkLimit bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	exists := false
 	for _, e := range m.mappings[vmId] {
 		if e.Protocol == protocol && e.HostPort == hostPort {
 			if e.GuestPort == guestPort && e.Description == description {
@@ -86,7 +91,19 @@ func (m *Manager) AddMapping(ctx context.Context, vmId string, protocol string, 
 			m.mu.Unlock()
 			_ = m.RemoveMapping(ctx, vmId, protocol, hostPort)
 			m.mu.Lock()
+			exists = true
 			break
+		}
+	}
+
+	if checkLimit && !exists {
+		conf, _ := m.db.GetConfig()
+		maxPF := int(conf.MaxPortForward)
+		if maxPF <= 0 {
+			maxPF = db.DefaultMaxPortForward
+		}
+		if len(m.mappings[vmId]) >= maxPF {
+			return fmt.Errorf("port forward limit reached (%d/%d)", len(m.mappings[vmId]), maxPF)
 		}
 	}
 

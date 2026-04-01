@@ -167,21 +167,23 @@ func (s *Server) handleSystemInfo(w http.ResponseWriter, r *http.Request) {
 }
 
 type configRequest struct {
-	Token       string `json:"token"`
-	MonitorNIC  string `json:"monitor_nic"`
-	MonitorDisk string `json:"monitor_disk"`
-	WebUser     string `json:"web_user"`
-	WebPass     string `json:"web_pass"` // plaintext，服务端 bcrypt 后存储
-	Host        string `json:"host"`
+	Token          string `json:"token"`
+	MonitorNIC     string `json:"monitor_nic"`
+	MonitorDisk    string `json:"monitor_disk"`
+	WebUser        string `json:"web_user"`
+	WebPass        string `json:"web_pass"` // plaintext，服务端 bcrypt 后存储
+	Host           string `json:"host"`
+	MaxPortForward int32  `json:"max_port_forward"`
 }
 
 type configResponse struct {
-	Token       string `json:"token"`
-	MonitorNIC  string `json:"monitor_nic"`
-	MonitorDisk string `json:"monitor_disk"`
-	WebUser     string `json:"web_user"`
-	VirtType    string `json:"virt_type"`
-	Host        string `json:"host"`
+	Token          string `json:"token"`
+	MonitorNIC     string `json:"monitor_nic"`
+	MonitorDisk    string `json:"monitor_disk"`
+	WebUser        string `json:"web_user"`
+	VirtType       string `json:"virt_type"`
+	Host           string `json:"host"`
+	MaxPortForward int32  `json:"max_port_forward"`
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
@@ -197,6 +199,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			existing.MonitorNIC = req.MonitorNIC
 			existing.MonitorDisk = req.MonitorDisk
 			existing.Host = req.Host
+			existing.MaxPortForward = req.MaxPortForward
 			if req.WebUser != "" {
 				existing.WebUser = req.WebUser
 			}
@@ -215,11 +218,13 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	conf, _ := s.db.GetConfig()
 	jsonOK(w, configResponse{
-		Token:       conf.Token,
-		MonitorNIC:  conf.MonitorNIC,
-		MonitorDisk: conf.MonitorDisk,
-		WebUser:     conf.WebUser,
-		VirtType:    conf.VirtType,
+		Token:          conf.Token,
+		MonitorNIC:     conf.MonitorNIC,
+		MonitorDisk:    conf.MonitorDisk,
+		WebUser:        conf.WebUser,
+		VirtType:       conf.VirtType,
+		Host:           conf.Host,
+		MaxPortForward: conf.MaxPortForward,
 	})
 }
 
