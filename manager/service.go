@@ -6,7 +6,6 @@ import (
 	"io"
 	"net"
 	"runman-agent/db"
-	"runman-agent/manager/cpualloc"
 	"runman-agent/proto/agent"
 
 	"google.golang.org/protobuf/proto"
@@ -30,21 +29,20 @@ func GenerateMACFromIP(ipStr string) string {
 }
 
 // VMService 是 VMManager 的服务层包装，位于 gRPC 处理层与底层虚拟化驱动之间，负责：
-//  1. 将平台下发的 serverVmID 转换为底层虚拟化驱动实际使用的 localID
+//  1. 将 platform 下发的 serverVmID 转换为底层虚拟化驱动实际使用的 localID
 //  2. ListVMs 只返回本节点 DB 中已登记的 VM，过滤用户自行创建的容器/虚拟机
-//  3. 管理 CPU 分配：CreateVM 时分配 cpuset，DeleteVM 时释放，UpdateVM 时重新分配
+//  3. 业务编排：调用驱动执行生命周期管理，并补全 DB 配置
 type VMService struct {
-	mgr   VMManager
-	db    *db.DB
-	alloc *cpualloc.Allocator
+	mgr VMManager
+	db  *db.DB
 
 	// OnCreated 在 VM 成功创建并写入 DB 后被调用，可用于自动添加端口转发等。
 	// bandwidthMbps 为 0 时表示不限速。
 	OnCreated func(ctx context.Context, vmID string, bandwidthMbps int)
 }
 
-func NewVMService(mgr VMManager, database *db.DB, alloc *cpualloc.Allocator) *VMService {
-	return &VMService{mgr: mgr, db: database, alloc: alloc}
+func NewVMService(mgr VMManager, database *db.DB) *VMService {
+	return &VMService{mgr: mgr, db: database}
 }
 
 // localID 将平台 VM ID 转换为底层虚拟化驱动识别的标识符。
@@ -58,35 +56,22 @@ func (s *VMService) localID(vmID string) string {
 // --- 生命周期管理 ---
 
 func (s *VMService) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error {
-	cpuset, err := s.alloc.Allocate(int(req.Cpu))
-	if err != nil {
-		return err
-	}
-	ctx = WithCpuset(ctx, cpuset)
-	if err = s.mgr.CreateVM(ctx, req); err != nil {
-		s.alloc.Release(cpuset)
+	if err := s.mgr.CreateVM(ctx, req); err != nil {
 		return err
 	}
 
-	// 创建后获取 IP，如果获取不到 MAC 就从 IP 生成
-	ip, _ := s.mgr.GetVMIP(ctx, req.VmId)
-	mac, _ := s.mgr.GetVMMAC(ctx, req.VmId)
-	if mac == "" && ip != "" {
-		mac = GenerateMACFromIP(ip)
+	// 驱动层已经负责将 IP/MAC/Cpuset 等底层配置存入数据库。
+	// 这里补全业务层的其他配置字段。
+	conf, _ := s.db.GetVMConfig(req.VmId)
+	if conf != nil {
+		conf.LocalID = req.VmId
+		conf.BandwidthMbps = int(req.BandwidthMbps)
+		conf.CPU = int(req.Cpu)
+		conf.MemoryMB = req.RamMb
+		conf.Image = req.OsImage
+		conf.Status = "running"
+		_ = s.db.SaveVMConfig(conf)
 	}
-
-	_ = s.db.SaveVMConfig(&db.VMConfig{
-		VMID:          req.VmId,
-		LocalID:       req.VmId,
-		BandwidthMbps: int(req.BandwidthMbps),
-		CPU:           int(req.Cpu),
-		MemoryMB:      req.RamMb,
-		Image:         req.OsImage,
-		Cpuset:        cpuset,
-		Status:        "running",
-		IP:            ip,
-		MAC:           mac,
-	})
 
 	if s.OnCreated != nil {
 		s.OnCreated(ctx, req.VmId, int(req.BandwidthMbps))
@@ -107,74 +92,20 @@ func (s *VMService) RestartVM(ctx context.Context, vmID string) error {
 }
 
 func (s *VMService) DeleteVM(ctx context.Context, vmID string) error {
-	// 释放 cpuset 引用
-	if conf, err := s.db.GetVMConfig(vmID); err == nil {
-		s.alloc.Release(conf.Cpuset)
-	}
 	return s.mgr.DeleteVM(ctx, s.localID(vmID))
 }
 
 // --- 配置与维护 ---
 
 func (s *VMService) UpdateVM(ctx context.Context, vmID string, cpu int32, ramMB int64, diskGB int64, bandwidthMBPS int32) error {
-	localID := s.localID(vmID)
-
-	// CPU 数量变化时重新分配 cpuset
-	if cpu > 0 {
-		if conf, err := s.db.GetVMConfig(vmID); err == nil {
-			s.alloc.Release(conf.Cpuset)
-		}
-		cpuset, err := s.alloc.Allocate(int(cpu))
-		if err != nil {
-			return err
-		}
-		ctx = WithCpuset(ctx, cpuset)
-		// 将新 cpuset 持久化
-		if conf, err := s.db.GetVMConfig(vmID); err == nil {
-			conf.Cpuset = cpuset
-			_ = s.db.SaveVMConfig(conf)
-		}
-	}
-
-	return s.mgr.UpdateVM(ctx, localID, cpu, ramMB, diskGB, bandwidthMBPS)
+	return s.mgr.UpdateVM(ctx, s.localID(vmID), cpu, ramMB, diskGB, bandwidthMBPS)
 }
 
 func (s *VMService) ReinstallVM(ctx context.Context, req *agent.CmdReinstallVM) error {
-	// 重装保持原有 CPU 数量，重新分配 cpuset，并复用 IP 和 MAC 地址
-	if conf, err := s.db.GetVMConfig(req.VmId); err == nil {
-		s.alloc.Release(conf.Cpuset)
-		cpuset, allocErr := s.alloc.Allocate(conf.CPU)
-		if allocErr == nil {
-			ctx = WithCpuset(ctx, cpuset)
-			conf.Cpuset = cpuset
-			_ = s.db.SaveVMConfig(conf)
-		}
-		// 如果有旧的 IP 地址，就复用
-		if conf.IP != "" {
-			ctx = WithIPAddress(ctx, conf.IP)
-		}
-		// 如果有旧的 MAC 地址，就复用
-		if conf.MAC != "" {
-			ctx = WithMacAddress(ctx, conf.MAC)
-		}
-	} else if req.Cpu > 0 {
-		// 母鸡重装系统后 DB 配置丢失，使用下发参数中的 CPU 数量分配 cpuset
-		cpuset, allocErr := s.alloc.Allocate(int(req.Cpu))
-		if allocErr == nil {
-			ctx = WithCpuset(ctx, cpuset)
-			// 预存最小记录，让 main.go 的 GetVMConfig 能读到 cpuset
-			_ = s.db.SaveVMConfig(&db.VMConfig{
-				VMID:    req.VmId,
-				LocalID: req.VmId,
-				CPU:     int(req.Cpu),
-				Cpuset:  cpuset,
-			})
-		}
-	}
-
 	localID := s.localID(req.VmId)
 	r := proto.Clone(req).(*agent.CmdReinstallVM)
 	r.VmId = localID
+	// 驱动层会处理 IP/MAC/Cpuset 的复用与重新分配
 	return s.mgr.ReinstallVM(ctx, r)
 }
 

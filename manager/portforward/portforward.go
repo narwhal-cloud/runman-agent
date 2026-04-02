@@ -157,7 +157,7 @@ func (m *Manager) addMapping(ctx context.Context, vmId string, protocol string, 
 	return nil
 }
 
-func (m *Manager) RemoveMapping(ctx context.Context, vmId string, protocol string, hostPort int) error {
+func (m *Manager) RemoveMapping(_ context.Context, vmId string, protocol string, hostPort int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -166,7 +166,7 @@ func (m *Manager) RemoveMapping(ctx context.Context, vmId string, protocol strin
 		if e.Protocol == protocol && e.HostPort == hostPort {
 			e.cancel()
 			if e.ln != nil {
-				e.ln.Close()
+				_ = e.ln.Close()
 			}
 			m.mappings[vmId] = append(entries[:i], entries[i+1:]...)
 			_ = m.db.DeletePortForward(protocol, hostPort)
@@ -214,11 +214,6 @@ func (m *Manager) DeleteVM(ctx context.Context, vmId string) {
 		_ = m.RemoveMapping(ctx, vmId, e.Protocol, e.HostPort)
 	}
 	_ = m.db.DeletePortForwardsForVM(vmId)
-}
-
-// UpdateVMBandwidth 更新带宽，此时由于移除了应用层限速，仅记录即可（实际上 mbps 已从 Entry 移除）
-func (m *Manager) UpdateVMBandwidth(ctx context.Context, vmId string, mbps int) {
-	// 移除了限速逻辑，此函数目前仅为保持接口兼容
 }
 
 func (m *Manager) GetReport() []Entry {

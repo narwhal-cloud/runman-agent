@@ -12,26 +12,8 @@ type ResizeEvent struct {
 	Rows uint
 }
 
-// cpusetKey 是向 context 注入 cpuset 字符串时使用的键。
-// 由 VMService 写入，由底层驱动（如 podman.Manager）读取。
-type cpusetKey struct{}
-
-// CpusetKey 供底层驱动从 context 中读取分配好的 cpuset。
-var CpusetKey = cpusetKey{}
-
-// WithCpuset 将 cpuset 注入 context。
-func WithCpuset(ctx context.Context, cpuset string) context.Context {
-	return context.WithValue(ctx, CpusetKey, cpuset)
-}
-
-// CpusetFrom 从 context 中取出 cpuset，不存在时返回空字符串。
-func CpusetFrom(ctx context.Context) string {
-	v, _ := ctx.Value(CpusetKey).(string)
-	return v
-}
-
 // macAddressKey 用于向 context 注入 MAC 地址。
-// 由 VMService 或调用者写入，由底层驱动读取。
+// 已废弃：现在由底层驱动直接管理。
 type macAddressKey struct{}
 
 var MacAddressKey = macAddressKey{}
@@ -48,7 +30,7 @@ func MacAddressFrom(ctx context.Context) string {
 }
 
 // ipAddressKey 用于向 context 注入 IP 地址。
-// 由 VMService 或调用者写入，由底层驱动读取。
+// 已废弃：现在由底层驱动直接管理。
 type ipAddressKey struct{}
 
 var IPAddressKey = ipAddressKey{}

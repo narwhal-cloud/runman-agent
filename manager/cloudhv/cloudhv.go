@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"runman-agent/db"
 	"runman-agent/manager"
 	"runman-agent/proto/agent"
 )
@@ -33,6 +34,7 @@ const (
 type Manager struct {
 	binary  string // cloud-hypervisor 二进制路径
 	instDir string // VM 实例数据目录 (imgDir/instances)
+	db      *db.DB
 }
 
 // --- REST API 请求/响应结构体 ---
@@ -167,7 +169,7 @@ type instanceConfig struct {
 
 // New 创建 Manager。binaryPath 为 cloud-hypervisor 二进制路径，
 // 为空时自动在常见位置查找。
-func New(binaryPath string) (*Manager, error) {
+func New(binaryPath string, database *db.DB) (*Manager, error) {
 	if binaryPath == "" || strings.HasPrefix(binaryPath, "unix://") {
 		binaryPath = findBinary()
 	}
@@ -180,7 +182,7 @@ func New(binaryPath string) (*Manager, error) {
 			return nil, fmt.Errorf("mkdir %s: %w", d, err)
 		}
 	}
-	return &Manager{binary: binaryPath, instDir: instDir}, nil
+	return &Manager{binary: binaryPath, instDir: instDir, db: database}, nil
 }
 
 func findBinary() string {

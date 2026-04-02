@@ -375,7 +375,6 @@ func (s *Server) handleUpdateVM(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.BandwidthMbps > 0 {
 			conf.BandwidthMbps = int(req.BandwidthMbps)
-			s.pf.UpdateVMBandwidth(ctx, vmID, int(req.BandwidthMbps))
 		}
 		_ = s.db.SaveVMConfig(conf)
 	}

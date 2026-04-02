@@ -2,7 +2,6 @@ package cpualloc
 
 import (
 	"fmt"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,15 +19,6 @@ type Allocator struct {
 // New 创建分配器，total 为宿主机逻辑 CPU 总数。
 func New(total int) *Allocator {
 	return &Allocator{refs: make([]int, total)}
-}
-
-// HostCPUCount 从 /sys/devices/system/cpu/online 读取在线 CPU 数。
-func HostCPUCount() int {
-	data, err := os.ReadFile("/sys/devices/system/cpu/online")
-	if err != nil {
-		return 1
-	}
-	return countCPUs(strings.TrimSpace(string(data)))
 }
 
 // Restore 在 Agent 重启时，从已持久化的 cpuset 字符串恢复引用计数。
@@ -145,20 +135,4 @@ func formatCpuset(cpus []int) string {
 	}
 	flush()
 	return strings.Join(parts, ",")
-}
-
-// countCPUs 计算 cpuset 字符串中的 CPU 总数。
-func countCPUs(s string) int {
-	count := 0
-	for _, part := range strings.Split(s, ",") {
-		part = strings.TrimSpace(part)
-		if idx := strings.Index(part, "-"); idx >= 0 {
-			lo, _ := strconv.Atoi(part[:idx])
-			hi, _ := strconv.Atoi(part[idx+1:])
-			count += hi - lo + 1
-		} else if part != "" {
-			count++
-		}
-	}
-	return count
 }

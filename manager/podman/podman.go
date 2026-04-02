@@ -23,7 +23,9 @@ import (
 	netTypes "go.podman.io/common/libnetwork/types"
 	"go.podman.io/image/v5/manifest"
 
+	"runman-agent/db"
 	"runman-agent/manager"
+	"runman-agent/manager/cpualloc"
 	"runman-agent/proto/agent"
 )
 
@@ -32,10 +34,12 @@ const networkName = "narwhal-net"
 func ptr[T any](v T) *T { return &v }
 
 type Manager struct {
-	ctx context.Context
+	ctx   context.Context
+	db    *db.DB
+	alloc *cpualloc.Allocator
 }
 
-func New(socketPath string) (*Manager, error) {
+func New(socketPath string, database *db.DB, alloc *cpualloc.Allocator) (*Manager, error) {
 	// 用 Background context 建立长期连接，避免 ping 超时取消后续所有操作
 	ctx, err := bindings.NewConnection(context.Background(), socketPath)
 	if err != nil {
@@ -48,7 +52,7 @@ func New(socketPath string) (*Manager, error) {
 		return nil, err
 	}
 
-	return &Manager{ctx: ctx}, nil
+	return &Manager{ctx: ctx, db: database, alloc: alloc}, nil
 }
 
 func (m *Manager) timeoutCtx() context.Context {
@@ -114,33 +118,77 @@ func (m *Manager) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error {
 		return err
 	}
 
-	// 获取 context 中的 IP 和 MAC 地址（如果有的话）
-	ipAddr := manager.IPAddressFrom(ctx)
-	macAddr := manager.MacAddressFrom(ctx)
+	// 2. 确定 IP 和 MAC (下放逻辑)
+	var ipAddr, macAddr string
+	var existingCpuset string
+	if conf, err := m.db.GetVMConfig(req.VmId); err == nil && conf.IP != "" {
+		// 复用已有配置
+		ipAddr = conf.IP
+		macAddr = conf.MAC
+		existingCpuset = conf.Cpuset
+	} else {
+		// 创建临时容器获取 IPAM 分配的地址
+		tempID := "tmp-" + req.VmId
+		netOpts := map[string]netTypes.PerNetworkOptions{
+			networkName: {},
+		}
+		res, err := containers.CreateWithSpec(m.timeoutCtx(), &specgen.SpecGenerator{
+			ContainerBasicConfig: specgen.ContainerBasicConfig{
+				Name:     tempID,
+				Hostname: tempID,
+			},
+			ContainerStorageConfig: specgen.ContainerStorageConfig{
+				Image: req.OsImage,
+			},
+			ContainerNetworkConfig: specgen.ContainerNetworkConfig{
+				Networks: netOpts,
+			},
+		}, nil)
+		if err == nil {
+			// 启动并获取信息
+			if containers.Start(m.timeoutCtx(), res.ID, nil) == nil {
+				inspect, _ := containers.Inspect(m.timeoutCtx(), res.ID, nil)
+				for _, netw := range inspect.NetworkSettings.Networks {
+					if netw.IPAddress != "" {
+						ipAddr = netw.IPAddress
+						macAddr = netw.MacAddress
+						break
+					}
+				}
+			}
+			// 删除临时容器
+			_ = m.deleteByID(res.ID)
+		}
+	}
 
-	// 2. 创建容器，如果没有指定就由 podman IPAM 自动分配 IP 和 MAC
+	// 3. 分配 cpuset (下放逻辑)
+	cpuset := existingCpuset
+	if cpuset == "" && req.Cpu > 0 {
+		cpuset, err = m.alloc.Allocate(int(req.Cpu))
+		if err != nil {
+			return err
+		}
+	}
+
+	// 如果最终拿到了地址，则注入到创建参数中
 	netOpt := netTypes.PerNetworkOptions{}
-
-	// 如果有指定的 IP 就使用
 	if ipAddr != "" {
 		if parsedIP := net.ParseIP(ipAddr); parsedIP != nil {
 			netOpt.StaticIPs = []net.IP{parsedIP}
 		}
 	}
-
-	// 如果有指定的 MAC 就使用
 	if macAddr != "" {
 		if hwAddr, err := net.ParseMAC(macAddr); err == nil {
 			netOpt.StaticMAC = netTypes.HardwareAddr(hwAddr)
 		}
 	}
 
-	// 限速选项通过 PerNetworkOptions.Options 传递，Podman 会原样交给 netavark
+	// 限速选项
 	if req.BandwidthMbps > 0 {
-		rate := int64(req.BandwidthMbps) * 1000000 // bits per second
-		burst := rate / 10                         // 突发容量 = 100ms 流量
+		rate := int64(req.BandwidthMbps) * 1000000
+		burst := rate / 10
 		if burst < 1000000 {
-			burst = 1000000 // 最小 1 Mbit
+			burst = 1000000
 		}
 		netOpt.Options = map[string]string{
 			"bandwidth_rate":    fmt.Sprintf("%d", rate),
@@ -149,7 +197,6 @@ func (m *Manager) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error {
 		}
 	}
 
-	// netOpt 完整赋值后再放入 map
 	netOpts := map[string]netTypes.PerNetworkOptions{
 		networkName: netOpt,
 	}
@@ -174,7 +221,7 @@ func (m *Manager) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error {
 			Networks:   netOpts,
 			DNSServers: []net.IP{net.ParseIP("1.1.1.1"), net.ParseIP("2606:4700:4700::1111")},
 		},
-		ContainerResourceConfig: buildResourceConfig(int64(req.Cpu), req.RamMb, manager.CpusetFrom(ctx)),
+		ContainerResourceConfig: buildResourceConfig(int64(req.Cpu), req.RamMb, cpuset),
 		ContainerHealthCheckConfig: specgen.ContainerHealthCheckConfig{
 			HealthConfig: &manifest.Schema2HealthConfig{
 				Test:    []string{"NONE"},
@@ -185,6 +232,9 @@ func (m *Manager) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error {
 	}, nil)
 
 	if err != nil {
+		if existingCpuset == "" && cpuset != "" {
+			m.alloc.Release(cpuset)
+		}
 		return err
 	}
 	defer func() {
@@ -196,6 +246,16 @@ func (m *Manager) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error {
 	if err = containers.Start(m.timeoutCtx(), res.ID, nil); err != nil {
 		return err
 	}
+
+	// 成功后确保保存配置到数据库
+	conf, err := m.db.GetVMConfig(req.VmId)
+	if err != nil {
+		conf = &db.VMConfig{VMID: req.VmId, LocalID: req.VmId}
+	}
+	conf.IP = ipAddr
+	conf.MAC = macAddr
+	conf.Cpuset = cpuset
+	_ = m.db.SaveVMConfig(conf)
 
 	// 设置 root 密码
 	err = m.execInContainer(res.ID, []string{"bash", "-c", fmt.Sprintf("echo 'root:%s' | chpasswd", req.RootPassword)})
@@ -221,6 +281,14 @@ func (m *Manager) deleteByID(id string) error {
 	if err != nil {
 		return err
 	}
+
+	// 删除前尝试从 DB 获取 cpuset 并释放
+	if conf, err := m.db.GetVMConfig(info.Name); err == nil && conf.Cpuset != "" {
+		m.alloc.Release(conf.Cpuset)
+	} else if conf, err := m.db.GetVMConfig(id); err == nil && conf.Cpuset != "" {
+		m.alloc.Release(conf.Cpuset)
+	}
+
 	if info.State.Running {
 		_ = containers.Stop(m.timeoutCtx(), id, nil)
 	}
@@ -251,10 +319,20 @@ func (m *Manager) UpdateVM(ctx context.Context, vmID string, cpu int32, ramMB in
 	resources := specs.LinuxResources{}
 	changed := false
 	if cpu > 0 {
+		var cpuset string
+		if conf, err := m.db.GetVMConfig(vmID); err == nil {
+			m.alloc.Release(conf.Cpuset)
+			cpuset, _ = m.alloc.Allocate(int(cpu))
+			conf.Cpuset = cpuset
+			_ = m.db.SaveVMConfig(conf)
+		} else {
+			cpuset, _ = m.alloc.Allocate(int(cpu))
+		}
+
 		resources.CPU = &specs.LinuxCPU{
 			Quota:  ptr(int64(100000) * int64(cpu)),
 			Period: ptr(uint64(100000)),
-			Cpus:   manager.CpusetFrom(ctx),
+			Cpus:   cpuset,
 		}
 		changed = true
 	}
@@ -276,7 +354,7 @@ func (m *Manager) UpdateVM(ctx context.Context, vmID string, cpu int32, ramMB in
 
 func (m *Manager) ReinstallVM(ctx context.Context, req *agent.CmdReinstallVM) error {
 	_ = m.StopVM(ctx, req.VmId, true)
-	_ = m.DeleteVM(ctx, req.VmId)
+	_ = m.DeleteVM(ctx, req.VmId) // DeleteVM 会释放旧的 cpuset
 	return m.CreateVM(ctx, &agent.CmdCreateVM{
 		VmId:          req.VmId,
 		OsImage:       req.OsImage,

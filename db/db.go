@@ -90,7 +90,7 @@ func (d *DB) SaveConfig(c *Config) error {
 	return d.orm.Save(c).Error
 }
 
-// VM 配置管理
+// SaveVMConfig VM 配置管理
 func (d *DB) SaveVMConfig(v *VMConfig) error {
 	return d.orm.Save(v).Error
 }
@@ -111,7 +111,7 @@ func (d *DB) DeleteVMConfig(vmId string) error {
 	return d.orm.Delete(&VMConfig{}, "vm_id = ?", vmId).Error
 }
 
-// 端口转发持久化
+// SavePortForward 端口转发持久化
 func (d *DB) SavePortForward(pf *PortForward) error {
 	return d.orm.Save(pf).Error
 }

@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -23,6 +24,7 @@ import (
 	"runman-agent/ndp"
 	"runman-agent/proto/agent"
 	"runman-agent/web"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -100,9 +102,17 @@ func main() {
 	var rawMgr manager.VMManager
 	switch conf.VirtType {
 	case "podman":
-		rawMgr, err = podman.New(*socketPath)
+		// 初始化 CPU 分配器，从 DB 恢复已有容器的 cpuset 引用计数
+		alloc := cpualloc.New(runtime.NumCPU())
+		if vmConfigs, err2 := database.ListVMConfigs(); err2 == nil {
+			for _, c := range vmConfigs {
+				alloc.Restore(c.Cpuset)
+			}
+		}
+
+		rawMgr, err = podman.New(*socketPath, database, alloc)
 	case "cloudhv":
-		rawMgr, err = cloudhv.New(*socketPath)
+		rawMgr, err = cloudhv.New(*socketPath, database)
 	default:
 		log.Fatalf("unsupported virt type: %q (supported: podman, cloudhv)", conf.VirtType)
 	}
@@ -110,16 +120,8 @@ func main() {
 		log.Fatalf("init manager: %v", err)
 	}
 
-	// 初始化 CPU 分配器，从 DB 恢复已有容器的 cpuset 引用计数
-	alloc := cpualloc.New(cpualloc.HostCPUCount())
-	if vmConfigs, err2 := database.ListVMConfigs(); err2 == nil {
-		for _, c := range vmConfigs {
-			alloc.Restore(c.Cpuset)
-		}
-	}
-
-	// VMService 作为服务层包装底层驱动，负责 ID 转换、托管 VM 过滤和 CPU 分配
-	svc := manager.NewVMService(rawMgr, database, alloc)
+	// VMService 作为服务层包装底层驱动，负责 ID 转换、托管 VM 过滤
+	svc := manager.NewVMService(rawMgr, database)
 
 	hostMon := monitor.NewHostMonitor()
 
@@ -171,7 +173,7 @@ func main() {
 			log.Printf("NDP responder init error: %v", err)
 		} else {
 			go func() {
-				if err := nr.Run(context.Background()); err != nil && err != context.Canceled {
+				if err = nr.Run(context.Background()); err != nil && !errors.Is(context.Canceled, err) {
 					log.Printf("NDP responder exited: %v", err)
 				}
 			}()
@@ -399,7 +401,6 @@ func (a *Agent) handleCommand(stream agent.AgentGateway_ConnectClient, env *agen
 			}
 			if p.ReinstallVm.BandwidthMbps > 0 {
 				conf.BandwidthMbps = int(p.ReinstallVm.BandwidthMbps)
-				a.pf.UpdateVMBandwidth(ctx, p.ReinstallVm.VmId, int(p.ReinstallVm.BandwidthMbps))
 			}
 			// 重装后获取新的 IP，如果获取不到 MAC 就从 IP 生成
 			ip, _ := a.mgr.GetVMIP(ctx, p.ReinstallVm.VmId)
