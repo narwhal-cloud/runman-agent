@@ -201,12 +201,12 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 				if req.WebUser != "" {
 					user = req.WebUser
 				}
-				passHash := existing.WebPassHash
+				hasPass := existing.WebPassHash != ""
 				if req.WebPass != "" {
-					passHash = "pending" // 标记即将设置
+					hasPass = true
 				}
 
-				if user == "" || passHash == "" {
+				if user == "" || !hasPass {
 					http.Error(w, "WebUser and WebPass are required when setting Token", 400)
 					return
 				}
@@ -228,7 +228,10 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 				}
 				existing.WebPassHash = string(hash)
 			}
-			_ = s.db.SaveConfig(existing)
+			if err := s.db.SaveConfig(existing); err != nil {
+				http.Error(w, "failed to save config: "+err.Error(), 500)
+				return
+			}
 		}
 		w.WriteHeader(200)
 		return

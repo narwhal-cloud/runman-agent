@@ -143,6 +143,20 @@
                         <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">Max Port Forward (Per VM)</label>
                         <input type="number" id="maxPortForward" class="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none text-sm" min="1" max="1000">
                     </div>
+                    <div class="pt-4 border-t border-slate-100 mt-2">
+                        <p class="text-[10px] font-bold text-slate-500 uppercase mb-3">Web Authentication (Basic Auth)</p>
+                        <div class="grid grid-cols-2 gap-3">
+                            <div>
+                                <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">Web Username</label>
+                                <input type="text" id="webUser" class="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none text-sm" placeholder="e.g. admin">
+                            </div>
+                            <div>
+                                <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">Web Password</label>
+                                <input type="password" id="webPass" class="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none text-sm" placeholder="Leave blank to keep current">
+                            </div>
+                        </div>
+                    </div>
+                    <div id="config-err" class="hidden text-red-500 text-xs bg-red-50 p-2 rounded mt-2"></div>
                     <button type="submit" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 rounded-lg transition-colors text-xs uppercase tracking-widest mt-2">
                         Save Changes
                     </button>
@@ -772,18 +786,24 @@ function populateImageSelect(selectId) {
 // ─── Config ───────────────────────────────────────────────────────────────────
 $('configForm').onsubmit = async (e) => {
     e.preventDefault();
+    hideErr('config-err');
     disableAllButtons(true);
     try {
         const newConf = {
             token:            $('token').value,
             monitor_nic:      $('monitorNIC').value,
             monitor_disk:     $('monitorDisk').value,
-            max_port_forward: parseInt($('maxPortForward').value) || 20, // matches db.DefaultMaxPortForward
+            max_port_forward: parseInt($('maxPortForward').value) || 20,
+            web_user:         $('webUser').value,
+            web_pass:         $('webPass').value,
         };
         await api('POST', '/api/config', newConf);
         currentConf = newConf;
         updateServerStatus(newConf, null);
-        alert('Saved.');
+        alert('Saved successfully. If you changed Web Authentication, you may need to re-login.');
+        $('webPass').value = ''; // clear password field after save
+    } catch(e) {
+        showErr('config-err', e.message);
     } finally {
         disableAllButtons(false);
     }
@@ -844,6 +864,7 @@ async function init() {
     $('monitorNIC').value     = conf.monitor_nic     || '';
     $('monitorDisk').value    = conf.monitor_disk    || '';
     $('maxPortForward').value = conf.max_port_forward || 20; // matches db.DefaultMaxPortForward
+    $('webUser').value        = conf.web_user        || '';
     $('virt-badge').textContent = 'VIRT: '+(conf.virt_type||'?').toUpperCase();
     $('disk-label').textContent = 'Disk: '+(conf.monitor_disk||'/');
 
