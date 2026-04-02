@@ -107,7 +107,7 @@ func (s *Server) ListenAndServe(addr string) error {
 		if r.URL.Path == "/" {
 			data, _ := staticFiles.ReadFile("static/index.html")
 			w.Header().Set("Content-Type", "text/html")
-			w.Write(data)
+			_, _ = w.Write(data)
 			return
 		}
 		filePath := "static" + r.URL.Path
@@ -119,7 +119,7 @@ func (s *Server) ListenAndServe(addr string) error {
 		if strings.HasSuffix(filePath, ".png") {
 			w.Header().Set("Content-Type", "image/png")
 		}
-		w.Write(data)
+		_, _ = w.Write(data)
 	})
 
 	return http.ListenAndServe(addr, s.authMiddleware(mux))
@@ -129,7 +129,7 @@ func (s *Server) ListenAndServe(addr string) error {
 
 func jsonOK(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(v)
+	_ = json.NewEncoder(w).Encode(v)
 }
 
 func jsonErr(w http.ResponseWriter, err error, code int) {
@@ -151,7 +151,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, stats)
 }
 
-func (s *Server) handleSystemInfo(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleSystemInfo(w http.ResponseWriter, _ *http.Request) {
 	nics, _ := psnet.Interfaces()
 	parts, _ := disk.Partitions(false)
 
@@ -195,6 +195,23 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		existing, _ := s.db.GetConfig()
 		if existing != nil {
+			// 如果设置 Token，必须确保已有或正在设置用户名和密码
+			if req.Token != "" {
+				user := existing.WebUser
+				if req.WebUser != "" {
+					user = req.WebUser
+				}
+				passHash := existing.WebPassHash
+				if req.WebPass != "" {
+					passHash = "pending" // 标记即将设置
+				}
+
+				if user == "" || passHash == "" {
+					http.Error(w, "WebUser and WebPass are required when setting Token", 400)
+					return
+				}
+			}
+
 			existing.Token = req.Token
 			existing.MonitorNIC = req.MonitorNIC
 			existing.MonitorDisk = req.MonitorDisk
@@ -211,7 +228,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 				}
 				existing.WebPassHash = string(hash)
 			}
-			s.db.SaveConfig(existing)
+			_ = s.db.SaveConfig(existing)
 		}
 		w.WriteHeader(200)
 		return
@@ -228,7 +245,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handleConnection(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleConnection(w http.ResponseWriter, _ *http.Request) {
 	var connected bool
 	var errMsg string
 	if s.agent != nil {
@@ -328,7 +345,7 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]string{"vm_id": req.VmId})
+	_ = json.NewEncoder(w).Encode(map[string]string{"vm_id": req.VmId})
 }
 
 // ─── VM 单机操作 ───────────────────────────────────────────────────────────────
@@ -627,7 +644,7 @@ func (s *Server) handleVMTTY(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
@@ -637,7 +654,7 @@ func (s *Server) handleVMTTY(w http.ResponseWriter, r *http.Request) {
 
 	// 读取 WebSocket 消息：binary → 容器 stdin，text JSON → resize 事件
 	go func() {
-		defer stdinPW.Close()
+		defer func() { _ = stdinPW.Close() }()
 		defer cancel()
 		defer close(resizeCh)
 		for {

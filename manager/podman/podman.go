@@ -354,7 +354,7 @@ func (m *Manager) UpdateVM(ctx context.Context, vmID string, cpu int32, ramMB in
 
 func (m *Manager) ReinstallVM(ctx context.Context, req *agent.CmdReinstallVM) error {
 	_ = m.StopVM(ctx, req.VmId, true)
-	_ = m.DeleteVM(ctx, req.VmId) // DeleteVM 会释放旧的 cpuset
+	_ = m.DeleteVM(ctx, req.VmId)
 	return m.CreateVM(ctx, &agent.CmdCreateVM{
 		VmId:          req.VmId,
 		OsImage:       req.OsImage,

@@ -223,9 +223,9 @@ download_agent() {
     log "$(t "✓ NarwhalCloud Agent installed to $AGENT_BINARY" "✓ NarwhalCloud Agent 已安装到 $AGENT_BINARY")"
 }
 
-# write_service_file WEB_USER WEB_PASS [NDP_EXTRA_FLAGS]
+# write_service_file [NDP_EXTRA_FLAGS]
 write_service_file() {
-    local web_user=$1 web_pass=$2 extra_flags="${3:-}"
+    local extra_flags="${1:-}"
     mkdir -p "$AGENT_DATA_DIR"
     cat > "/etc/systemd/system/$AGENT_SERVICE.service" <<EOF
 [Unit]
@@ -241,9 +241,7 @@ ExecStart=$AGENT_BINARY \\
   --db $AGENT_DB \\
   --web :$AGENT_WEB_PORT \\
   --socket unix:///run/podman/podman.sock \\
-  --type podman \\
-  --web-user $web_user \\
-  --web-pass $web_pass${extra_flags}
+  --type podman${extra_flags}
 Restart=always
 RestartSec=5
 StandardOutput=journal
@@ -474,24 +472,10 @@ for image in "docker.io/narwhalcloud/debian:podman" "docker.io/narwhalcloud/alpi
             || log "$(t "Warning: failed to pull $image" "警告: $image 拉取失败")"; }
 done
 
-# ── Web panel credentials ─────────────────────────────────────────────────────
-
-echo ""
-log "$(t "Set up NarwhalCloud panel credentials (protects port $AGENT_WEB_PORT)" "设置 NarwhalCloud 面板访问凭据（保护端口 $AGENT_WEB_PORT）")"
-read -rp "$(t "Username [admin]: " "用户名 [admin]: ")" WEB_USER
-WEB_USER=${WEB_USER:-admin}
-while true; do
-    read -rsp "$(t "Password: " "密码: ")" WEB_PASS; echo
-    read -rsp "$(t "Confirm password: " "确认密码: ")" WEB_PASS2; echo
-    [ "$WEB_PASS" = "$WEB_PASS2" ] && break
-    log "$(t "Passwords do not match, please try again." "两次输入不一致，请重新输入。")"
-done
-echo ""
-
 # ── Install agent ─────────────────────────────────────────────────────────────
 
 download_agent "$ARCH"
-write_service_file "$WEB_USER" "$WEB_PASS" "$NDP_EXTRA_FLAGS"
+write_service_file "$NDP_EXTRA_FLAGS"
 start_service "$AGENT_SERVICE"
 
 # ── Optional rfw ─────────────────────────────────────────────────────────────
@@ -552,7 +536,6 @@ log "========================================"
 log "$(t "✓ NarwhalCloud Agent installation complete!" "✓ NarwhalCloud Agent 安装完成！")"
 log "$(t "IP:           $IP" "IP:           $IP")"
 log "$(t "Web panel:    http://$IP:$AGENT_WEB_PORT" "面板地址:     http://$IP:$AGENT_WEB_PORT")"
-log "$(t "Username:     $WEB_USER" "用户名:       $WEB_USER")"
 echo ""
 log "$(t "Next step: log in to the web panel and enter your Token" "下一步：登录面板并在设置中填入您的 Token")"
 log "========================================"

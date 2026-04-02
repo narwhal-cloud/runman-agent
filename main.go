@@ -30,7 +30,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"golang.org/x/crypto/bcrypt"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
@@ -53,8 +52,8 @@ type Agent struct {
 	connected     bool
 	lastError     string
 	lastConnected time.Time
-	entryIPv4     string // 公网 IPv4，启动时自动检测（config.Host 为空时使用）
-	entryIPv6     string // 公网 IPv6，定期刷新
+	entryIPv4     string // 公网 IPv4，启动时自动检测
+	entryIPv6     string // 公网 IPv6，启动时自动检测
 }
 
 func main() {
@@ -62,40 +61,22 @@ func main() {
 	webAddr := flag.String("web", ":8792", "web status server address")
 	socketPath := flag.String("socket", "unix:///run/podman/podman.sock", "podman api socket path")
 	virtType := flag.String("type", "podman", "virtualization type")
-	webUser := flag.String("web-user", "", "web panel username (write to DB only when DB is empty)")
-	webPass := flag.String("web-pass", "", "web panel password in plaintext (bcrypt-hashed before storing)")
 	ndpIface := flag.String("ndp-iface", "", "uplink interface for NDP responder (IPv6, e.g. eth0)")
 	ndpSubnets := flag.String("ndp-subnet", "", "IPv6 CIDRs for NDP responder, comma-separated (e.g. 2001:db8::/112)")
 	ndpNetwork := flag.String("ndp-network", "", "Podman network name for NDP responder (e.g. narwhal-net)")
 	flag.Parse()
 	log.SetOutput(os.Stdout)
-	log.Printf("narwhalcloud-agent %s", version)
+	log.Printf("narwhal cloud-agent %s", version)
 
 	database, err := db.Init(*dbPath)
 	if err != nil {
 		log.Fatalf("init db: %v", err)
 	}
 
-	// 首次启动时将命令行指定的参数写入数据库。
+	// 首次启动时将虚拟化写入数据库
 	conf, _ := database.GetConfig()
-	changed := false
 	if conf.VirtType == "" {
 		conf.VirtType = *virtType
-		changed = true
-	}
-	if *webUser != "" && conf.WebUser == "" {
-		conf.WebUser = *webUser
-		changed = true
-	}
-	if *webPass != "" && conf.WebPassHash == "" {
-		hash, err := bcrypt.GenerateFromPassword([]byte(*webPass), bcrypt.DefaultCost)
-		if err != nil {
-			log.Fatalf("hash web password: %v", err)
-		}
-		conf.WebPassHash = string(hash)
-		changed = true
-	}
-	if changed {
 		_ = database.SaveConfig(conf)
 	}
 
@@ -109,7 +90,6 @@ func main() {
 				alloc.Restore(c.Cpuset)
 			}
 		}
-
 		rawMgr, err = podman.New(*socketPath, database, alloc)
 	case "cloudhv":
 		rawMgr, err = cloudhv.New(*socketPath, database)
@@ -160,8 +140,7 @@ func main() {
 
 	// 启动时异步测速，结果写入 DB 并附带在心跳中上报
 	go a.measureBandwidth()
-
-	// 启动时检测公网 IPv4（仅当未手动配置 Host 时使用）
+	// 启动时检测公网 IPv4，附带在心跳中上报
 	go a.detectIPv4()
 	// 启动时检测公网 IPv6，附带在心跳中上报
 	go a.detectIPv6()
@@ -378,47 +357,27 @@ func (a *Agent) handleCommand(stream agent.AgentGateway_ConnectClient, env *agen
 
 	switch p := env.Payload.(type) {
 	case *agent.PlatformEnvelope_CreateVm:
-		// VMService.CreateVM 内部已持久化 VMConfig（含 cpuset）
+		// VMService.CreateVM 内部已持久化 VMConfig
 		err = a.mgr.CreateVM(ctx, p.CreateVm)
 
 	case *agent.PlatformEnvelope_ReinstallVm:
-		err = a.mgr.ReinstallVM(ctx, p.ReinstallVm)
-		if err == nil {
-			// 重装后更新配置记录；若 DB 中无记录（母鸡重装系统后配置丢失），则根据下发参数重新创建
-			conf, _ := a.db.GetVMConfig(p.ReinstallVm.VmId)
-			if conf == nil {
-				conf = &db.VMConfig{
-					VMID:    p.ReinstallVm.VmId,
-					LocalID: p.ReinstallVm.VmId,
-				}
-			}
-			conf.Image = p.ReinstallVm.OsImage
-			if p.ReinstallVm.Cpu > 0 {
-				conf.CPU = int(p.ReinstallVm.Cpu)
-			}
-			if p.ReinstallVm.RamMb > 0 {
-				conf.MemoryMB = p.ReinstallVm.RamMb
-			}
-			if p.ReinstallVm.BandwidthMbps > 0 {
-				conf.BandwidthMbps = int(p.ReinstallVm.BandwidthMbps)
-			}
-			// 重装后获取新的 IP，如果获取不到 MAC 就从 IP 生成
-			ip, _ := a.mgr.GetVMIP(ctx, p.ReinstallVm.VmId)
-			mac, _ := a.mgr.GetVMMAC(ctx, p.ReinstallVm.VmId)
-			if mac == "" && ip != "" {
-				mac = manager.GenerateMACFromIP(ip)
-			}
-			conf.IP = ip
-			conf.MAC = mac
-			_ = a.db.SaveVMConfig(conf)
-
-			// 重装后 IP 可能变化，刷新端口转发规则使其指向新 IP
-			a.pf.RefreshVM(ctx, p.ReinstallVm.VmId)
+		_, err = a.db.GetVMConfig(p.ReinstallVm.VmId)
+		if err != nil {
+			err = a.mgr.CreateVM(ctx, &agent.CmdCreateVM{
+				VmId:          p.ReinstallVm.VmId,
+				Cpu:           p.ReinstallVm.Cpu,
+				RamMb:         p.ReinstallVm.RamMb,
+				DiskGb:        p.ReinstallVm.DiskGb,
+				BandwidthMbps: p.ReinstallVm.BandwidthMbps,
+				OsImage:       p.ReinstallVm.OsImage,
+				RootPassword:  p.ReinstallVm.RootPassword,
+			})
+		} else {
+			err = a.mgr.ReinstallVM(ctx, p.ReinstallVm)
 		}
-
+		a.pf.RefreshVM(ctx, p.ReinstallVm.VmId)
 	case *agent.PlatformEnvelope_DeleteVm:
 		err = a.mgr.DeleteVM(ctx, p.DeleteVm.VmId)
-		// 无论删除是否成功都清理 DB 记录，避免残留脏数据
 		_ = a.db.DeleteVMConfig(p.DeleteVm.VmId)
 		_ = a.db.DeleteTraffic(p.DeleteVm.VmId)
 		a.pf.DeleteVM(ctx, p.DeleteVm.VmId)
@@ -514,7 +473,7 @@ func vmStatusString(s agent.VMStatus) string {
 	}
 }
 
-// detectIPv4 启动时获取一次公网 IPv4 并缓存，供 config.Host 为空时填入心跳。
+// detectIPv4 启动时获取一次公网 IPv4
 func (a *Agent) detectIPv4() {
 	ip := fetchPublicIPv4()
 	a.mu.Lock()
@@ -545,7 +504,7 @@ func fetchPublicIPv4() string {
 	return strings.TrimSpace(string(b))
 }
 
-// detectIPv6 启动时获取一次公网 IPv6 并缓存。
+// detectIPv6 启动时获取一次公网 IPv6
 func (a *Agent) detectIPv6() {
 	ip := fetchPublicIPv6()
 	a.mu.Lock()
