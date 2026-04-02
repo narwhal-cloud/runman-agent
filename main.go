@@ -430,6 +430,9 @@ func (a *Agent) handleCommand(stream agent.AgentGateway_ConnectClient, env *agen
 
 	case *agent.PlatformEnvelope_RestartVm:
 		err = a.mgr.RestartVM(ctx, p.RestartVm.VmId)
+		if err == nil {
+			a.pf.RefreshVM(ctx, p.RestartVm.VmId)
+		}
 
 	case *agent.PlatformEnvelope_ResetPassword:
 		err = a.mgr.ResetPassword(ctx, p.ResetPassword.VmId, p.ResetPassword.NewPassword)

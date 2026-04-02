@@ -18,6 +18,7 @@ type Entry struct {
 	Protocol    string // "tcp" or "udp"
 	HostPort    int
 	GuestPort   int
+	TargetAddr  string // resolved "ip:port" at setup time, for diagnostics
 	Description string
 	cancel      context.CancelFunc
 	ln          io.Closer
@@ -111,6 +112,9 @@ func (m *Manager) addMapping(ctx context.Context, vmId string, protocol string, 
 	if err != nil {
 		return err
 	}
+	if ip == "" {
+		return fmt.Errorf("VM %s has no IP address (is it running?)", vmId)
+	}
 	targetAddr := fmt.Sprintf("%s:%d", ip, guestPort)
 
 	runCtx, cancel := context.WithCancel(context.Background())
@@ -119,6 +123,7 @@ func (m *Manager) addMapping(ctx context.Context, vmId string, protocol string, 
 		Protocol:    protocol,
 		HostPort:    hostPort,
 		GuestPort:   guestPort,
+		TargetAddr:  targetAddr,
 		Description: description,
 		cancel:      cancel,
 	}
@@ -224,10 +229,12 @@ func (m *Manager) GetReport() []Entry {
 	for _, entries := range m.mappings {
 		for _, e := range entries {
 			all = append(all, Entry{
-				VMID:      e.VMID,
-				Protocol:  e.Protocol,
-				HostPort:  e.HostPort,
-				GuestPort: e.GuestPort,
+				VMID:        e.VMID,
+				Protocol:    e.Protocol,
+				HostPort:    e.HostPort,
+				GuestPort:   e.GuestPort,
+				TargetAddr:  e.TargetAddr,
+				Description: e.Description,
 			})
 		}
 	}

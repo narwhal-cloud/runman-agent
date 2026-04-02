@@ -653,7 +653,8 @@ async function refreshPortFwds() {
                     <span class="font-bold text-indigo-600 uppercase">${r.protocol}</span>
                     <span class="text-slate-600"> :${r.host_port}</span>
                     <span class="text-slate-400"> → </span>
-                    <span class="text-slate-600">:${r.guest_port}</span>
+                    <span class="text-slate-600">${r.target_addr || ':'+r.guest_port}</span>
+                    ${r.description ? `<span class="ml-2 text-slate-400">${r.description}</span>` : ''}
                 </div>
                 <button onclick="doDelPortFwd('${r.protocol}',${r.host_port})" class="text-red-400 hover:text-red-600 text-xs font-bold px-2 py-0.5 hover:bg-red-50 rounded">✕</button>
             </div>`).join('');

@@ -404,10 +404,12 @@ func (s *Server) handleStopVM(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRestartVM(w http.ResponseWriter, r *http.Request) {
-	if err := s.mgr.RestartVM(r.Context(), r.PathValue("id")); err != nil {
+	vmID := r.PathValue("id")
+	if err := s.mgr.RestartVM(r.Context(), vmID); err != nil {
 		jsonErr(w, err, 500)
 		return
 	}
+	s.pf.RefreshVM(r.Context(), vmID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -501,6 +503,7 @@ type portFwdEntry struct {
 	Protocol    string `json:"protocol"`
 	HostPort    int    `json:"host_port"`
 	GuestPort   int    `json:"guest_port"`
+	TargetAddr  string `json:"target_addr,omitempty"`
 	Description string `json:"description,omitempty"`
 }
 
@@ -514,6 +517,7 @@ func (s *Server) handleListPortFwds(w http.ResponseWriter, r *http.Request) {
 				Protocol:    e.Protocol,
 				HostPort:    e.HostPort,
 				GuestPort:   e.GuestPort,
+				TargetAddr:  e.TargetAddr,
 				Description: e.Description,
 			})
 		}
