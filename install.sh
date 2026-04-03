@@ -5,7 +5,7 @@ set -e
 # NarwhalCloud Agent install / update script
 # ────────────────────────────────────────────────────────────────────────────────
 
-AGENT_BINARY="/usr/local/bin/runman-agent"
+AGENT_BINARY="/opt/runman-agent"
 AGENT_SERVICE="runman-agent"
 AGENT_DATA_DIR="/var/lib/runman-agent"
 AGENT_DB="$AGENT_DATA_DIR/agent.db"
@@ -274,16 +274,16 @@ if systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null || [ -f "$AGENT_BINA
     log "$(t "✓ NarwhalCloud Agent updated." "✓ NarwhalCloud Agent 已更新。")"
 
     # Update rfw if installed
-    if [ -f "/root/rfw/rfw" ] && [ -f "/etc/systemd/system/rfw.service" ]; then
+    if [ -f "/opt/rfw/rfw" ] && [ -f "/etc/systemd/system/rfw.service" ]; then
         log "$(t "rfw detected, updating..." "检测到 rfw，开始更新...")"
         EXISTING_IFACE=$(grep "ExecStart=" /etc/systemd/system/rfw.service | grep -oP '(?<=--iface )[^ ]+' || true)
         if [ -n "$EXISTING_IFACE" ]; then
             RFW_ARCH=$(uname -m)
-            if download_with_retry "$RFW_BASE/rfw-$RFW_ARCH-unknown-linux-musl" "/root/rfw/rfw.new"; then
-                chmod +x /root/rfw/rfw.new
+            if download_with_retry "$RFW_BASE/rfw-$RFW_ARCH-unknown-linux-musl" "/opt/rfw/rfw.new"; then
+                chmod +x /opt/rfw/rfw.new
                 systemctl is-active --quiet rfw && systemctl stop rfw
-                mv /root/rfw/rfw.new /root/rfw/rfw
-                sed -i "s|^ExecStart=.*|ExecStart=/root/rfw/rfw --iface $EXISTING_IFACE --block-email --block-http --block-socks5 --block-fet-strict --block-wireguard --countries CN|" \
+                mv /opt/rfw/rfw.new /opt/rfw/rfw
+                sed -i "s|^ExecStart=.*|ExecStart=/opt/rfw/rfw --iface $EXISTING_IFACE --block-email --block-http --block-socks5 --block-fet-strict --block-wireguard --countries CN|" \
                     /etc/systemd/system/rfw.service
                 systemctl daemon-reload && systemctl start rfw
                 log "$(t "✓ rfw updated." "✓ rfw 已更新。")"
@@ -482,11 +482,11 @@ start_service "$AGENT_SERVICE"
 
 read -rp "$(t "Install rfw firewall? [Y/n]: " "是否安装 rfw 防火墙? [Y/n]: ")" _rfw
 if [[ "${_rfw:-Y}" =~ ^[Yy]$ ]]; then
-    mkdir -p /root/rfw
+    mkdir -p /opt/rfw
     RFW_ARCH=$(uname -m)
-    if [ ! -f "/root/rfw/rfw" ]; then
-        download_with_retry "$RFW_BASE/rfw-$RFW_ARCH-unknown-linux-musl" "/root/rfw/rfw"
-        chmod +x /root/rfw/rfw
+    if [ ! -f "/opt/rfw/rfw" ]; then
+        download_with_retry "$RFW_BASE/rfw-$RFW_ARCH-unknown-linux-musl" "/opt/rfw/rfw"
+        chmod +x /opt/rfw/rfw
     else
         log "$(t "rfw already exists, skipping download." "rfw 已存在，跳过下载。")"
     fi
@@ -512,7 +512,7 @@ After=network.target
 Type=simple
 User=root
 Environment=RUST_LOG=info
-ExecStart=/root/rfw/rfw --iface $SEL_IFACE --block-email --block-http --block-socks5 --block-fet-strict --block-wireguard --countries CN
+ExecStart=/opt/rfw/rfw --iface $SEL_IFACE --block-email --block-http --block-socks5 --block-fet-strict --block-wireguard --countries CN
 Restart=always
 RestartSec=5
 
