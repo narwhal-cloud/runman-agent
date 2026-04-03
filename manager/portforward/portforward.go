@@ -108,7 +108,7 @@ func (m *Manager) addMapping(ctx context.Context, vmId string, protocol string, 
 		}
 	}
 
-	ip, err := m.mgr.GetVMIP(ctx, vmId)
+	ip, err := m.mgr.GetVMLocalIP(ctx, vmId)
 	if err != nil {
 		return err
 	}
