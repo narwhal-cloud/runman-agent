@@ -136,6 +136,8 @@ func main() {
 	go a.detectIPv4()
 	// 启动时检测公网 IPv6，附带在心跳中上报
 	go a.detectIPv6()
+	// 独立流量采集循环，与服务端连接状态无关，保证离线时月流量也能持续统计
+	go a.trafficCollectLoop()
 
 	// 按需启动 NDP 应答器（公网 IPv6 场景）
 	if *ndpIface != "" {
@@ -301,18 +303,13 @@ func (a *Agent) sendHeartbeat(stream agent.AgentGateway_ConnectClient) {
 	vms, _ := a.mgr.ListVMs(ctx)
 	images, _ := a.mgr.GetSupportedImages(ctx)
 
-	// 将本次采集到的流量增量累加到 DB，并写回累计值及当月统计；同步容器真实状态
-	currentMonth := time.Now().Format("2006-01")
+	// 流量数据由 trafficCollectLoop 独立写入 DB，这里只读取累计值填充心跳
 	for _, vm := range vms {
-		totalIn, totalOut, monthIn, monthOut, _ := a.db.UpdateTraffic(vm.VmId, vm.TrafficInBytes, vm.TrafficOutBytes, currentMonth)
-		vm.TrafficInBytes, vm.TrafficOutBytes = totalIn, totalOut
-		vm.MonthlyTrafficIn, vm.MonthlyTrafficOut = monthIn, monthOut
-
-		if conf, err := a.db.GetVMConfig(vm.VmId); err == nil {
-			if s := vmStatusString(vm.Status); s != "" && conf.Status != s {
-				conf.Status = s
-				_ = a.db.SaveVMConfig(conf)
-			}
+		if t, err := a.db.GetTraffic(vm.VmId); err == nil {
+			vm.TrafficInBytes = t.TotalIn
+			vm.TrafficOutBytes = t.TotalOut
+			vm.MonthlyTrafficIn = t.MonthIn
+			vm.MonthlyTrafficOut = t.MonthOut
 		}
 	}
 	hb.Vms = vms
@@ -533,6 +530,31 @@ func fetchPublicIPv6() string {
 		return ""
 	}
 	return strings.TrimSpace(string(b))
+}
+
+// trafficCollectLoop 每 30 秒采集一次所有 VM 的流量并写入 DB，
+// 独立于服务端连接状态运行，保证离线时月度流量也能持续统计。
+func (a *Agent) trafficCollectLoop() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		ctx := a.monitorCtx()
+		vms, err := a.mgr.ListVMs(ctx)
+		if err != nil {
+			continue
+		}
+		currentMonth := time.Now().Format("2006-01")
+		for _, vm := range vms {
+			_, _, _, _, _ = a.db.UpdateTraffic(vm.VmId, vm.TrafficInBytes, vm.TrafficOutBytes, currentMonth)
+			// 同步容器状态到 DB
+			if conf, dbErr := a.db.GetVMConfig(vm.VmId); dbErr == nil {
+				if s := vmStatusString(vm.Status); s != "" && conf.Status != s {
+					conf.Status = s
+					_ = a.db.SaveVMConfig(conf)
+				}
+			}
+		}
+	}
 }
 
 // pickFreePort 在 [min, max) 范围内随机选一个当前未被占用的 TCP 端口。

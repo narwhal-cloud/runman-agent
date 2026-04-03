@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"runman-agent/manager/podman/cpualloc"
 	"runtime"
@@ -136,7 +137,9 @@ func (m *Manager) CreateVM(_ context.Context, req *agent.CmdCreateVM) error {
 		}
 		macAddr = conf.MAC
 		cpuSet = conf.Cpuset
+		log.Printf("[CreateVM] %s: reuse stored config ipv4=%s ipv6=%s mac=%s cpuset=%s", req.VmId, conf.IPv4, conf.IPv6, conf.MAC, conf.Cpuset)
 	} else {
+		log.Printf("[CreateVM] %s: no stored config (err=%v), creating temp container to get IP", req.VmId, err)
 		// 创建临时容器获取 IPAM 分配的地址
 		tempID := "tmp-" + req.VmId
 		netOpts := map[string]netTypes.PerNetworkOptions{
@@ -154,22 +157,36 @@ func (m *Manager) CreateVM(_ context.Context, req *agent.CmdCreateVM) error {
 			ContainerNetworkConfig: specgen.ContainerNetworkConfig{
 				Networks: netOpts,
 			},
+			ContainerHealthCheckConfig: specgen.ContainerHealthCheckConfig{
+				HealthConfig:         &manifest.Schema2HealthConfig{Test: []string{"NONE"}},
+				HealthLogDestination: "/tmp",
+			},
 		}, nil)
-		if err == nil {
+		if err != nil {
+			log.Printf("[CreateVM] %s: temp container create failed: %v", req.VmId, err)
+		} else {
+			log.Printf("[CreateVM] %s: temp container created id=%s", req.VmId, res.ID)
 			// 启动并获取信息
-			if containers.Start(m.timeoutCtx(), res.ID, nil) == nil {
+			if startErr := containers.Start(m.timeoutCtx(), res.ID, nil); startErr != nil {
+				log.Printf("[CreateVM] %s: temp container start failed: %v", req.VmId, startErr)
+			} else {
 				inspect, _ := containers.Inspect(m.timeoutCtx(), res.ID, nil)
 				ipv4, ipv6, err = m.getIPsFromInspect(inspect)
-				if err == nil {
+				if err != nil {
+					log.Printf("[CreateVM] %s: getIPsFromInspect failed: %v", req.VmId, err)
+				} else {
+					log.Printf("[CreateVM] %s: got ipv4=%s ipv6=%s from temp container", req.VmId, ipv4, ipv6)
 					for _, ins := range inspect.NetworkSettings.Networks {
 						if macAddr == "" {
 							macAddr = ins.MacAddress
 						}
 					}
+					log.Printf("[CreateVM] %s: got mac=%s from temp container", req.VmId, macAddr)
 				}
 			}
 			// 删除临时容器
 			_ = m.deleteByID(res.ID)
+			log.Printf("[CreateVM] %s: temp container deleted", req.VmId)
 		}
 	}
 
@@ -184,9 +201,13 @@ func (m *Manager) CreateVM(_ context.Context, req *agent.CmdCreateVM) error {
 	netOpt := netTypes.PerNetworkOptions{}
 	if ipv4 != nil {
 		netOpt.StaticIPs = append(netOpt.StaticIPs, ipv4)
+		log.Printf("[CreateVM] %s: will use static ipv4=%s", req.VmId, ipv4)
+	} else {
+		log.Printf("[CreateVM] %s: WARNING no static IPv4 will be set, IP may change on restart", req.VmId)
 	}
 	if ipv6 != nil {
 		netOpt.StaticIPs = append(netOpt.StaticIPs, ipv6)
+		log.Printf("[CreateVM] %s: will use static ipv6=%s", req.VmId, ipv6)
 	}
 	if macAddr != "" {
 		if hwAddr, err := net.ParseMAC(macAddr); err == nil {
@@ -361,7 +382,7 @@ func (m *Manager) DeleteVM(_ context.Context, vmID string) error {
 	return m.deleteByID(vmID)
 }
 
-func (m *Manager) UpdateVM(_ context.Context, vmID string, cpu int32, ramMB int64, diskGB int64, bandwidthMBPS int32) error {
+func (m *Manager) UpdateVM(_ context.Context, vmID string, cpu int32, ramMB int64, _ int64, _ int32) error {
 	resources := specs.LinuxResources{}
 	changed := false
 	if cpu > 0 {

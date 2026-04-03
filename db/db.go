@@ -1,8 +1,13 @@
 package db
 
 import (
+	"log"
+	"os"
+	"time"
+
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 const DefaultMaxPortForward = 20
@@ -65,7 +70,14 @@ type DB struct {
 }
 
 func Init(path string) (*DB, error) {
-	db, err := gorm.Open(sqlite.Open(path), &gorm.Config{})
+	db, err := gorm.Open(sqlite.Open(path), &gorm.Config{
+		Logger: logger.New(log.New(os.Stdout, "\r\n", log.LstdFlags), logger.Config{
+			SlowThreshold:             200 * time.Millisecond,
+			LogLevel:                  logger.Error,
+			IgnoreRecordNotFoundError: true,
+			Colorful:                  true,
+		}),
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -104,7 +116,7 @@ func (d *DB) SaveVMConfig(v *VMConfig) error {
 
 func (d *DB) GetVMConfig(vmId string) (*VMConfig, error) {
 	var conf VMConfig
-	err := d.orm.First(&conf, "vmid = ?", vmId).Error
+	err := d.orm.First(&conf, "vm_id = ?", vmId).Error
 	return &conf, err
 }
 
@@ -115,7 +127,7 @@ func (d *DB) ListVMConfigs() ([]*VMConfig, error) {
 }
 
 func (d *DB) DeleteVMConfig(vmId string) error {
-	return d.orm.Delete(&VMConfig{}, "vmid = ?", vmId).Error
+	return d.orm.Delete(&VMConfig{}, "vm_id = ?", vmId).Error
 }
 
 // 端口转发
@@ -213,12 +225,12 @@ func (d *DB) SavePodmanConfig(v *PodmanVMConfig) error {
 
 func (d *DB) GetPodmanConfig(vmId string) (*PodmanVMConfig, error) {
 	var conf PodmanVMConfig
-	err := d.orm.First(&conf, "vmid = ?", vmId).Error
+	err := d.orm.First(&conf, "vm_id = ?", vmId).Error
 	return &conf, err
 }
 
 func (d *DB) DeletePodmanConfig(vmId string) error {
-	return d.orm.Delete(&PodmanVMConfig{}, "vmid = ?", vmId).Error
+	return d.orm.Delete(&PodmanVMConfig{}, "vm_id = ?", vmId).Error
 }
 func (d *DB) ListPodmanConfigs() ([]*PodmanVMConfig, error) {
 	var list []*PodmanVMConfig

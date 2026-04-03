@@ -275,25 +275,40 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 
 // ─── VM 列表 & 创建 ────────────────────────────────────────────────────────────
 
+type vmListItem struct {
+	VmId              string   `json:"vm_id"`
+	Status            int32    `json:"status"`
+	CpuPct            float32  `json:"cpu_pct"`
+	RamUsedMb         int64    `json:"ram_used_mb"`
+	RamTotalMb        int64    `json:"ram_total_mb"`
+	TrafficInBytes    int64    `json:"traffic_in_bytes"`
+	TrafficOutBytes   int64    `json:"traffic_out_bytes"`
+	MonthlyTrafficIn  int64    `json:"monthly_traffic_in"`
+	MonthlyTrafficOut int64    `json:"monthly_traffic_out"`
+	Ips               []string `json:"ips"`
+}
+
 func (s *Server) handleListVMs(w http.ResponseWriter, r *http.Request) {
 	vms, _ := s.mgr.ListVMs(r.Context())
 
-	type vmItem struct {
-		*agent.VMSummary
-		RamTotalMb int64 `json:"ram_total_mb,omitempty"`
-	}
-	items := make([]vmItem, len(vms))
+	items := make([]vmListItem, len(vms))
 	for i, vm := range vms {
-		// 从数据库获取月度流量
-		if t, err := s.db.GetTraffic(vm.VmId); err == nil {
-			vm.MonthlyTrafficIn = t.MonthIn
-			vm.MonthlyTrafficOut = t.MonthOut
-			// 累计流量以数据库为准，因为数据库包含了重启前的历史增量
-			vm.TrafficInBytes = t.TotalIn
-			vm.TrafficOutBytes = t.TotalOut
+		item := vmListItem{
+			VmId:            vm.VmId,
+			Status:          int32(vm.Status),
+			CpuPct:          vm.CpuPct,
+			RamUsedMb:       vm.RamUsedMb,
+			TrafficInBytes:  vm.TrafficInBytes,
+			TrafficOutBytes: vm.TrafficOutBytes,
+			Ips:             vm.Ips,
 		}
-
-		item := vmItem{VMSummary: vm}
+		// 从数据库补全：流量历史 & 配置字段
+		if t, err := s.db.GetTraffic(vm.VmId); err == nil {
+			item.MonthlyTrafficIn = t.MonthIn
+			item.MonthlyTrafficOut = t.MonthOut
+			item.TrafficInBytes = t.TotalIn
+			item.TrafficOutBytes = t.TotalOut
+		}
 		if conf, _ := s.db.GetVMConfig(vm.VmId); conf != nil {
 			item.RamTotalMb = conf.MemoryMB
 		}
