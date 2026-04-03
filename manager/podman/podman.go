@@ -8,10 +8,13 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"runman-agent/manager/podman/cpualloc"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/containers/podman/v5/libpod/define"
 	"github.com/containers/podman/v5/pkg/api/handlers"
 	"github.com/containers/podman/v5/pkg/bindings"
 	"github.com/containers/podman/v5/pkg/bindings/containers"
@@ -25,7 +28,6 @@ import (
 
 	"runman-agent/db"
 	"runman-agent/manager"
-	"runman-agent/manager/cpualloc"
 	"runman-agent/proto/agent"
 )
 
@@ -39,7 +41,13 @@ type Manager struct {
 	alloc *cpualloc.Allocator
 }
 
-func New(socketPath string, database *db.DB, alloc *cpualloc.Allocator) (*Manager, error) {
+func New(socketPath string, database *db.DB) (*Manager, error) {
+	alloc := cpualloc.New(runtime.NumCPU())
+	if vmConfigs, err2 := database.ListPodmanConfigs(); err2 == nil {
+		for _, c := range vmConfigs {
+			alloc.Restore(c.Cpuset)
+		}
+	}
 	// 用 Background context 建立长期连接，避免 ping 超时取消后续所有操作
 	ctx, err := bindings.NewConnection(context.Background(), socketPath)
 	if err != nil {
@@ -66,7 +74,7 @@ func buildResourceConfig(cpu int64, ramMb int64, cpuset string) specgen.Containe
 	if ramMb > 0 {
 		res.Memory = &specs.LinuxMemory{
 			Limit:            ptr(ramMb * 1024 * 1024),
-			DisableOOMKiller: ptr(false), // 允许 OOM Killer 杀死失控的容器进程
+			DisableOOMKiller: ptr(false),
 		}
 	}
 	if cpu > 0 {
@@ -79,8 +87,8 @@ func buildResourceConfig(cpu int64, ramMb int64, cpuset string) specgen.Containe
 	return specgen.ContainerResourceConfig{
 		ResourceLimits: res,
 		Rlimits: []specs.POSIXRlimit{
-			{Type: "nofile", Soft: 65535, Hard: 65535}, // 提高文件描述符上限
-			{Type: "nproc", Soft: 65535, Hard: 65535},  // 提高进程数上限
+			{Type: "nofile", Soft: 65535, Hard: 65535},
+			{Type: "nproc", Soft: 65535, Hard: 65535},
 		},
 	}
 }
@@ -109,23 +117,25 @@ func lxcfsMounts() []specs.Mount {
 	return mounts
 }
 
-func (m *Manager) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error {
+func (m *Manager) CreateVM(_ context.Context, req *agent.CmdCreateVM) error {
 	// 1. 拉取镜像
-	_, err := images.Pull(m.timeoutCtx(), req.OsImage, &images.PullOptions{
+	if _, err := images.Pull(m.timeoutCtx(), req.OsImage, &images.PullOptions{
 		Policy: ptr("newer"),
-	})
-	if err != nil {
+	}); err != nil {
 		return err
 	}
 
-	// 2. 确定 IP 和 MAC (下放逻辑)
-	var ipAddr, macAddr string
-	var existingCpuset string
-	if conf, err := m.db.GetVMConfig(req.VmId); err == nil && conf.IP != "" {
+	// 2. 确定 IP 和 MAC
+	var macAddr, cpuSet string
+	var ipv4, ipv6 net.IP
+	if conf, err := m.db.GetPodmanConfig(req.VmId); err == nil && conf.IPv4 != "" {
 		// 复用已有配置
-		ipAddr = conf.IP
+		ipv4 = net.ParseIP(conf.IPv4)
+		if conf.IPv6 != "" {
+			ipv6 = net.ParseIP(conf.IPv6)
+		}
 		macAddr = conf.MAC
-		existingCpuset = conf.Cpuset
+		cpuSet = conf.Cpuset
 	} else {
 		// 创建临时容器获取 IPAM 分配的地址
 		tempID := "tmp-" + req.VmId
@@ -136,6 +146,7 @@ func (m *Manager) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error {
 			ContainerBasicConfig: specgen.ContainerBasicConfig{
 				Name:     tempID,
 				Hostname: tempID,
+				Remove:   ptr(true),
 			},
 			ContainerStorageConfig: specgen.ContainerStorageConfig{
 				Image: req.OsImage,
@@ -148,11 +159,12 @@ func (m *Manager) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error {
 			// 启动并获取信息
 			if containers.Start(m.timeoutCtx(), res.ID, nil) == nil {
 				inspect, _ := containers.Inspect(m.timeoutCtx(), res.ID, nil)
-				for _, netw := range inspect.NetworkSettings.Networks {
-					if netw.IPAddress != "" {
-						ipAddr = netw.IPAddress
-						macAddr = netw.MacAddress
-						break
+				ipv4, ipv6, err = m.getIPsFromInspect(inspect)
+				if err == nil {
+					for _, ins := range inspect.NetworkSettings.Networks {
+						if macAddr == "" {
+							macAddr = ins.MacAddress
+						}
 					}
 				}
 			}
@@ -161,21 +173,20 @@ func (m *Manager) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error {
 		}
 	}
 
-	// 3. 分配 cpuset (下放逻辑)
-	cpuset := existingCpuset
-	if cpuset == "" && req.Cpu > 0 {
-		cpuset, err = m.alloc.Allocate(int(req.Cpu))
-		if err != nil {
-			return err
-		}
+	// 3. 分配 cpuset
+	alloc := false
+	if cpuSet == "" && req.Cpu > 0 {
+		cpuSet, _ = m.alloc.Allocate(int(req.Cpu))
+		alloc = true
 	}
 
 	// 如果最终拿到了地址，则注入到创建参数中
 	netOpt := netTypes.PerNetworkOptions{}
-	if ipAddr != "" {
-		if parsedIP := net.ParseIP(ipAddr); parsedIP != nil {
-			netOpt.StaticIPs = []net.IP{parsedIP}
-		}
+	if ipv4 != nil {
+		netOpt.StaticIPs = append(netOpt.StaticIPs, ipv4)
+	}
+	if ipv6 != nil {
+		netOpt.StaticIPs = append(netOpt.StaticIPs, ipv6)
 	}
 	if macAddr != "" {
 		if hwAddr, err := net.ParseMAC(macAddr); err == nil {
@@ -221,7 +232,7 @@ func (m *Manager) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error {
 			Networks:   netOpts,
 			DNSServers: []net.IP{net.ParseIP("1.1.1.1"), net.ParseIP("2606:4700:4700::1111")},
 		},
-		ContainerResourceConfig: buildResourceConfig(int64(req.Cpu), req.RamMb, cpuset),
+		ContainerResourceConfig: buildResourceConfig(int64(req.Cpu), req.RamMb, cpuSet),
 		ContainerHealthCheckConfig: specgen.ContainerHealthCheckConfig{
 			HealthConfig: &manifest.Schema2HealthConfig{
 				Test:    []string{"NONE"},
@@ -232,8 +243,8 @@ func (m *Manager) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error {
 	}, nil)
 
 	if err != nil {
-		if existingCpuset == "" && cpuset != "" {
-			m.alloc.Release(cpuset)
+		if alloc {
+			m.alloc.Release(cpuSet)
 		}
 		return err
 	}
@@ -247,15 +258,47 @@ func (m *Manager) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error {
 		return err
 	}
 
-	// 成功后确保保存配置到数据库
-	conf, err := m.db.GetVMConfig(req.VmId)
-	if err != nil {
-		conf = &db.VMConfig{VMID: req.VmId, LocalID: req.VmId}
+	// 在正式容器启动后，如果 ipAdds 或 macAddr 为空（例如临时容器获取失败），从正式容器重新获取并更新到数据库
+	if ipv4 == nil || macAddr == "" {
+		inspect, _ := containers.Inspect(m.timeoutCtx(), res.ID, nil)
+		if ipv4 == nil {
+			ipv4, ipv6, _ = m.getIPsFromInspect(inspect)
+		}
+		if macAddr == "" {
+			for _, netw := range inspect.NetworkSettings.Networks {
+				if netw.MacAddress != "" {
+					macAddr = netw.MacAddress
+					break
+				}
+			}
+		}
 	}
-	conf.IP = ipAddr
-	conf.MAC = macAddr
-	conf.Cpuset = cpuset
-	_ = m.db.SaveVMConfig(conf)
+
+	// 成功后确保保存配置到数据库
+	bizConf, err := m.db.GetVMConfig(req.VmId)
+	if err != nil {
+		bizConf = &db.VMConfig{VMID: req.VmId}
+	}
+	bizConf.CPU = int(req.Cpu)
+	bizConf.MemoryMB = req.RamMb
+	bizConf.DiskGB = req.DiskGb
+	bizConf.BandwidthMbps = int(req.BandwidthMbps)
+	bizConf.Image = req.OsImage
+	_ = m.db.SaveVMConfig(bizConf)
+
+	// Podman 驱动特定配置
+	pConf, err := m.db.GetPodmanConfig(req.VmId)
+	if err != nil {
+		pConf = &db.PodmanVMConfig{VMID: req.VmId}
+	}
+	pConf.Container = req.VmId
+	pConf.IPv4 = ipv4.String()
+	if ipv6 != nil {
+		pConf.IPv6 = ipv6.String()
+	}
+	pConf.MAC = macAddr
+	pConf.Cpuset = cpuSet
+	_ = m.db.SavePodmanConfig(pConf)
 
 	// 设置 root 密码
 	err = m.execInContainer(res.ID, []string{"bash", "-c", fmt.Sprintf("echo 'root:%s' | chpasswd", req.RootPassword)})
@@ -283,10 +326,12 @@ func (m *Manager) deleteByID(id string) error {
 	}
 
 	// 删除前尝试从 DB 获取 cpuset 并释放
-	if conf, err := m.db.GetVMConfig(info.Name); err == nil && conf.Cpuset != "" {
+	if conf, err := m.db.GetPodmanConfig(info.Name); err == nil && conf.Cpuset != "" {
 		m.alloc.Release(conf.Cpuset)
-	} else if conf, err := m.db.GetVMConfig(id); err == nil && conf.Cpuset != "" {
+		_ = m.db.DeletePodmanConfig(info.Name)
+	} else if conf, err := m.db.GetPodmanConfig(id); err == nil && conf.Cpuset != "" {
 		m.alloc.Release(conf.Cpuset)
+		_ = m.db.DeletePodmanConfig(id)
 	}
 
 	if info.State.Running {
@@ -312,27 +357,28 @@ func (m *Manager) RestartVM(_ context.Context, vmID string) error {
 }
 
 func (m *Manager) DeleteVM(_ context.Context, vmID string) error {
+	_ = m.db.DeleteVMConfig(vmID)
 	return m.deleteByID(vmID)
 }
 
-func (m *Manager) UpdateVM(ctx context.Context, vmID string, cpu int32, ramMB int64, diskGB int64, bandwidthMBPS int32) error {
+func (m *Manager) UpdateVM(_ context.Context, vmID string, cpu int32, ramMB int64, diskGB int64, bandwidthMBPS int32) error {
 	resources := specs.LinuxResources{}
 	changed := false
 	if cpu > 0 {
-		var cpuset string
-		if conf, err := m.db.GetVMConfig(vmID); err == nil {
+		var cpuSet string
+		if conf, err := m.db.GetPodmanConfig(vmID); err == nil {
 			m.alloc.Release(conf.Cpuset)
-			cpuset, _ = m.alloc.Allocate(int(cpu))
-			conf.Cpuset = cpuset
-			_ = m.db.SaveVMConfig(conf)
+			cpuSet, _ = m.alloc.Allocate(int(cpu))
+			conf.Cpuset = cpuSet
+			_ = m.db.SavePodmanConfig(conf)
 		} else {
-			cpuset, _ = m.alloc.Allocate(int(cpu))
+			cpuSet, _ = m.alloc.Allocate(int(cpu))
 		}
 
 		resources.CPU = &specs.LinuxCPU{
 			Quota:  ptr(int64(100000) * int64(cpu)),
 			Period: ptr(uint64(100000)),
-			Cpus:   cpuset,
+			Cpus:   cpuSet,
 		}
 		changed = true
 	}
@@ -370,30 +416,16 @@ func (m *Manager) ResetPassword(_ context.Context, vmID, password string) error 
 	return m.execInContainer(vmID, []string{"bash", "-c", fmt.Sprintf("echo 'root:%s' | chpasswd", password)})
 }
 
-func (m *Manager) GetVMIP(_ context.Context, vmID string) (string, error) {
+func (m *Manager) GetVMLocalIP(_ context.Context, vmID string) (string, error) {
 	inspect, err := containers.Inspect(m.timeoutCtx(), vmID, nil)
 	if err != nil {
 		return "", err
 	}
-	for _, network := range inspect.NetworkSettings.Networks {
-		if network.IPAddress != "" {
-			return network.IPAddress, nil
-		}
-	}
-	return inspect.NetworkSettings.IPAddress, nil
-}
-
-func (m *Manager) GetVMMAC(_ context.Context, vmID string) (string, error) {
-	inspect, err := containers.Inspect(m.timeoutCtx(), vmID, nil)
+	ipv4, _, err := m.getIPsFromInspect(inspect)
 	if err != nil {
 		return "", err
 	}
-	for _, network := range inspect.NetworkSettings.Networks {
-		if network.MacAddress != "" {
-			return network.MacAddress, nil
-		}
-	}
-	return inspect.NetworkSettings.MacAddress, nil
+	return ipv4.String(), nil
 }
 
 func (m *Manager) GetSupportedImages(_ context.Context) ([]*agent.OSImageInfo, error) {
@@ -408,15 +440,14 @@ func (m *Manager) GetVMInfo(ctx context.Context, vmID string) (*agent.VMSummary,
 	if err != nil {
 		return nil, err
 	}
-
-	ip := inspect.NetworkSettings.IPAddress
-	for _, network := range inspect.NetworkSettings.Networks {
-		if network.IPAddress != "" {
-			ip = network.IPAddress
-			break
-		}
+	var ips []string
+	ipv4, ipv6, _ := m.getIPsFromInspect(inspect)
+	if ipv4 != nil {
+		ips = append(ips, ipv4.String())
 	}
-
+	if ipv6 != nil {
+		ips = append(ips, ipv6.String())
+	}
 	cpuPct, memUsed, netIn, netOut, _ := m.getUsage(ctx, vmID)
 	return &agent.VMSummary{
 		VmId:            vmID,
@@ -425,7 +456,7 @@ func (m *Manager) GetVMInfo(ctx context.Context, vmID string) (*agent.VMSummary,
 		RamUsedMb:       memUsed / 1024 / 1024,
 		TrafficInBytes:  netIn,
 		TrafficOutBytes: netOut,
-		Ip:              ip,
+		Ips:             ips,
 	}, nil
 }
 
@@ -483,17 +514,18 @@ func (m *Manager) ListVMs(ctx context.Context) ([]*agent.VMSummary, error) {
 			if err2 != nil {
 				return
 			}
-			ip := inspect.NetworkSettings.IPAddress
-			for _, network := range inspect.NetworkSettings.Networks {
-				if network.IPAddress != "" {
-					ip = network.IPAddress
-					break
-				}
+			var ips []string
+			ipv4, ipv6, _ := m.getIPsFromInspect(inspect)
+			if ipv4 != nil {
+				ips = append(ips, ipv4.String())
+			}
+			if ipv6 != nil {
+				ips = append(ips, ipv6.String())
 			}
 			s := &agent.VMSummary{
 				VmId:   inspect.Name,
 				Status: mapStatus(inspect.State.Status),
-				Ip:     ip,
+				Ips:    ips,
 			}
 			if inspect.State.Running {
 				cpuPct, memUsed, netIn, netOut, _ := m.getUsage(ctx, inspect.Name)
@@ -561,6 +593,17 @@ func (m *Manager) AttachTTY(ctx context.Context, vmID string, stdin io.Reader, s
 			WithOutputStream(stdout).
 			WithErrorStream(stdout),
 	)
+}
+
+func (m *Manager) getIPsFromInspect(inspect *define.InspectContainerData) (ipv4, ipv6 net.IP, err error) {
+	for _, ins := range inspect.NetworkSettings.Networks {
+		ipv4 = net.ParseIP(ins.IPAddress)
+		ipv6 = net.ParseIP(ins.GlobalIPv6Address)
+	}
+	if ipv4 == nil && ipv6 == nil {
+		return nil, nil, fmt.Errorf("no ipv4 or ipv6 network found")
+	}
+	return ipv4, ipv6, nil
 }
 
 func mapStatus(s string) agent.VMStatus {

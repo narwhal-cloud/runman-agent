@@ -749,8 +749,23 @@ func (m *Manager) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error {
 	}
 
 	// 启动 VM
-	err = m.apiPut(vmID, "vm.boot", nil)
-	return err
+	if err = m.apiPut(vmID, "vm.boot", nil); err != nil {
+		return err
+	}
+
+	// 成功后保存业务配置到 DB
+	bizConf, _ := m.db.GetVMConfig(vmID)
+	if bizConf == nil {
+		bizConf = &db.VMConfig{VMID: vmID}
+	}
+	bizConf.CPU = int(req.Cpu)
+	bizConf.MemoryMB = req.RamMb
+	bizConf.DiskGB = req.DiskGb
+	bizConf.BandwidthMbps = int(req.BandwidthMbps)
+	bizConf.Image = req.OsImage
+	_ = m.db.SaveVMConfig(bizConf)
+
+	return nil
 }
 
 func (m *Manager) StartVM(_ context.Context, vmID string) error {
@@ -834,6 +849,7 @@ func (m *Manager) RestartVM(_ context.Context, vmID string) error {
 }
 
 func (m *Manager) DeleteVM(_ context.Context, vmID string) error {
+	_ = m.db.DeleteVMConfig(vmID)
 	// 停止进程
 	if m.isRunning(vmID) {
 		_ = m.apiPut(vmID, "vm.shutdown", nil)
@@ -902,6 +918,15 @@ func (m *Manager) UpdateVM(ctx context.Context, vmID string, cpu int32, ramMB in
 
 	_ = m.saveInstanceConfig(vmID, icfg)
 
+	// 同步更新 DB 中的业务配置
+	bizConf, _ := m.db.GetVMConfig(vmID)
+	if bizConf != nil {
+		bizConf.CPU = icfg.CPU
+		bizConf.MemoryMB = icfg.MemoryMB
+		bizConf.BandwidthMbps = icfg.BandwidthMbps
+		_ = m.db.SaveVMConfig(bizConf)
+	}
+
 	if !needResize {
 		return nil
 	}
@@ -948,7 +973,7 @@ func (m *Manager) ResetPassword(ctx context.Context, vmID, password string) erro
 }
 
 func (m *Manager) GetVMInfo(_ context.Context, vmID string) (*agent.VMSummary, error) {
-	ip, _ := m.GetVMIP(nil, vmID)
+	ip, _ := m.GetVMLocalIP(nil, vmID)
 	status := agent.VMStatus_VM_STATUS_STOPPED
 
 	var in, out int64
@@ -965,7 +990,7 @@ func (m *Manager) GetVMInfo(_ context.Context, vmID string) (*agent.VMSummary, e
 	return &agent.VMSummary{
 		VmId:            vmID,
 		Status:          status,
-		Ip:              ip,
+		Ips:             []string{ip},
 		TrafficInBytes:  in,
 		TrafficOutBytes: out,
 	}, nil
@@ -986,15 +1011,15 @@ func (m *Manager) ListVMs(_ context.Context) ([]*agent.VMSummary, error) {
 			continue
 		}
 		vmID := e.Name()
-		if _, err := m.loadInstanceConfig(vmID); err != nil {
+		if _, err = m.loadInstanceConfig(vmID); err != nil {
 			continue // 目录不是有效实例
 		}
 
-		ip, _ := m.GetVMIP(nil, vmID)
+		ip, _ := m.GetVMLocalIP(nil, vmID)
 		status := agent.VMStatus_VM_STATUS_STOPPED
 		var in, out int64
 		if m.isRunning(vmID) {
-			if err := m.apiGet(vmID, "vm.info", nil); err == nil {
+			if err = m.apiGet(vmID, "vm.info", nil); err == nil {
 				// 暂时只判断运行中，不细分 created/paused
 				status = agent.VMStatus_VM_STATUS_RUNNING
 				if nc, err := m.allocNetwork(vmID); err == nil {
@@ -1005,7 +1030,7 @@ func (m *Manager) ListVMs(_ context.Context) ([]*agent.VMSummary, error) {
 		result = append(result, &agent.VMSummary{
 			VmId:            vmID,
 			Status:          status,
-			Ip:              ip,
+			Ips:             []string{ip},
 			TrafficInBytes:  in,
 			TrafficOutBytes: out,
 		})
@@ -1013,20 +1038,12 @@ func (m *Manager) ListVMs(_ context.Context) ([]*agent.VMSummary, error) {
 	return result, nil
 }
 
-func (m *Manager) GetVMIP(_ context.Context, vmID string) (string, error) {
+func (m *Manager) GetVMLocalIP(_ context.Context, vmID string) (string, error) {
 	netCfg, err := m.allocNetwork(vmID)
 	if err != nil {
 		return "", err
 	}
 	return netCfg.IP, nil
-}
-
-func (m *Manager) GetVMMAC(_ context.Context, vmID string) (string, error) {
-	netCfg, err := m.allocNetwork(vmID)
-	if err != nil {
-		return "", err
-	}
-	return netCfg.MAC, nil
 }
 
 func (m *Manager) GetSupportedImages(_ context.Context) ([]*agent.OSImageInfo, error) {

@@ -94,7 +94,7 @@ message VMSummary {
   int64    ram_used_mb     = 4; // 已用内存（MB）
   int64    traffic_in_bytes  = 5; // 累计入站流量（bytes，自 VM 创建起）
   int64    traffic_out_bytes = 6; // 累计出站流量（bytes，自 VM 创建起）
-  string   ip                = 7; // VM 内部/公网 IP
+  repeated string   ips                = 7; // VM 内部/公网 IP
   int64    monthly_traffic_in  = 8; // 本月累计入站流量 (bytes)
   int64    monthly_traffic_out = 9; // 本月累计出站流量 (bytes)
 }

@@ -344,8 +344,6 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// VMService.CreateVM 内部已持久化 VMConfig（含 cpuset）
-
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(map[string]string{"vm_id": req.VmId})
@@ -383,20 +381,6 @@ func (s *Server) handleUpdateVM(w http.ResponseWriter, r *http.Request) {
 	if err := s.mgr.UpdateVM(ctx, vmID, req.Cpu, req.RamMb, req.DiskGb, req.BandwidthMbps); err != nil {
 		jsonErr(w, err, 500)
 		return
-	}
-
-	// 更新 DB 中的 VMConfig
-	if conf, _ := s.db.GetVMConfig(vmID); conf != nil {
-		if req.Cpu > 0 {
-			conf.CPU = int(req.Cpu)
-		}
-		if req.RamMb > 0 {
-			conf.MemoryMB = req.RamMb
-		}
-		if req.BandwidthMbps > 0 {
-			conf.BandwidthMbps = int(req.BandwidthMbps)
-		}
-		_ = s.db.SaveVMConfig(conf)
 	}
 
 	w.WriteHeader(http.StatusNoContent)
@@ -478,23 +462,6 @@ func (s *Server) handleReinstallVM(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, err, 500)
 		return
 	}
-
-	// 更新 DB 中的 VMConfig
-	conf, _ := s.db.GetVMConfig(vmID)
-	if conf == nil {
-		conf = &db.VMConfig{VMID: vmID, LocalID: vmID}
-	}
-	conf.Image = req.OsImage
-	if req.Cpu > 0 {
-		conf.CPU = int(req.Cpu)
-	}
-	if req.RamMb > 0 {
-		conf.MemoryMB = req.RamMb
-	}
-	if req.BandwidthMbps > 0 {
-		conf.BandwidthMbps = int(req.BandwidthMbps)
-	}
-	_ = s.db.SaveVMConfig(conf)
 
 	w.WriteHeader(http.StatusNoContent)
 }

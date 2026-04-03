@@ -490,7 +490,7 @@ type VMSummary struct {
 	RamUsedMb         int64                  `protobuf:"varint,4,opt,name=ram_used_mb,json=ramUsedMb,proto3" json:"ram_used_mb,omitempty"`                         // 已用内存（MB）
 	TrafficInBytes    int64                  `protobuf:"varint,5,opt,name=traffic_in_bytes,json=trafficInBytes,proto3" json:"traffic_in_bytes,omitempty"`          // 累计入站流量（bytes，自 VM 创建起）
 	TrafficOutBytes   int64                  `protobuf:"varint,6,opt,name=traffic_out_bytes,json=trafficOutBytes,proto3" json:"traffic_out_bytes,omitempty"`       // 累计出站流量（bytes，自 VM 创建起）
-	Ip                string                 `protobuf:"bytes,7,opt,name=ip,proto3" json:"ip,omitempty"`                                                           // VM 内部/公网 IP
+	Ips               []string               `protobuf:"bytes,7,rep,name=ips,proto3" json:"ips,omitempty"`                                                         // VM 内部/公网 IP
 	MonthlyTrafficIn  int64                  `protobuf:"varint,8,opt,name=monthly_traffic_in,json=monthlyTrafficIn,proto3" json:"monthly_traffic_in,omitempty"`    // 本月累计入站流量 (bytes)
 	MonthlyTrafficOut int64                  `protobuf:"varint,9,opt,name=monthly_traffic_out,json=monthlyTrafficOut,proto3" json:"monthly_traffic_out,omitempty"` // 本月累计出站流量 (bytes)
 	unknownFields     protoimpl.UnknownFields
@@ -569,11 +569,11 @@ func (x *VMSummary) GetTrafficOutBytes() int64 {
 	return 0
 }
 
-func (x *VMSummary) GetIp() string {
+func (x *VMSummary) GetIps() []string {
 	if x != nil {
-		return x.Ip
+		return x.Ips
 	}
-	return ""
+	return nil
 }
 
 func (x *VMSummary) GetMonthlyTrafficIn() int64 {
@@ -1714,15 +1714,15 @@ const file_proto_agent_agent_proto_rawDesc = "" +
 	" \x03(\v2\x12.agent.OSImageInfoR\bosImages\"1\n" +
 	"\vOSImageInfo\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
-	"\x04name\x18\x02 \x01(\tR\x04name\"\xc6\x02\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\"\xc8\x02\n" +
 	"\tVMSummary\x12\x13\n" +
 	"\x05vm_id\x18\x01 \x01(\tR\x04vmId\x12'\n" +
 	"\x06status\x18\x02 \x01(\x0e2\x0f.agent.VMStatusR\x06status\x12\x17\n" +
 	"\acpu_pct\x18\x03 \x01(\x02R\x06cpuPct\x12\x1e\n" +
 	"\vram_used_mb\x18\x04 \x01(\x03R\tramUsedMb\x12(\n" +
 	"\x10traffic_in_bytes\x18\x05 \x01(\x03R\x0etrafficInBytes\x12*\n" +
-	"\x11traffic_out_bytes\x18\x06 \x01(\x03R\x0ftrafficOutBytes\x12\x0e\n" +
-	"\x02ip\x18\a \x01(\tR\x02ip\x12,\n" +
+	"\x11traffic_out_bytes\x18\x06 \x01(\x03R\x0ftrafficOutBytes\x12\x10\n" +
+	"\x03ips\x18\a \x03(\tR\x03ips\x12,\n" +
 	"\x12monthly_traffic_in\x18\b \x01(\x03R\x10monthlyTrafficIn\x12.\n" +
 	"\x13monthly_traffic_out\x18\t \x01(\x03R\x11monthlyTrafficOut\"c\n" +
 	"\x0fPortForwardList\x12\x1d\n" +

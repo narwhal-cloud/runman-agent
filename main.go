@@ -17,14 +17,13 @@ import (
 	"runman-agent/db"
 	"runman-agent/manager"
 	"runman-agent/manager/cloudhv"
-	"runman-agent/manager/cpualloc"
 	"runman-agent/manager/podman"
 	"runman-agent/manager/portforward"
 	"runman-agent/monitor"
 	"runman-agent/ndp"
 	"runman-agent/proto/agent"
 	"runman-agent/web"
-	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -83,14 +82,7 @@ func main() {
 	var rawMgr manager.VMManager
 	switch conf.VirtType {
 	case "podman":
-		// 初始化 CPU 分配器，从 DB 恢复已有容器的 cpuset 引用计数
-		alloc := cpualloc.New(runtime.NumCPU())
-		if vmConfigs, err2 := database.ListVMConfigs(); err2 == nil {
-			for _, c := range vmConfigs {
-				alloc.Restore(c.Cpuset)
-			}
-		}
-		rawMgr, err = podman.New(*socketPath, database, alloc)
+		rawMgr, err = podman.New(*socketPath, database)
 	case "cloudhv":
 		rawMgr, err = cloudhv.New(*socketPath, database)
 	default:
@@ -349,6 +341,14 @@ func (a *Agent) heartbeatLoop(stream agent.AgentGateway_ConnectClient) {
 // handleCommand 处理平台下发的单条命令，执行完毕后通过 stream 回复结果。
 // 每条命令在独立 goroutine 中执行，不阻塞主接收循环。
 func (a *Agent) handleCommand(stream agent.AgentGateway_ConnectClient, env *agent.PlatformEnvelope) {
+	defer func() {
+		defer func() {
+			if panicErr := recover(); panicErr != nil {
+				log.Printf("Panic: %v\n", panicErr)
+				log.Printf("Stack:\n%s", debug.Stack())
+			}
+		}()
+	}()
 	var (
 		err      error
 		respData []byte

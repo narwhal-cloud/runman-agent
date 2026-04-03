@@ -21,17 +21,23 @@ type Config struct {
 }
 
 type VMConfig struct {
-	VMID string `gorm:"primaryKey"`
-	// LocalID 是底层虚拟化系统中实际使用的标识符（podman 容器名、KVM 虚拟机 UUID 等）
-	LocalID       string
-	BandwidthMbps int
+	VMID          string `gorm:"primaryKey"`
 	CPU           int
 	MemoryMB      int64
+	DiskGB        int64
+	BandwidthMbps int
 	Image         string
 	Status        string
-	Cpuset        string // 分配给该 VM 的 cpuset，如 "0-2" 或 "0,3,5"
-	MAC           string // 固定的MAC地址
-	IP            string // 固定的IP地址
+}
+
+// PodmanVMConfig 存储 Podman 驱动特有的数据
+type PodmanVMConfig struct {
+	VMID      string `gorm:"primaryKey"`
+	Container string // 容器名
+	Cpuset    string // 分配的 cpuset
+	MAC       string // 固定 MAC
+	IPv4      string // 本地ipv4一定存在
+	IPv6      string // 公网ipv6可能存在
 }
 
 // PortForward 持久化端口转发规则。(Protocol, HostPort) 联合主键保证宿主机端口唯一。
@@ -63,7 +69,7 @@ func Init(path string) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	_ = db.AutoMigrate(&Traffic{}, &VMConfig{}, &Config{}, &PortForward{})
+	_ = db.AutoMigrate(&Traffic{}, &VMConfig{}, &PodmanVMConfig{}, &Config{}, &PortForward{})
 
 	// Ensure default config exists
 	var conf Config
@@ -90,14 +96,15 @@ func (d *DB) SaveConfig(c *Config) error {
 	return d.orm.Save(c).Error
 }
 
-// SaveVMConfig VM 配置管理
+// VM 核心业务配置
+
 func (d *DB) SaveVMConfig(v *VMConfig) error {
 	return d.orm.Save(v).Error
 }
 
 func (d *DB) GetVMConfig(vmId string) (*VMConfig, error) {
 	var conf VMConfig
-	err := d.orm.First(&conf, "vm_id = ?", vmId).Error
+	err := d.orm.First(&conf, "vmid = ?", vmId).Error
 	return &conf, err
 }
 
@@ -108,10 +115,11 @@ func (d *DB) ListVMConfigs() ([]*VMConfig, error) {
 }
 
 func (d *DB) DeleteVMConfig(vmId string) error {
-	return d.orm.Delete(&VMConfig{}, "vm_id = ?", vmId).Error
+	return d.orm.Delete(&VMConfig{}, "vmid = ?", vmId).Error
 }
 
-// SavePortForward 端口转发持久化
+// 端口转发
+
 func (d *DB) SavePortForward(pf *PortForward) error {
 	return d.orm.Save(pf).Error
 }
@@ -136,6 +144,8 @@ func (d *DB) DeletePortForwardsForVM(vmId string) error {
 	return d.orm.Delete(&PortForward{}, "vm_id = ?", vmId).Error
 }
 
+// 流量
+
 func (d *DB) DeleteTraffic(vmId string) error {
 	return d.orm.Delete(&Traffic{}, "vm_id = ?", vmId).Error
 }
@@ -146,7 +156,6 @@ func (d *DB) GetTraffic(vmId string) (*Traffic, error) {
 	return &t, err
 }
 
-// UpdateTraffic 流量统计逻辑
 func (d *DB) UpdateTraffic(vmId string, rawIn, rawOut int64, month string) (totalIn, totalOut, monthIn, monthOut int64, err error) {
 	var t Traffic
 	err = d.orm.First(&t, "vm_id = ?", vmId).Error
@@ -194,4 +203,25 @@ func (d *DB) UpdateTraffic(vmId string, rawIn, rawOut int64, month string) (tota
 
 	d.orm.Save(&t)
 	return t.TotalIn, t.TotalOut, t.MonthIn, t.MonthOut, nil
+}
+
+// Podman数据结构
+
+func (d *DB) SavePodmanConfig(v *PodmanVMConfig) error {
+	return d.orm.Save(v).Error
+}
+
+func (d *DB) GetPodmanConfig(vmId string) (*PodmanVMConfig, error) {
+	var conf PodmanVMConfig
+	err := d.orm.First(&conf, "vmid = ?", vmId).Error
+	return &conf, err
+}
+
+func (d *DB) DeletePodmanConfig(vmId string) error {
+	return d.orm.Delete(&PodmanVMConfig{}, "vmid = ?", vmId).Error
+}
+func (d *DB) ListPodmanConfigs() ([]*PodmanVMConfig, error) {
+	var list []*PodmanVMConfig
+	err := d.orm.Find(&list).Error
+	return list, err
 }
