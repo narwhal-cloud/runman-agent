@@ -244,26 +244,6 @@
             <button onclick="closeModal('modal-manage')" class="text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button>
         </div>
         <div class="p-6 space-y-5">
-            <!-- Update config -->
-            <div>
-                <h4 class="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3">Update Config</h4>
-                <div class="grid grid-cols-3 gap-3">
-                    <div>
-                        <label class="label">CPU Cores</label>
-                        <input type="number" id="u-cpu" class="input" min="0" placeholder="unchanged">
-                    </div>
-                    <div>
-                        <label class="label">RAM (MB)</label>
-                        <input type="number" id="u-ram" class="input" min="0" placeholder="unchanged">
-                    </div>
-                    <div>
-                        <label class="label">BW (Mbps)</label>
-                        <input type="number" id="u-bw" class="input" min="0" placeholder="unchanged">
-                    </div>
-                </div>
-                <button onclick="doUpdate()" class="mt-3 w-full py-2 bg-slate-700 hover:bg-slate-800 text-white text-xs font-bold rounded-lg">Apply Config</button>
-            </div>
-            <hr class="border-slate-100">
             <!-- Reset password -->
             <div>
                 <h4 class="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3">Reset Root Password</h4>
@@ -591,28 +571,10 @@ $('form-create').onsubmit = async (e) => {
 function openManage(vmId) {
     activeVmId = vmId;
     $('manage-vmid').textContent = vmId;
-    $('u-cpu').value=''; $('u-ram').value=''; $('u-bw').value='';
     $('u-pwd').value=''; $('r-pwd').value='';
     hideErr('manage-err');
     populateImageSelect('r-image');
     openModal('modal-manage');
-}
-
-async function doUpdate() {
-    hideErr('manage-err');
-    disableAllButtons(true);
-    const body = {};
-    const cpu=parseInt($('u-cpu').value), ram=parseInt($('u-ram').value), bw=parseInt($('u-bw').value);
-    if (cpu>0) body.cpu=cpu;
-    if (ram>0) body.ram_mb=ram;
-    if (bw>0)  body.bandwidth_mbps=bw;
-    if (!Object.keys(body).length) { showErr('manage-err','No changes specified.'); disableAllButtons(false); return; }
-    try {
-        await api('PATCH', `/api/vms/${activeVmId}`, body);
-        closeModal('modal-manage');
-        await refreshVMs();
-    } catch(e){ showErr('manage-err', e.message); }
-    finally { disableAllButtons(false); }
 }
 
 async function doResetPwd() {
