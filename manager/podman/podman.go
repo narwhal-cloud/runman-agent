@@ -644,6 +644,19 @@ func (m *Manager) getIPsFromInspect(inspect *define.InspectContainerData) (ipv4,
 	return ipv4, ipv6, nil
 }
 
+// GetVMNetStats 获取 VM 的网络流量统计（用于流量统计服务）
+func (m *Manager) GetVMNetStats(ctx context.Context, vmID string) (*manager.VMNetStats, error) {
+	_, _, netIn, netOut, err := m.getUsage(ctx, vmID)
+	if err != nil {
+		return nil, err
+	}
+	return &manager.VMNetStats{
+		VMID:     vmID,
+		InBytes:  netIn,
+		OutBytes: netOut,
+	}, nil
+}
+
 func mapStatus(s string) agent.VMStatus {
 	switch strings.ToLower(s) {
 	case "running":

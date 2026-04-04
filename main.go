@@ -5,18 +5,16 @@ package main
 import (
 	"context"
 	"crypto/tls"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"math/rand"
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
+	"runman-agent/config"
 	"runman-agent/db"
 	"runman-agent/manager"
 	"runman-agent/manager/cloudhv"
@@ -25,6 +23,7 @@ import (
 	"runman-agent/monitor"
 	"runman-agent/ndp"
 	"runman-agent/proto/agent"
+	"runman-agent/traffic"
 	"runman-agent/web"
 	"runtime/debug"
 	"strings"
@@ -45,11 +44,12 @@ const serverAddr = "hosting.fuckip.me:443"
 // Agent 是运行在宿主机上的代理进程，负责管理容器生命周期、
 // 收集监控指标并通过 gRPC 双向流与平台保持长连接。
 type Agent struct {
+	cfg           *config.Manager
 	db            *db.DB
 	mgr           manager.VMManager
 	hostMon       *monitor.HostMonitor
 	pf            *portforward.Manager
-	config        *db.Config
+	config        config.Config // 缓存的配置副本（仅在 run() 循环中更新）
 	mu            sync.RWMutex
 	connected     bool
 	lastError     string
@@ -59,46 +59,23 @@ type Agent struct {
 }
 
 func main() {
-	dbPath := flag.String("db", "agent.db", "path to sqlite db")
-	webAddr := flag.String("web", ":8792", "web status server address")
-	virtType := flag.String("type", "podman", "virtualization type")
-	ndpIface := flag.String("ndp-iface", "", "uplink interface for NDP responder (IPv6, e.g. eth0)")
-	ndpSubnets := flag.String("ndp-subnet", "", "IPv6 CIDRs for NDP responder, comma-separated (e.g. 2001:db8::/112)")
-	ndpNetwork := flag.String("ndp-network", "", "Podman network name for NDP responder (e.g. narwhal-net)")
+	configPath := flag.String("config", "/opt/narwhal-agent/config.json", "path to config file")
 	flag.Parse()
 	log.SetOutput(os.Stdout)
 	log.Printf("narwhal cloud-agent %s", version)
 
-	database, err := db.Init(*dbPath)
+	// 从配置文件加载所有配置
+	cfg, err := config.Load(*configPath)
 	if err != nil {
-		log.Fatalf("init db: %v", err)
+		log.Fatalf("load config: %v", err)
 	}
+	conf := cfg.Get()
+	log.Printf("Config loaded from %s (virt_type=%s, web=%s)", *configPath, conf.VirtType, conf.Web)
 
-	// 首次启动时将虚拟化写入数据库
-	conf, _ := database.GetConfig()
-	if conf.VirtType == "" {
-		conf.VirtType = *virtType
-		_ = database.SaveConfig(conf)
-	}
-
-	// cloud-hypervisor: 读取 install.sh 创建的 IPv6 配置文件
-	if conf.VirtType == "cloudhv" {
-		ipv6ConfigPath := filepath.Join(filepath.Dir(*dbPath), "ipv6-config.json")
-		if data, err := ioutil.ReadFile(ipv6ConfigPath); err == nil {
-			var ipv6Cfg map[string]string
-			if err := json.Unmarshal(data, &ipv6Cfg); err == nil {
-				if conf.IPv6Mode == "" && ipv6Cfg["ipv6_mode"] != "" {
-					conf.IPv6Mode = ipv6Cfg["ipv6_mode"]
-					conf.IPv6Subnet = ipv6Cfg["ipv6_subnet"]
-					conf.IPv6Addr = ipv6Cfg["ipv6_addr"]
-					conf.IPv6Iface = ipv6Cfg["ipv6_iface"]
-					_ = database.SaveConfig(conf)
-					log.Printf("IPv6 config loaded: mode=%s", conf.IPv6Mode)
-					// 删除配置文件，避免重复读取
-					_ = os.Remove(ipv6ConfigPath)
-				}
-			}
-		}
+	// 初始化数据库（存 VM 数据、流量数据等，不再存配置）
+	database, dbErr := db.Init(conf.DB)
+	if dbErr != nil {
+		log.Fatalf("init db: %v", dbErr)
 	}
 
 	var rawMgr manager.VMManager
@@ -106,7 +83,8 @@ func main() {
 	case "podman":
 		rawMgr, err = podman.New(database)
 	case "cloudhv":
-		rawMgr, err = cloudhv.New(database)
+		// cloud-hypervisor 初始化时传入 IPv6 配置（从配置文件读取）
+		rawMgr, err = cloudhv.New(database, conf.IPv6Mode, conf.IPv6Subnet, conf.IPv6Addr, conf.IPv6Iface)
 	default:
 		log.Fatalf("unsupported virt type: %q (supported: podman, cloudhv)", conf.VirtType)
 	}
@@ -146,6 +124,7 @@ func main() {
 	}
 
 	a := &Agent{
+		cfg:     cfg,
 		db:      database,
 		mgr:     svc,
 		hostMon: hostMon,
@@ -154,28 +133,30 @@ func main() {
 	}
 
 	// 启动本地 Web 状态页，供运维人员直接查看节点信息
-	ws := web.NewServer(database, svc, hostMon, a.pf, a)
+	ws := web.NewServer(database, svc, hostMon, cfg, a.pf, a)
 	go func() {
-		log.Printf("Starting web server on %s", *webAddr)
-		_ = ws.ListenAndServe(*webAddr)
+		log.Printf("Starting web server on %s", conf.Web)
+		_ = ws.ListenAndServe(conf.Web)
 	}()
 
-	// 启动时异步测速，结果写入 DB 并附带在心跳中上报
+	// 启动流量统计服务，定期从驱动获取流量数据并同步到数据库
+	trafficSvc := traffic.NewService(svc, database)
+	go trafficSvc.Start(context.Background(), 30*time.Second)
+
+	// 启动时异步测速，结果只保留内存，不写配置
 	go a.measureBandwidth()
 	// 启动时检测公网 IPv4，附带在心跳中上报
 	go a.detectIPv4()
 	// 启动时检测公网 IPv6，附带在心跳中上报
 	go a.detectIPv6()
-	// 独立流量采集循环，与服务端连接状态无关，保证离线时月流量也能持续统计
-	go a.trafficCollectLoop()
 
 	// 按需启动 NDP 应答器（公网 IPv6 场景）
-	if *ndpIface != "" {
+	if conf.NdpIface != "" {
 		var cloudhvDB interface{}
 		if conf.VirtType == "cloudhv" {
 			cloudhvDB = database
 		}
-		nr, err := ndp.New(*ndpIface, *ndpSubnets, *ndpNetwork, podman.SocketPath, cloudhvDB)
+		nr, err := ndp.New(conf.NdpIface, conf.NdpSubnets, conf.NdpNetwork, podman.SocketPath, cloudhvDB)
 		if err != nil {
 			log.Printf("NDP responder init error: %v", err)
 		} else {
@@ -220,23 +201,17 @@ func (a *Agent) measureBandwidth() {
 	mbps := int32(float64(n) * 8 / elapsed / 1_000_000)
 	log.Printf("Bandwidth test result: %d Mbps (downloaded %d bytes in %.2fs)", mbps, n, elapsed)
 
+	// 将测速结果保留在内存，HostMonitor 使用，不写配置文件
 	a.hostMon.SetBandwidth(mbps)
-
-	conf, _ := a.db.GetConfig()
-	if conf != nil {
-		conf.BandwidthMbps = mbps
-		_ = a.db.SaveConfig(conf)
-	}
 }
 
-// run 是主循环：持续从 DB 读取最新配置，等待 Token 就绪后建立 gRPC 连接，
+// run 是主循环：持续从配置管理器读取最新配置，等待 Token 就绪后建立 gRPC 连接，
 // 断连后自动重试。
 func (a *Agent) run() {
 	for {
-		conf, _ := a.db.GetConfig()
-		a.config = conf
+		a.config = a.cfg.Get()
 		if a.config.Token == "" {
-			log.Printf("Waiting for configuration...")
+			log.Printf("Waiting for token...")
 			a.setConnected(false, "No token configured")
 			time.Sleep(10 * time.Second)
 			continue
@@ -337,7 +312,7 @@ func (a *Agent) sendHeartbeat(stream agent.AgentGateway_ConnectClient) {
 	vms, _ := a.mgr.ListVMs(ctx)
 	images, _ := a.mgr.GetSupportedImages(ctx)
 
-	// 流量数据由 trafficCollectLoop 独立写入 DB，这里只读取累计值填充心跳
+	// 流量数据由 TrafficService 后台定期写入 DB，这里只读取累计值填充心跳
 	for _, vm := range vms {
 		if t, err := a.db.GetTraffic(vm.VmId); err == nil {
 			vm.TrafficInBytes = t.TotalIn
@@ -564,31 +539,6 @@ func fetchPublicIPv6() string {
 		return ""
 	}
 	return strings.TrimSpace(string(b))
-}
-
-// trafficCollectLoop 每 30 秒采集一次所有 VM 的流量并写入 DB，
-// 独立于服务端连接状态运行，保证离线时月度流量也能持续统计。
-func (a *Agent) trafficCollectLoop() {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-	for range ticker.C {
-		ctx := a.monitorCtx()
-		vms, err := a.mgr.ListVMs(ctx)
-		if err != nil {
-			continue
-		}
-		currentMonth := time.Now().Format("2006-01")
-		for _, vm := range vms {
-			_, _, _, _, _ = a.db.UpdateTraffic(vm.VmId, vm.TrafficInBytes, vm.TrafficOutBytes, currentMonth)
-			// 同步容器状态到 DB
-			if conf, dbErr := a.db.GetVMConfig(vm.VmId); dbErr == nil {
-				if s := vmStatusString(vm.Status); s != "" && conf.Status != s {
-					conf.Status = s
-					_ = a.db.SaveVMConfig(conf)
-				}
-			}
-		}
-	}
 }
 
 // pickFreePort 在 [min, max) 范围内随机选一个当前未被占用的 TCP 端口。

@@ -136,6 +136,11 @@ func (s *VMService) GetSupportedImages(ctx context.Context) ([]*agent.OSImageInf
 	return s.mgr.GetSupportedImages(ctx)
 }
 
+// GetVMNetStats 获取 VM 的网络流量统计（用于流量统计服务）
+func (s *VMService) GetVMNetStats(ctx context.Context, vmID string) (*VMNetStats, error) {
+	return s.mgr.GetVMNetStats(ctx, vmID)
+}
+
 // Autostart 启动所有状态为 running 的 VM（通常在 agent 启动时调用）
 func (s *VMService) Autostart(ctx context.Context) {
 	configs, _ := s.db.ListVMConfigs()

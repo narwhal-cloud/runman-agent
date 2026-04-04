@@ -158,7 +158,8 @@ type instanceConfig struct {
 }
 
 // New 创建 Manager。
-func New(database *db.DB) (*Manager, error) {
+// ipv6Mode, ipv6Subnet, ipv6Addr, ipv6Iface 从配置文件读取后由调用者传入。
+func New(database *db.DB, ipv6Mode, ipv6Subnet, ipv6Addr, ipv6Iface string) (*Manager, error) {
 	if _, err := os.Stat(chBinary); err != nil {
 		return nil, fmt.Errorf("cloud-hypervisor binary not found at %q: %w", chBinary, err)
 	}
@@ -169,20 +170,18 @@ func New(database *db.DB) (*Manager, error) {
 		}
 	}
 
-	// 从 DB 读取 IPv6 配置
-	conf, _ := database.GetConfig()
 	m := &Manager{
 		binary:      chBinary,
 		instDir:     instDir,
 		db:          database,
-		ipv6Mode:    "none",
+		ipv6Mode:    ipv6Mode,
+		ipv6Subnet:  ipv6Subnet,
+		ipv6Addr:    ipv6Addr,
+		ipv6Iface:   ipv6Iface,
 		ipv6Counter: 2, // 从 ::2 开始分配
 	}
-	if conf != nil {
-		m.ipv6Mode = conf.IPv6Mode
-		m.ipv6Subnet = conf.IPv6Subnet
-		m.ipv6Addr = conf.IPv6Addr
-		m.ipv6Iface = conf.IPv6Iface
+	if m.ipv6Mode == "" {
+		m.ipv6Mode = "none"
 	}
 
 	if err := m.ensureBridge(); err != nil {
@@ -247,12 +246,22 @@ func (m *Manager) ensureBridge() error {
 
 	// 7. IPv6 SNAT（如果是 SNAT 模式）
 	if m.ipv6Mode == "snat" && m.ipv6Iface != "" {
-		// 配置 IPv6 MASQUERADE
+		// 7a. 给网桥添加 ULA IPv6 地址（作为内网网关）
+		_ = runCmd("ip", "-6", "addr", "add", gwIPv6Local+"/64", "dev", bridge)
+
+		// 7b. 配置 IPv6 MASQUERADE
 		// ULA 网段出站（如果源地址是 ULA，SNAT 到宿主机 IPv6）
 		cidr6 := netCIDRv6Local
 		if runCmd("ip6tables", "-t", "nat", "-C", "POSTROUTING", "-s", cidr6, "-o", m.ipv6Iface, "-j", "MASQUERADE") != nil {
 			_ = runCmd("ip6tables", "-t", "nat", "-A", "POSTROUTING", "-s", cidr6, "-o", m.ipv6Iface, "-j", "MASQUERADE")
 		}
+
+		// 7c. 配置宿主机 IPv6 代理 NDP（使宿主机的 IPv6 地址可通过网桥访问）
+		if m.ipv6Addr != "" {
+			_ = runCmd("ip", "neigh", "add", "proxy", m.ipv6Addr, "dev", bridge)
+		}
+
+		log.Printf("info: SNAT mode IPv6 configured: gateway=%s, host=%s", gwIPv6Local+"/64", m.ipv6Addr)
 	}
 
 	// 8. subnet模式：配置bridge的IPv6地址用于NDP（网关地址）和路由规则
@@ -1428,6 +1437,20 @@ func runCmd(name string, args ...string) error {
 		return fmt.Errorf("%s: %w: %s", name, err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// GetVMNetStats 获取 VM 的网络流量统计（用于流量统计服务）
+func (m *Manager) GetVMNetStats(_ context.Context, vmID string) (*manager.VMNetStats, error) {
+	nc, err := m.allocNetwork(vmID)
+	if err != nil {
+		return nil, err
+	}
+	in, out := m.getTraffic(nc.Tap)
+	return &manager.VMNetStats{
+		VMID:     vmID,
+		InBytes:  in,
+		OutBytes: out,
+	}, nil
 }
 
 func cmdOutput(name string, args ...string) (string, error) {

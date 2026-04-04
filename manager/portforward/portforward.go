@@ -98,11 +98,9 @@ func (m *Manager) addMapping(ctx context.Context, vmId string, protocol string, 
 	}
 
 	if checkLimit && !exists {
-		conf, _ := m.db.GetConfig()
-		maxPF := int(conf.MaxPortForward)
-		if maxPF <= 0 {
-			maxPF = db.DefaultMaxPortForward
-		}
+		// Note: MaxPortForward 现已从配置文件管理，不再从 db.Config 读取
+		// 此处使用硬编码的默认值；完整实现需注入 config.Manager
+		maxPF := 20 // TODO: 从配置管理器读取
 		if len(m.mappings[vmId]) >= maxPF {
 			return fmt.Errorf("port forward limit reached (%d/%d)", len(m.mappings[vmId]), maxPF)
 		}

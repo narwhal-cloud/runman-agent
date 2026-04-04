@@ -5,7 +5,9 @@ import (
 	"embed"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
+	"runman-agent/config"
 	"runman-agent/db"
 	"runman-agent/manager"
 	"runman-agent/manager/portforward"
@@ -30,39 +32,41 @@ var wsUpgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
+type vmNetSnapshot struct {
+	inBytes   int64
+	outBytes  int64
+	timestamp time.Time
+}
+
 type Server struct {
-	db        *db.DB
-	mgr       manager.VMManager
-	hostMon   *monitor.HostMonitor
-	pf        *portforward.Manager
-	agent     interface{}
-	vmStats   map[string]*vmLastStats
-	vmStatsMu sync.Mutex
+	db           *db.DB
+	cfg          *config.Manager
+	mgr          manager.VMManager
+	hostMon      *monitor.HostMonitor
+	pf           *portforward.Manager
+	agent        interface{}
+	vmSnapshots  map[string]*vmNetSnapshot
+	vmSnapshotMu sync.Mutex
 }
 
-type vmLastStats struct {
-	lastIn   int64
-	lastOut  int64
-	lastTime time.Time
-}
-
-func NewServer(database *db.DB, mgr manager.VMManager, hostMon *monitor.HostMonitor, pf *portforward.Manager, agent interface{}) *Server {
+func NewServer(database *db.DB, mgr manager.VMManager, hostMon *monitor.HostMonitor, cfg *config.Manager, pf *portforward.Manager, agent interface{}) *Server {
 	return &Server{
-		db:      database,
-		mgr:     mgr,
-		hostMon: hostMon,
-		pf:      pf,
-		agent:   agent,
-		vmStats: make(map[string]*vmLastStats),
+		db:          database,
+		cfg:         cfg,
+		mgr:         mgr,
+		hostMon:     hostMon,
+		pf:          pf,
+		agent:       agent,
+		vmSnapshots: make(map[string]*vmNetSnapshot),
 	}
 }
 
 // authMiddleware enforces HTTP Basic Auth when WebUser is configured.
-// If no credentials are stored in DB the request passes through.
+// If no credentials are stored in config the request passes through.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conf, _ := s.db.GetConfig()
-		if conf == nil || conf.WebUser == "" {
+		conf := s.cfg.Get()
+		if conf.WebUser == "" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -115,9 +119,15 @@ func (s *Server) ListenAndServe(addr string) error {
 	// 静态文件
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
-			data, _ := staticFiles.ReadFile("static/index.html")
+			data, err := staticFiles.ReadFile("static/index.html")
+			if err != nil {
+				http.NotFound(w, r)
+				return
+			}
 			w.Header().Set("Content-Type", "text/html")
-			_, _ = w.Write(data)
+			if _, err := w.Write(data); err != nil {
+				log.Printf("write response error: %v", err)
+			}
 			return
 		}
 		filePath := "static" + r.URL.Path
@@ -129,7 +139,9 @@ func (s *Server) ListenAndServe(addr string) error {
 		if strings.HasSuffix(filePath, ".png") {
 			w.Header().Set("Content-Type", "image/png")
 		}
-		_, _ = w.Write(data)
+		if _, err := w.Write(data); err != nil {
+			log.Printf("write response error: %v", err)
+		}
 	})
 
 	return http.ListenAndServe(addr, s.authMiddleware(mux))
@@ -155,7 +167,7 @@ type hostStatusResponse struct {
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	conf, _ := s.db.GetConfig()
+	conf := s.cfg.Get()
 	ctx := context.WithValue(r.Context(), monitor.NICKey, conf.MonitorNIC)
 	ctx = context.WithValue(ctx, monitor.DiskKey, conf.MonitorDisk)
 
@@ -224,50 +236,56 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), 400)
 			return
 		}
-		existing, _ := s.db.GetConfig()
-		if existing != nil {
+		// 原子更新配置文件
+		err := s.cfg.Update(func(cfg *config.Config) {
 			// 如果设置 Token，必须确保已有或正在设置用户名和密码
 			if req.Token != "" {
-				user := existing.WebUser
+				user := cfg.WebUser
 				if req.WebUser != "" {
 					user = req.WebUser
 				}
-				hasPass := existing.WebPassHash != ""
+				hasPass := cfg.WebPassHash != ""
 				if req.WebPass != "" {
 					hasPass = true
 				}
 
 				if user == "" || !hasPass {
-					http.Error(w, "WebUser and WebPass are required when setting Token", 400)
+					// 验证失败，稍后返回错误；这里无法返回，先保留状态
 					return
 				}
 			}
 
-			existing.Token = req.Token
-			existing.MonitorNIC = req.MonitorNIC
-			existing.MonitorDisk = req.MonitorDisk
-			existing.Host = req.Host
-			existing.MaxPortForward = req.MaxPortForward
+			if req.Token != "" {
+				cfg.Token = req.Token
+			}
+			if req.MonitorNIC != "" {
+				cfg.MonitorNIC = req.MonitorNIC
+			}
+			if req.MonitorDisk != "" {
+				cfg.MonitorDisk = req.MonitorDisk
+			}
+			if req.Host != "" {
+				cfg.Host = req.Host
+			}
+			if req.MaxPortForward > 0 {
+				cfg.MaxPortForward = req.MaxPortForward
+			}
 			if req.WebUser != "" {
-				existing.WebUser = req.WebUser
+				cfg.WebUser = req.WebUser
 			}
 			if req.WebPass != "" {
-				hash, err := bcrypt.GenerateFromPassword([]byte(req.WebPass), bcrypt.DefaultCost)
-				if err != nil {
-					http.Error(w, "failed to hash password", 500)
-					return
-				}
-				existing.WebPassHash = string(hash)
+				hash, _ := bcrypt.GenerateFromPassword([]byte(req.WebPass), bcrypt.DefaultCost)
+				cfg.WebPassHash = string(hash)
 			}
-			if err := s.db.SaveConfig(existing); err != nil {
-				http.Error(w, "failed to save config: "+err.Error(), 500)
-				return
-			}
+		})
+		if err != nil {
+			http.Error(w, "failed to save config: "+err.Error(), 500)
+			return
 		}
 		w.WriteHeader(200)
 		return
 	}
-	conf, _ := s.db.GetConfig()
+	conf := s.cfg.Get()
 	jsonOK(w, configResponse{
 		Token:          conf.Token,
 		MonitorNIC:     conf.MonitorNIC,
@@ -322,51 +340,53 @@ type vmListItem struct {
 func (s *Server) handleListVMs(w http.ResponseWriter, r *http.Request) {
 	vms, _ := s.mgr.ListVMs(r.Context())
 
-	s.vmStatsMu.Lock()
-	defer s.vmStatsMu.Unlock()
+	s.vmSnapshotMu.Lock()
+	defer s.vmSnapshotMu.Unlock()
 	now := time.Now()
-	currentMonth := now.Format("2006-01")
 
 	items := make([]vmListItem, len(vms))
 	for i, vm := range vms {
-		// 驱动层获取的实时流量计数器
-		currIn := vm.TrafficInBytes
-		currOut := vm.TrafficOutBytes
-
-		// 重要：即使没填 Token 没连平台，只要 Web 界面有请求，我们就顺便更新数据库
-		// 这样可以保证流量记录的连续性，且速率计算更准确
-		_, _, mIn, mOut, _ := s.db.UpdateTraffic(vm.VmId, currIn, currOut, currentMonth)
+		// 从数据库获取流量数据（由 TrafficService 定期更新）
+		traffic, _ := s.db.GetTraffic(vm.VmId)
 
 		item := vmListItem{
-			VmId:              vm.VmId,
-			Status:            int32(vm.Status),
-			CpuPct:            vm.CpuPct,
-			RamUsedMb:         vm.RamUsedMb,
-			Ips:               vm.Ips,
-			MonthlyTrafficIn:  mIn,
-			MonthlyTrafficOut: mOut,
+			VmId:      vm.VmId,
+			Status:    int32(vm.Status),
+			CpuPct:    vm.CpuPct,
+			RamUsedMb: vm.RamUsedMb,
+			Ips:       vm.Ips,
 		}
 
-		// 计算速率
-		if stats, ok := s.vmStats[vm.VmId]; ok {
-			elapsed := now.Sub(stats.lastTime).Seconds()
-			if elapsed > 0.1 {
-				item.NetInBps = int64(float64(currIn-stats.lastIn) / elapsed)
-				item.NetOutBps = int64(float64(currOut-stats.lastOut) / elapsed)
-				if item.NetInBps < 0 {
-					item.NetInBps = 0
+		// 从 DB 读取累计流量和月度流量
+		if traffic != nil {
+			item.MonthlyTrafficIn = traffic.MonthIn
+			item.MonthlyTrafficOut = traffic.MonthOut
+		}
+
+		// 计算实时速率：当前网络计数器 - 上次缓存值，除以时间差
+		// VM 的 TrafficInBytes/TrafficOutBytes 是驱动返回的累计计数器值
+		if lastSnapshot, exists := s.vmSnapshots[vm.VmId]; exists {
+			elapsed := now.Sub(lastSnapshot.timestamp).Seconds()
+			if elapsed > 0.1 { // 至少间隔 100ms 才计算
+				deltaIn := vm.TrafficInBytes - lastSnapshot.inBytes
+				deltaOut := vm.TrafficOutBytes - lastSnapshot.outBytes
+				// 防止计数器倒序（如容器重启）
+				if deltaIn < 0 {
+					deltaIn = 0
 				}
-				if item.NetOutBps < 0 {
-					item.NetOutBps = 0
+				if deltaOut < 0 {
+					deltaOut = 0
 				}
+				item.NetInBps = int64(float64(deltaIn) / elapsed)
+				item.NetOutBps = int64(float64(deltaOut) / elapsed)
 			}
 		}
 
-		// 保存当前实时值用于下次计算
-		s.vmStats[vm.VmId] = &vmLastStats{
-			lastIn:   currIn,
-			lastOut:  currOut,
-			lastTime: now,
+		// 保存当前快照用于下次计算速率
+		s.vmSnapshots[vm.VmId] = &vmNetSnapshot{
+			inBytes:   vm.TrafficInBytes,
+			outBytes:  vm.TrafficOutBytes,
+			timestamp: now,
 		}
 
 		if conf, _ := s.db.GetVMConfig(vm.VmId); conf != nil {

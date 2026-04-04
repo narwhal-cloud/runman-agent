@@ -9,7 +9,9 @@ AGENT_BIN_DIR="/opt/narwhal-agent"
 AGENT_BINARY="$AGENT_BIN_DIR/narwhal-agent"
 AGENT_SERVICE="narwhal-agent"
 AGENT_DATA_DIR="/var/lib/narwhal-agent"
-AGENT_DB="$AGENT_DATA_DIR/agent.db"
+AGENT_CONFIG_DIR="/opt/narwhal-agent"
+AGENT_CONFIG_FILE="$AGENT_CONFIG_DIR/config.json"
+AGENT_DB="$AGENT_CONFIG_DIR/agent.db"
 AGENT_WEB_PORT="8792"
 RFW_BIN_DIR="/opt/rfw"
 PODMAN_NETWORK="narwhal-net"
@@ -46,13 +48,13 @@ cleanup_locks() {
 install_packages() {
     local virt_type="${1:-podman}"
     local max=3 attempt=1
-    local base_packages="curl wget python3 xfsprogs uuid-runtime systemd-zram-generator jq chrony iptables iproute2 fdisk"
+    local base_packages="curl wget python3 uuid-runtime systemd-zram-generator jq chrony iptables iproute2 fdisk"
     local extra_packages
 
     if [ "$virt_type" = "cloudhv" ]; then
         extra_packages="qemu-utils cloud-image-utils"
     else
-        extra_packages="podman lxcfs"
+        extra_packages="podman lxcfs xfsprogs"
     fi
 
     while [ $attempt -le $max ]; do
@@ -235,10 +237,9 @@ download_agent() {
     log "$(t "✓ NarwhalCloud Agent installed to $AGENT_BINARY" "✓ NarwhalCloud Agent 已安装到 $AGENT_BINARY")"
 }
 
-# write_service_file [NDP_EXTRA_FLAGS]
+# write_service_file
 write_service_file() {
     local virt_type="${1:-podman}"
-    local extra_flags="${2:-}"
     mkdir -p "$AGENT_DATA_DIR"
 
     # Determine After dependencies based on virt type
@@ -257,10 +258,7 @@ Wants=network-online.target
 Type=simple
 User=root
 OOMScoreAdjust=-999
-ExecStart=$AGENT_BINARY \\
-  --db $AGENT_DB \\
-  --web :$AGENT_WEB_PORT \\
-  --type $virt_type${extra_flags}
+ExecStart=$AGENT_BINARY --config $AGENT_CONFIG_FILE
 Restart=always
 RestartSec=5
 StandardOutput=journal
@@ -270,6 +268,44 @@ StandardError=journal
 WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
+}
+
+# write_config_file - Generate the main configuration file
+write_config_file() {
+    local virt_type="${1:-podman}"
+    local ipv6_mode="${2:-none}"
+    local ipv6_subnet="${3:-}"
+    local ipv6_addr="${4:-}"
+    local ipv6_iface="${5:-}"
+    local ndp_iface="${6:-}"
+    local ndp_subnets="${7:-}"
+    local ndp_network="${8:-}"
+
+    mkdir -p "$AGENT_CONFIG_DIR"
+
+    cat > "$AGENT_CONFIG_FILE" <<EOF
+{
+    "db": "$AGENT_DB",
+    "web": ":$AGENT_WEB_PORT",
+    "virt_type": "$virt_type",
+    "token": "",
+    "monitor_nic": "",
+    "monitor_disk": "/",
+    "web_user": "",
+    "web_pass_hash": "",
+    "host": "",
+    "max_port_forward": 20,
+    "ipv6_mode": "$ipv6_mode",
+    "ipv6_subnet": "$ipv6_subnet",
+    "ipv6_addr": "$ipv6_addr",
+    "ipv6_iface": "$ipv6_iface",
+    "ndp_iface": "$ndp_iface",
+    "ndp_subnets": "$ndp_subnets",
+    "ndp_network": "$ndp_network"
+}
+EOF
+    chmod 600 "$AGENT_CONFIG_FILE"
+    log "$(t "✓ Configuration file written to $AGENT_CONFIG_FILE" "✓ 配置文件已写入 $AGENT_CONFIG_FILE")"
 }
 
 # ── Update flow ───────────────────────────────────────────────────────────────
@@ -650,7 +686,6 @@ configure_host_ipv6_routing() {
 
 read -rp "$(t "Enable public IPv6 detection? [Y/n]: " "是否进行公网 IPv6 检测? [Y/n]: ")" _ipv6
 IPV6_CONFIG="local"
-NDP_EXTRA_FLAGS=""
 
 if [[ "${_ipv6:-Y}" =~ ^[Yy]$ ]]; then
     IPV6_CONFIG=$(detect_and_configure_ipv6)
@@ -712,26 +747,11 @@ PYEOF
         fi
     fi
 
-    # 创建临时配置文件给 agent 启动时读取
-    mkdir -p "$AGENT_DATA_DIR"
-    cat > "$AGENT_DATA_DIR/ipv6-config.json" <<EOF
-{
-  "ipv6_mode": "$IPV6_MODE",
-  "ipv6_subnet": "$IPV6_SUBNET",
-  "ipv6_addr": "$IPV6_ADDR",
-  "ipv6_iface": "$IPV6_IFACE"
-}
-EOF
-    log "$(t "✓ IPv6 config written to $AGENT_DATA_DIR/ipv6-config.json" "✓ IPv6 配置已写入 $AGENT_DATA_DIR/ipv6-config.json")"
-
     # Bridge creation will be handled by the agent's ensureBridge() on startup
     log "$(t "✓ cloud-hypervisor directories created. Bridge will be created on agent startup." "✓ cloud-hypervisor 目录已创建。网桥将在 agent 启动时创建。")"
 
-    # 对于 cloudhv 的 subnet 模式，启用 NDP responder
+    # NDP responder 配置保存到 config.json，将在后面统一生成
     if [ "$IPV6_MODE" = "subnet" ] && [ -n "$IPV6_SUBNET" ] && [ -n "$IPV6_IFACE" ]; then
-        NDP_EXTRA_FLAGS=" \\
-  --ndp-iface $IPV6_IFACE \\
-  --ndp-subnet $IPV6_SUBNET"
         log "$(t "✓ NDP responder will be enabled for IPv6 subnet mode." "✓ NDP 响应器将在 IPv6 子网模式下启用。")"
     fi
 else
@@ -797,10 +817,10 @@ PYEOF
         && log "$(t "✓ snat_ipv6=false injected into network config." "✓ snat_ipv6=false 已注入网络配置。")" \
         || log "$(t "Warning: failed to inject snat_ipv6=false." "警告: 注入 snat_ipv6=false 失败。")"
 
-    NDP_EXTRA_FLAGS=" \\
-  --ndp-iface $IPV6_IFACE \\
-  --ndp-subnet ${CONTAINER_BASE}/112 \\
-  --ndp-network $PODMAN_NETWORK"
+    # NDP responder will be handled by NarwhalCloud Agent
+    NDP_IFACE="$IPV6_IFACE"
+    NDP_SUBNETS="${CONTAINER_BASE}/112"
+    NDP_NETWORK="$PODMAN_NETWORK"
     log "$(t "✓ NDP responder will be handled by NarwhalCloud Agent." "✓ NDP responder 将由 NarwhalCloud Agent 内置处理。")"
 fi
 
@@ -873,7 +893,20 @@ fi
 # ── Install agent ─────────────────────────────────────────────────────────────
 
 download_agent "$ARCH"
-write_service_file "$VIRT_TYPE" "$NDP_EXTRA_FLAGS"
+
+# 初始化 NDP 参数（Podman public IPv6 模式或 cloud-hypervisor subnet 模式下有值）
+NDP_IFACE="${NDP_IFACE:-}"
+NDP_SUBNETS="${NDP_SUBNETS:-}"
+NDP_NETWORK="${NDP_NETWORK:-}"
+if [ "$VIRT_TYPE" = "cloudhv" ] && [ "$IPV6_MODE" = "subnet" ]; then
+    NDP_IFACE="$IPV6_IFACE"
+    NDP_SUBNETS="$IPV6_SUBNET"
+fi
+
+# 生成配置文件（包含所有启动参数和IPv6配置）
+write_config_file "$VIRT_TYPE" "$IPV6_MODE" "$IPV6_SUBNET" "$IPV6_ADDR" "$IPV6_IFACE" "$NDP_IFACE" "$NDP_SUBNETS" "$NDP_NETWORK"
+
+write_service_file "$VIRT_TYPE"
 start_service "$AGENT_SERVICE"
 
 # ── Optional rfw ─────────────────────────────────────────────────────────────

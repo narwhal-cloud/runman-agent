@@ -75,4 +75,15 @@ type VMManager interface {
 	// resize 通道用于传递终端尺寸变更事件，关闭后不再发送。
 	// 函数阻塞直到会话结束或 ctx 被取消。
 	AttachTTY(ctx context.Context, vmID string, stdin io.Reader, stdout io.Writer, resize <-chan ResizeEvent) error
+
+	// GetVMNetStats 获取 VM 的网络流量累计字节数（用于流量统计服务）
+	// 返回的是计数器值，而非速率，由调用方计算增量
+	GetVMNetStats(ctx context.Context, vmID string) (*VMNetStats, error)
+}
+
+// VMNetStats 表示 VM 的网络流量统计
+type VMNetStats struct {
+	VMID     string // VM ID
+	InBytes  int64  // 累计入站字节数（计数器值）
+	OutBytes int64  // 累计出站字节数（计数器值）
 }

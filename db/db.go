@@ -10,26 +10,6 @@ import (
 	"gorm.io/gorm/logger"
 )
 
-const DefaultMaxPortForward = 20
-
-type Config struct {
-	ID             uint   `gorm:"primaryKey"`
-	Token          string `json:"token"`
-	MonitorNIC     string `json:"monitor_nic"`      // 指定监控网卡
-	MonitorDisk    string `json:"monitor_disk"`     // 指定监控磁盘/挂载点
-	VirtType       string `json:"virt_type"`        // 固定虚拟化类型 (podman/cloudhv)
-	BandwidthMbps  int32  `json:"bandwidth_mbps"`   // 启动测速结果 (Mbps)
-	WebUser        string `json:"web_user"`         // 面板用户名
-	WebPassHash    string `json:"-"`                // bcrypt hash，不暴露到 API
-	Host           string `json:"host"`             // 上报给服务端的入口地址（IPv4/DDNS），空则由服务端自取
-	MaxPortForward int32  `json:"max_port_forward"` // 每个 VM 最大转发端口数
-	// IPv6 配置（cloud-hypervisor 专用）
-	IPv6Mode   string `json:"ipv6_mode"`   // "none"/"subnet"/"snat"
-	IPv6Subnet string `json:"ipv6_subnet"` // 可用子网，如 "2001:db8:1234::/64"（mode=subnet）
-	IPv6Addr   string `json:"ipv6_addr"`   // 单个公网 IPv6，如 "2001:db8::1"（mode=snat）
-	IPv6Iface  string `json:"ipv6_iface"`  // IPv6 所在网卡，用于配置转发
-}
-
 type VMConfig struct {
 	VMID          string `gorm:"primaryKey"`
 	CPU           int
@@ -69,14 +49,15 @@ type PortForward struct {
 }
 
 type Traffic struct {
-	VMID     string `gorm:"primaryKey"`
-	RawIn    int64
-	RawOut   int64
-	TotalIn  int64
-	TotalOut int64
-	Month    string `gorm:"index"` // YYYY-MM
-	MonthIn  int64
-	MonthOut int64
+	VMID      string    `gorm:"primaryKey"`
+	RawIn     int64     // 最后一次采集的网卡计数器值（入站）
+	RawOut    int64     // 最后一次采集的网卡计数器值（出站）
+	TotalIn   int64     // 累计使用量（字节）
+	TotalOut  int64     // 累计使用量（字节）
+	Month     string    `gorm:"index"` // YYYY-MM
+	MonthIn   int64     // 当月使用量（字节）
+	MonthOut  int64     // 当月使用量（字节）
+	UpdatedAt time.Time // 最后同步时间
 }
 
 type DB struct {
@@ -95,31 +76,9 @@ func Init(path string) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	_ = db.AutoMigrate(&Traffic{}, &VMConfig{}, &PodmanVMConfig{}, &CloudHVVMConfig{}, &Config{}, &PortForward{})
-
-	// Ensure default config exists
-	var conf Config
-	err = db.First(&conf).Error
-	if err != nil {
-		// No config found, create default
-		db.Create(&Config{MaxPortForward: DefaultMaxPortForward})
-	} else if conf.MaxPortForward == 0 {
-		// Config exists but MaxPortForward is unset, update it
-		conf.MaxPortForward = DefaultMaxPortForward
-		db.Save(&conf)
-	}
+	_ = db.AutoMigrate(&Traffic{}, &VMConfig{}, &PodmanVMConfig{}, &CloudHVVMConfig{}, &PortForward{})
 
 	return &DB{orm: db}, nil
-}
-
-func (d *DB) GetConfig() (*Config, error) {
-	var conf Config
-	err := d.orm.First(&conf).Error
-	return &conf, err
-}
-
-func (d *DB) SaveConfig(c *Config) error {
-	return d.orm.Save(c).Error
 }
 
 // VM 核心业务配置
@@ -232,6 +191,11 @@ func (d *DB) UpdateTraffic(vmId string, rawIn, rawOut int64, month string) (tota
 
 	d.orm.Save(&t)
 	return t.TotalIn, t.TotalOut, t.MonthIn, t.MonthOut, nil
+}
+
+// SaveTraffic 直接保存或更新 Traffic 记录（用于流量统计服务）
+func (d *DB) SaveTraffic(t *Traffic) error {
+	return d.orm.Save(t).Error
 }
 
 // Podman数据结构
