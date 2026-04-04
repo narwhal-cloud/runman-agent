@@ -46,7 +46,7 @@ cleanup_locks() {
 install_packages() {
     local virt_type="${1:-podman}"
     local max=3 attempt=1
-    local base_packages="curl xfsprogs uuid-runtime systemd-zram-generator jq sipcalc chrony"
+    local base_packages="curl wget python3 xfsprogs uuid-runtime systemd-zram-generator jq chrony iptables iproute2 fdisk"
     local extra_packages
 
     if [ "$virt_type" = "cloudhv" ]; then
@@ -96,30 +96,8 @@ detect_arch() {
 
 # ── IPv6 helpers ──────────────────────────────────────────────────────────────
 
-expand_ipv6() {
-    local expanded
-    expanded=$(sipcalc "$1" 2>/dev/null | grep "Expanded Address" | awk '{print $4}')
-    [ -n "$expanded" ] && echo "$expanded" || echo "$1"
-}
-
 ipv6_plus_one() {
-    local ip=$1
-    if command -v python3 &>/dev/null; then
-        python3 -c "import ipaddress; print(str(ipaddress.IPv6Address('$ip') + 1))" 2>/dev/null && return 0
-    fi
-    local expanded
-    expanded=$(expand_ipv6 "$ip")
-    IFS=':' read -r -a parts <<< "$expanded"
-    local dec=()
-    for part in "${parts[@]}"; do dec+=($((0x$part))); done
-    for ((i=7; i>=0; i--)); do
-        dec[i]=$((dec[i] + 1))
-        [ ${dec[i]} -lt 65536 ] && break
-        dec[i]=0
-    done
-    local result=""
-    for part in "${dec[@]}"; do result+=$(printf "%x:" "$part"); done
-    echo "${result%:}"
+    python3 -c "import ipaddress; print(str(ipaddress.IPv6Address('$1') + 1))" 2>/dev/null
 }
 
 # Returns "local" or "IFACE|ADDR|PREFIX"

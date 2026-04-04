@@ -122,6 +122,17 @@ func lxcfsMounts() []specs.Mount {
 }
 
 func (m *Manager) CreateVM(_ context.Context, req *agent.CmdCreateVM) error {
+	// 限制最低配置：CPU 1核，内存 128MB，磁盘 1GB
+	if req.Cpu < 1 {
+		req.Cpu = 1
+	}
+	if req.RamMb < 128 {
+		req.RamMb = 128
+	}
+	if req.DiskGb < 1 {
+		req.DiskGb = 1
+	}
+
 	// 1. 拉取镜像
 	if _, err := images.Pull(m.timeoutCtx(), req.OsImage, &images.PullOptions{
 		Policy: ptr("newer"),
@@ -407,8 +418,11 @@ func (m *Manager) UpdateVM(_ context.Context, vmID string, cpu int32, ramMB int6
 		changed = true
 	}
 	if ramMB > 0 {
+		if ramMB < 128 {
+			ramMB = 128
+		}
 		resources.Memory = &specs.LinuxMemory{
-			Limit: ptr(1024 * 1024 * ramMB),
+			Limit: ptr(ramMB * 1024 * 1024),
 		}
 		changed = true
 	}

@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -20,6 +21,8 @@ import (
 	"runman-agent/db"
 	"runman-agent/manager"
 	"runman-agent/proto/agent"
+
+	"github.com/shirou/gopsutil/v4/process"
 )
 
 const (
@@ -89,7 +92,9 @@ type diskConfig struct {
 	Path              string             `json:"path"`
 	Readonly          bool               `json:"readonly,omitempty"`
 	Direct            bool               `json:"direct,omitempty"`
+	IoUring           bool               `json:"io_uring"`
 	NumQueues         int                `json:"num_queues,omitempty"`
+	Iommu             bool               `json:"iommu,omitempty"`
 	RateLimiterConfig *rateLimiterConfig `json:"rate_limiter_config,omitempty"`
 }
 
@@ -186,21 +191,6 @@ func New(database *db.DB) (*Manager, error) {
 	return m, nil
 }
 
-func findBinary() string {
-	for _, c := range []string{
-		"./scripts/cloud-hypervisor-static",
-		"./cloud-hypervisor-static",
-		"/opt/narwhal-agent/cloud-hypervisor",
-		"/usr/local/bin/cloud-hypervisor",
-		"/usr/bin/cloud-hypervisor",
-	} {
-		if _, err := os.Stat(c); err == nil {
-			return c
-		}
-	}
-	return "./cloud-hypervisor-static"
-}
-
 // ensureBridge 每次 agent 启动时幂等地恢复网络环境
 func (m *Manager) ensureBridge() error {
 	// 1. 创建 bridge narwhal-net（若已存在则跳过）
@@ -222,23 +212,30 @@ func (m *Manager) ensureBridge() error {
 	_ = os.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte("1"), 0644)
 
 	// 5. NAT masquerade（IPv4）及 FORWARD 放行
-	if outIf := defaultRouteIface(); outIf != "" {
+	// 确保 FORWARD 链放行 bridge 流量 (IPv4) (无论出网卡是什么，网桥必须能转发)
+	_ = runCmd("iptables", "-I", "FORWARD", "-i", bridge, "-j", "ACCEPT")
+	_ = runCmd("iptables", "-I", "FORWARD", "-o", bridge, "-j", "ACCEPT")
+
+	outIf := defaultRouteIface()
+	if outIf != "" {
 		cidr := netCIDRv4
 		if runCmd("iptables", "-t", "nat", "-C", "POSTROUTING", "-s", cidr, "-o", outIf, "-j", "MASQUERADE") != nil {
 			_ = runCmd("iptables", "-t", "nat", "-A", "POSTROUTING", "-s", cidr, "-o", outIf, "-j", "MASQUERADE")
 		}
-		// 确保 FORWARD 链放行 bridge 流量 (IPv4)
-		_ = runCmd("iptables", "-I", "FORWARD", "-i", bridge, "-j", "ACCEPT")
-		_ = runCmd("iptables", "-I", "FORWARD", "-o", bridge, "-j", "ACCEPT")
+	} else {
+		log.Printf("WARNING: defaultRouteIface returned empty, IPv4 MASQUERADE may not be applied")
+		// Fallback: apply MASQUERADE without specifying output interface
+		cidr := netCIDRv4
+		if runCmd("iptables", "-t", "nat", "-C", "POSTROUTING", "-s", cidr, "-j", "MASQUERADE") != nil {
+			_ = runCmd("iptables", "-t", "nat", "-A", "POSTROUTING", "-s", cidr, "-j", "MASQUERADE")
+		}
 	}
-
-	// 6. IPv6 支持配置及 FORWARD 放行
 	_ = os.WriteFile("/proc/sys/net/ipv6/conf/all/forwarding", []byte("1"), 0644)
 	_ = os.WriteFile("/proc/sys/net/ipv6/conf/all/proxy_ndp", []byte("1"), 0644)
 	_ = os.WriteFile("/proc/sys/net/ipv6/conf/default/forwarding", []byte("1"), 0644)
 	_ = os.WriteFile("/proc/sys/net/ipv6/conf/default/proxy_ndp", []byte("1"), 0644)
 
-	outIf := defaultRouteIface()
+	outIf = defaultRouteIface()
 	if outIf != "" {
 		_ = os.WriteFile(fmt.Sprintf("/proc/sys/net/ipv6/conf/%s/forwarding", outIf), []byte("1"), 0644)
 		_ = os.WriteFile(fmt.Sprintf("/proc/sys/net/ipv6/conf/%s/proxy_ndp", outIf), []byte("1"), 0644)
@@ -435,13 +432,18 @@ func (m *Manager) prepareDisks(vmID, distro string, diskGB int64) error {
 		return fmt.Errorf("base image for %q not found: %s", distro, base)
 	}
 	system := filepath.Join(m.instDir, vmID, "system.raw")
-	if err := runCmd("cp", "--sparse=always", base, system); err != nil {
-		return fmt.Errorf("copy base image: %w", err)
+
+	// 使用 qemu-img convert 确保目标是一个规整的 raw 文件
+	if err := runCmd("qemu-img", "convert", "-f", "raw", "-O", "raw", base, system); err != nil {
+		return fmt.Errorf("convert base image: %w", err)
 	}
+
 	if diskGB > 0 {
 		if err := runCmd("qemu-img", "resize", "-f", "raw", system, fmt.Sprintf("%dG", diskGB)); err != nil {
 			return fmt.Errorf("resize disk: %w", err)
 		}
+		// 预分配物理空间
+		_ = runCmd("fallocate", "-l", fmt.Sprintf("%dG", diskGB), system)
 	}
 	return nil
 }
@@ -453,16 +455,23 @@ func (m *Manager) genCloudInit(vmID, distro, password string, net *netConfig) er
 	ciDir := filepath.Join(dir, "cloudinit")
 	_ = os.MkdirAll(ciDir, 0755)
 
+	// 必须严格遵守 YAML 缩进格式
 	userData := fmt.Sprintf(`#cloud-config
 ssh_pwauth: true
-disable_root: false
+chpasswd:
+  list: |
+    root:%s
+  expire: false
+users:
+  - name: root
+    ssh_pwauth: true
 write_files:
   - path: /etc/resolv.conf
     content: |
       nameserver 1.1.1.1
+      nameserver 2606:4700:4700::1111
     permissions: '0644'
 runcmd:
-  - 'echo "root:%s" | chpasswd'
   - sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
   - systemctl restart sshd 2>/dev/null || service sshd restart 2>/dev/null || true
 `, password)
@@ -760,21 +769,27 @@ func (m *Manager) buildVmConfig(vmID string, icfg *instanceConfig, net *netConfi
 	if memBytes <= 0 {
 		memBytes = 512 * 1024 * 1024
 	}
-
 	diskNumQueues := cpu
 	if diskNumQueues > 4 {
 		diskNumQueues = 4
 	}
+
+	// 为稳定性起见，禁用 Direct I/O 以兼容非对齐写入，禁用 io_uring 以防内核不稳定
 	disks := []diskConfig{
 		{
 			Path:      filepath.Join(m.instDir, vmID, "system.raw"),
 			NumQueues: diskNumQueues,
+			Direct:    false,
+			IoUring:   false,
 		},
 	}
 	if _, err := os.Stat(filepath.Join(m.instDir, vmID, "cloudinit.img")); err == nil {
 		disks = append(disks, diskConfig{
-			Path:     filepath.Join(m.instDir, vmID, "cloudinit.img"),
-			Readonly: true,
+			Path:      filepath.Join(m.instDir, vmID, "cloudinit.img"),
+			Readonly:  true,
+			Direct:    false,
+			IoUring:   false,
+			NumQueues: 1,
 		})
 	}
 
@@ -783,7 +798,7 @@ func (m *Manager) buildVmConfig(vmID string, icfg *instanceConfig, net *netConfi
 	return &vmCreateReq{
 		Cpus: cpusConfig{
 			BootVcpus: cpu,
-			MaxVcpus:  64,
+			MaxVcpus:  runtime.NumCPU(),
 		},
 		Memory: memoryConfig{
 			Size:          memBytes,
@@ -820,7 +835,18 @@ func (m *Manager) buildVmConfig(vmID string, icfg *instanceConfig, net *netConfi
 	}, nil
 }
 
-func (m *Manager) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error {
+func (m *Manager) CreateVM(_ context.Context, req *agent.CmdCreateVM) error {
+	// 限制最低配置：CPU 1核，内存 512MB，磁盘 3GB
+	if req.Cpu < 1 {
+		req.Cpu = 1
+	}
+	if req.RamMb < 512 {
+		req.RamMb = 512
+	}
+	if req.DiskGb < 3 {
+		req.DiskGb = 3
+	}
+
 	dir := filepath.Join(m.instDir, req.VmId)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
@@ -985,9 +1011,17 @@ func (m *Manager) DeleteVM(_ context.Context, vmID string) error {
 	return os.RemoveAll(filepath.Join(m.instDir, vmID))
 }
 
-func (m *Manager) UpdateVM(ctx context.Context, vmID string, cpu int32, ramMB int64, diskGB int64, bandwidthMBPS int32) error {
+func (m *Manager) UpdateVM(_ context.Context, vmID string, cpu int32, ramMB int64, diskGB int64, bandwidthMBPS int32) error {
 	if !m.isRunning(vmID) {
 		return fmt.Errorf("VM %q is not running", vmID)
+	}
+
+	// 限制最低配置
+	if ramMB > 0 && ramMB < 512 {
+		ramMB = 512
+	}
+	if diskGB > 0 && diskGB < 3 {
+		diskGB = 3
 	}
 
 	icfg, err := m.loadInstanceConfig(vmID)
@@ -1082,7 +1116,8 @@ func (m *Manager) GetVMInfo(_ context.Context, vmID string) (*agent.VMSummary, e
 	}
 
 	status := agent.VMStatus_VM_STATUS_STOPPED
-	var in, out int64
+	var in, out, memUsed int64
+	var cpuPct float32
 
 	if m.isRunning(vmID) {
 		if err := m.apiGet(vmID, "vm.info", nil); err == nil {
@@ -1090,12 +1125,15 @@ func (m *Manager) GetVMInfo(_ context.Context, vmID string) (*agent.VMSummary, e
 			if nc, err := m.allocNetwork(vmID); err == nil {
 				in, out = m.getTraffic(nc.Tap)
 			}
+			cpuPct, memUsed = m.getUsage(vmID)
 		}
 	}
 
 	return &agent.VMSummary{
 		VmId:            vmID,
 		Status:          status,
+		CpuPct:          cpuPct,
+		RamUsedMb:       memUsed,
 		Ips:             ips,
 		TrafficInBytes:  in,
 		TrafficOutBytes: out,
@@ -1137,18 +1175,22 @@ func (m *Manager) ListVMs(_ context.Context) ([]*agent.VMSummary, error) {
 		}
 
 		status := agent.VMStatus_VM_STATUS_STOPPED
-		var in, out int64
+		var in, out, memUsed int64
+		var cpuPct float32
 		if m.isRunning(vmID) {
 			if err := m.apiGet(vmID, "vm.info", nil); err == nil {
 				status = agent.VMStatus_VM_STATUS_RUNNING
 				if nc, err := m.allocNetwork(vmID); err == nil {
 					in, out = m.getTraffic(nc.Tap)
 				}
+				cpuPct, memUsed = m.getUsage(vmID)
 			}
 		}
 		result = append(result, &agent.VMSummary{
 			VmId:            vmID,
 			Status:          status,
+			CpuPct:          cpuPct,
+			RamUsedMb:       memUsed,
 			Ips:             ips,
 			TrafficInBytes:  in,
 			TrafficOutBytes: out,
@@ -1189,7 +1231,7 @@ func (m *Manager) AttachTTY(ctx context.Context, vmID string, stdin io.Reader, s
 	if err != nil {
 		return fmt.Errorf("serial console unavailable (is VM running?): %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// 设置socket读写超时，防止挂起
 	_ = conn.SetDeadline(time.Now().Add(1 * time.Hour))
@@ -1268,9 +1310,37 @@ func (m *Manager) killProcess(vmID string) error {
 	return nil
 }
 
+func (m *Manager) getUsage(vmID string) (cpuPct float32, ramUsedMb int64) {
+	data, err := os.ReadFile(m.pidFile(vmID))
+	if err != nil {
+		return
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return
+	}
+
+	p, err := process.NewProcess(int32(pid))
+	if err != nil {
+		return
+	}
+
+	pct, _ := p.CPUPercent()
+	cpuPct = float32(pct)
+
+	mem, _ := p.MemoryInfo()
+	if mem != nil {
+		ramUsedMb = int64(mem.RSS / 1024 / 1024)
+	}
+	return
+}
+
 func (m *Manager) getTraffic(tap string) (in, out int64) {
-	in = readInt64(fmt.Sprintf("/sys/class/net/%s/statistics/rx_bytes", tap))
-	out = readInt64(fmt.Sprintf("/sys/class/net/%s/statistics/tx_bytes", tap))
+	// 从宿主机视角看：
+	// TX 是宿主机发往 TAP 的流量 = 虚拟机的入站流量 (In)
+	// RX 是宿主机从 TAP 接收的流量 = 虚拟机的出站流量 (Out)
+	out = readInt64(fmt.Sprintf("/sys/class/net/%s/statistics/rx_bytes", tap))
+	in = readInt64(fmt.Sprintf("/sys/class/net/%s/statistics/tx_bytes", tap))
 	return
 }
 
@@ -1306,18 +1376,27 @@ func offlineChpasswd(diskPath, password string) error {
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(mnt)
+	defer func() { _ = os.RemoveAll(mnt) }()
 
-	if err := runCmd("mount", rootPart, mnt); err != nil {
+	if err = runCmd("mount", rootPart, mnt); err != nil {
 		return fmt.Errorf("mount %s: %w", rootPart, err)
 	}
 	defer func() { _ = runCmd("umount", mnt) }()
 
 	chpasswdInput := fmt.Sprintf("root:%s\n", password)
-	cmd := exec.Command("chroot", mnt, "bash", "-c", "echo '"+
-		strings.ReplaceAll(chpasswdInput, "'", "'\\''")+"' | chpasswd")
+	cmd := exec.Command("chroot", mnt, "chpasswd")
 	cmd.Stdin = strings.NewReader(chpasswdInput)
 	if out, err := cmd.CombinedOutput(); err != nil {
+		// 备选方案：如果 chpasswd 不在 PATH 中，尝试使用 sh -c
+		if strings.Contains(err.Error(), "not found") || strings.Contains(string(out), "not found") {
+			cmd = exec.Command("chroot", mnt, "sh", "-c", "chpasswd")
+			cmd.Stdin = strings.NewReader(chpasswdInput)
+			out, err = cmd.CombinedOutput()
+			if err != nil {
+				return fmt.Errorf("chpasswd (fallback): %w: %s", err, out)
+			}
+			return nil
+		}
 		return fmt.Errorf("chpasswd: %w: %s", err, out)
 	}
 	return nil
@@ -1325,7 +1404,7 @@ func offlineChpasswd(diskPath, password string) error {
 
 func findRootPartition(loopDev string) (string, error) {
 	mnt, _ := os.MkdirTemp("", "ch-probe-")
-	defer os.RemoveAll(mnt)
+	defer func() { _ = os.RemoveAll(mnt) }()
 	if runCmd("mount", "-o", "ro", loopDev, mnt) == nil {
 		_ = runCmd("umount", mnt)
 		return loopDev, nil
