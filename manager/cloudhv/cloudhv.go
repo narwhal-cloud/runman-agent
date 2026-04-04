@@ -392,41 +392,15 @@ func (m *Manager) setupNetwork(net *netConfig) error {
 	if net.IPv6 != "" {
 		switch m.ipv6Mode {
 		case "subnet":
-			// subnet模式：
-			// 1. 在uplink接口上配置neighbor proxy（让外网知道这个地址可达）
-			// 2. 添加IPv6路由：VM地址通过TAP可达
-			// (不要在bridge上添加VM的地址，会导致DAD冲突)
-
 			outIf := defaultRouteIface()
 			log.Printf("[setupNetwork] IPv6 subnet mode setup for %s, outIf=%s", net.IPv6, outIf)
 
-			// 配置neighbor proxy
-			if outIf != "" {
-				// 尝试添加
-				err1 := runCmd("ip", "-6", "neigh", "add", "proxy", net.IPv6, "dev", outIf)
-				if err1 != nil {
-					// 可能已存在，尝试替换
-					err2 := runCmd("ip", "-6", "neigh", "replace", "proxy", net.IPv6, "dev", outIf)
-					log.Printf("[setupNetwork] neighbor proxy add failed, replace result: %v", err2)
-				}
-				// 验证是否生效
-				out, _ := cmdOutput("ip", "-6", "neigh", "show", "proxy", "dev", outIf)
-				if strings.Contains(out, net.IPv6) {
-					log.Printf("[setupNetwork] neighbor proxy confirmed on %s", outIf)
-				} else {
-					log.Printf("[setupNetwork] WARNING: neighbor proxy not confirmed on %s", outIf)
-				}
-			}
+			// 依赖于 runman-agent 内置的 ndp responder (ndp/responder.go) 处理 NDP 请求
+			// 不再依赖内核的 proxy_ndp (ip neigh add proxy)，因为内核要求严苛的路由匹配且容易失效。
 
-			// 强制添加一个 /128 的路由指向网桥，确保 Linux 内核的 proxy_ndp 能够正确匹配到目标接口（必须和 outIf 不同）
-			// Note: Instead of /128 per VM, we rely on the /112 route added on the bridge.
-			// The /112 route on the bridge (e.g. 2a13:7e80:0:387::/112 dev narwhal-net) is enough
-			// to satisfy proxy_ndp's requirement that the destination is routed to a different interface than eth0.
+			log.Printf("[setupNetwork] IPv6 subnet mode: VM %s via TAP %s (NDP managed by agent)", net.IPv6, net.Tap)
 
-			log.Printf("[setupNetwork] IPv6 subnet mode: VM %s via TAP %s + proxy on %s", net.IPv6, net.Tap, outIf)
-
-		case "snat":
-			// SNAT 配置（首次全局配置，这里可选）
+		case "snat": // SNAT 配置（首次全局配置，这里可选）
 			// 实际配置在 ensureBridge 中做一次就够了
 		}
 	}
@@ -997,13 +971,6 @@ func (m *Manager) DeleteVM(_ context.Context, vmID string) error {
 	netCfg, err := m.allocNetwork(vmID)
 	if err == nil {
 		_ = runCmd("ip", "link", "delete", netCfg.Tap)
-		// 清理IPv6配置（如果使用了subnet模式）
-		if netCfg.IPv6 != "" && m.ipv6Mode == "subnet" {
-			// 删除neighbor proxy
-			if outIf := defaultRouteIface(); outIf != "" {
-				_ = runCmd("ip", "-6", "neigh", "del", "proxy", netCfg.IPv6, "dev", outIf)
-			}
-		}
 	}
 
 	for _, f := range []string{
@@ -1098,7 +1065,22 @@ func (m *Manager) ResetPassword(ctx context.Context, vmID, password string) erro
 }
 
 func (m *Manager) GetVMInfo(_ context.Context, vmID string) (*agent.VMSummary, error) {
-	ip, _ := m.GetVMLocalIP(nil, vmID)
+	var ips []string
+	if nc, err := m.allocNetwork(vmID); err == nil {
+		if nc.IPv4 != "" {
+			ips = append(ips, nc.IPv4)
+		}
+		if nc.IPv6 != "" && m.ipv6Mode != "none" {
+			ips = append(ips, nc.IPv6)
+		}
+	} else {
+		// Fallback if allocNetwork fails
+		ip, _ := m.GetVMLocalIP(nil, vmID)
+		if ip != "" {
+			ips = append(ips, ip)
+		}
+	}
+
 	status := agent.VMStatus_VM_STATUS_STOPPED
 	var in, out int64
 
@@ -1114,7 +1096,7 @@ func (m *Manager) GetVMInfo(_ context.Context, vmID string) (*agent.VMSummary, e
 	return &agent.VMSummary{
 		VmId:            vmID,
 		Status:          status,
-		Ips:             []string{ip},
+		Ips:             ips,
 		TrafficInBytes:  in,
 		TrafficOutBytes: out,
 	}, nil
@@ -1139,7 +1121,21 @@ func (m *Manager) ListVMs(_ context.Context) ([]*agent.VMSummary, error) {
 			continue
 		}
 
-		ip, _ := m.GetVMLocalIP(nil, vmID)
+		var ips []string
+		if nc, err := m.allocNetwork(vmID); err == nil {
+			if nc.IPv4 != "" {
+				ips = append(ips, nc.IPv4)
+			}
+			if nc.IPv6 != "" && m.ipv6Mode != "none" {
+				ips = append(ips, nc.IPv6)
+			}
+		} else {
+			ip, _ := m.GetVMLocalIP(nil, vmID)
+			if ip != "" {
+				ips = append(ips, ip)
+			}
+		}
+
 		status := agent.VMStatus_VM_STATUS_STOPPED
 		var in, out int64
 		if m.isRunning(vmID) {
@@ -1153,7 +1149,7 @@ func (m *Manager) ListVMs(_ context.Context) ([]*agent.VMSummary, error) {
 		result = append(result, &agent.VMSummary{
 			VmId:            vmID,
 			Status:          status,
-			Ips:             []string{ip},
+			Ips:             ips,
 			TrafficInBytes:  in,
 			TrafficOutBytes: out,
 		})
@@ -1181,7 +1177,7 @@ func (m *Manager) GetSupportedImages(_ context.Context) ([]*agent.OSImageInfo, e
 		}
 	}
 	if len(images) == 0 {
-		return nil, fmt.Errorf("no VM images found in %s; run update-vm-images.sh first", imgDir)
+		return nil, fmt.Errorf("no VM images found in %s; run install.sh to download base images", imgDir)
 	}
 	return images, nil
 }
