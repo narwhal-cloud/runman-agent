@@ -5,15 +5,18 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"math/rand"
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runman-agent/db"
 	"runman-agent/manager"
 	"runman-agent/manager/cloudhv"
@@ -58,7 +61,6 @@ type Agent struct {
 func main() {
 	dbPath := flag.String("db", "agent.db", "path to sqlite db")
 	webAddr := flag.String("web", ":8792", "web status server address")
-	socketPath := flag.String("socket", "unix:///run/podman/podman.sock", "podman api socket path")
 	virtType := flag.String("type", "podman", "virtualization type")
 	ndpIface := flag.String("ndp-iface", "", "uplink interface for NDP responder (IPv6, e.g. eth0)")
 	ndpSubnets := flag.String("ndp-subnet", "", "IPv6 CIDRs for NDP responder, comma-separated (e.g. 2001:db8::/112)")
@@ -79,12 +81,32 @@ func main() {
 		_ = database.SaveConfig(conf)
 	}
 
+	// cloud-hypervisor: 读取 install.sh 创建的 IPv6 配置文件
+	if conf.VirtType == "cloudhv" {
+		ipv6ConfigPath := filepath.Join(filepath.Dir(*dbPath), "ipv6-config.json")
+		if data, err := ioutil.ReadFile(ipv6ConfigPath); err == nil {
+			var ipv6Cfg map[string]string
+			if err := json.Unmarshal(data, &ipv6Cfg); err == nil {
+				if conf.IPv6Mode == "" && ipv6Cfg["ipv6_mode"] != "" {
+					conf.IPv6Mode = ipv6Cfg["ipv6_mode"]
+					conf.IPv6Subnet = ipv6Cfg["ipv6_subnet"]
+					conf.IPv6Addr = ipv6Cfg["ipv6_addr"]
+					conf.IPv6Iface = ipv6Cfg["ipv6_iface"]
+					_ = database.SaveConfig(conf)
+					log.Printf("IPv6 config loaded: mode=%s", conf.IPv6Mode)
+					// 删除配置文件，避免重复读取
+					_ = os.Remove(ipv6ConfigPath)
+				}
+			}
+		}
+	}
+
 	var rawMgr manager.VMManager
 	switch conf.VirtType {
 	case "podman":
-		rawMgr, err = podman.New(*socketPath, database)
+		rawMgr, err = podman.New(database)
 	case "cloudhv":
-		rawMgr, err = cloudhv.New(*socketPath, database)
+		rawMgr, err = cloudhv.New(database)
 	default:
 		log.Fatalf("unsupported virt type: %q (supported: podman, cloudhv)", conf.VirtType)
 	}
@@ -94,6 +116,14 @@ func main() {
 
 	// VMService 作为服务层包装底层驱动，负责 ID 转换、托管 VM 过滤
 	svc := manager.NewVMService(rawMgr, database)
+
+	// cloud-hypervisor 自启动：agent 启动后延迟 5 秒让网络就绪，然后启动所有 running VM
+	if conf.VirtType == "cloudhv" {
+		go func() {
+			time.Sleep(5 * time.Second)
+			svc.Autostart(context.Background())
+		}()
+	}
 
 	hostMon := monitor.NewHostMonitor()
 
@@ -141,7 +171,11 @@ func main() {
 
 	// 按需启动 NDP 应答器（公网 IPv6 场景）
 	if *ndpIface != "" {
-		nr, err := ndp.New(*ndpIface, *ndpSubnets, *ndpNetwork, *socketPath)
+		var cloudhvDB interface{}
+		if conf.VirtType == "cloudhv" {
+			cloudhvDB = database
+		}
+		nr, err := ndp.New(*ndpIface, *ndpSubnets, *ndpNetwork, podman.SocketPath, cloudhvDB)
 		if err != nil {
 			log.Printf("NDP responder init error: %v", err)
 		} else {

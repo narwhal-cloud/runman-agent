@@ -3,6 +3,7 @@ package manager
 import (
 	"context"
 	"io"
+	"log"
 	"runman-agent/db"
 	"runman-agent/proto/agent"
 )
@@ -27,6 +28,7 @@ func NewVMService(mgr VMManager, database *db.DB) *VMService {
 // --- 生命周期管理 ---
 
 func (s *VMService) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error {
+	log.Printf("[CreateVM] start: vmID=%q, image=%q", req.VmId, req.OsImage)
 	if err := s.mgr.CreateVM(ctx, req); err != nil {
 		return err
 	}
@@ -43,7 +45,11 @@ func (s *VMService) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error 
 	conf.DiskGB = req.DiskGb
 	conf.Image = req.OsImage
 	conf.Status = "running"
-	_ = s.db.SaveVMConfig(conf)
+	log.Printf("[CreateVM] saving VMConfig: vmID=%s, image=%s", conf.VMID, conf.Image)
+	if err := s.db.SaveVMConfig(conf); err != nil {
+		log.Printf("[CreateVM] SaveVMConfig error: %v", err)
+		return err
+	}
 
 	if s.OnCreated != nil {
 		s.OnCreated(ctx, req.VmId, int(req.BandwidthMbps))
@@ -128,4 +134,15 @@ func (s *VMService) GetVMLocalIP(ctx context.Context, vmID string) (string, erro
 
 func (s *VMService) GetSupportedImages(ctx context.Context) ([]*agent.OSImageInfo, error) {
 	return s.mgr.GetSupportedImages(ctx)
+}
+
+// Autostart 启动所有状态为 running 的 VM（通常在 agent 启动时调用）
+func (s *VMService) Autostart(ctx context.Context) {
+	configs, _ := s.db.ListVMConfigs()
+	for _, c := range configs {
+		if c.Status == "running" {
+			// 忽略日志输出，交由调用方处理
+			_ = s.mgr.StartVM(ctx, c.VMID)
+		}
+	}
 }

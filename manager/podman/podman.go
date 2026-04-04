@@ -32,7 +32,10 @@ import (
 	"runman-agent/proto/agent"
 )
 
-const networkName = "narwhal-net"
+const (
+	SocketPath  = "unix:///run/podman/podman.sock"
+	NetworkName = "narwhal-net"
+)
 
 func ptr[T any](v T) *T { return &v }
 
@@ -42,7 +45,7 @@ type Manager struct {
 	alloc *cpualloc.Allocator
 }
 
-func New(socketPath string, database *db.DB) (*Manager, error) {
+func New(database *db.DB) (*Manager, error) {
 	alloc := cpualloc.New(runtime.NumCPU())
 	if vmConfigs, err2 := database.ListPodmanConfigs(); err2 == nil {
 		for _, c := range vmConfigs {
@@ -50,7 +53,7 @@ func New(socketPath string, database *db.DB) (*Manager, error) {
 		}
 	}
 	// 用 Background context 建立长期连接，避免 ping 超时取消后续所有操作
-	ctx, err := bindings.NewConnection(context.Background(), socketPath)
+	ctx, err := bindings.NewConnection(context.Background(), SocketPath)
 	if err != nil {
 		return nil, err
 	}
@@ -143,7 +146,7 @@ func (m *Manager) CreateVM(_ context.Context, req *agent.CmdCreateVM) error {
 		// 创建临时容器获取 IPAM 分配的地址
 		tempID := "tmp-" + req.VmId
 		netOpts := map[string]netTypes.PerNetworkOptions{
-			networkName: {},
+			NetworkName: {},
 		}
 		res, err := containers.CreateWithSpec(m.timeoutCtx(), &specgen.SpecGenerator{
 			ContainerBasicConfig: specgen.ContainerBasicConfig{
@@ -230,7 +233,7 @@ func (m *Manager) CreateVM(_ context.Context, req *agent.CmdCreateVM) error {
 	}
 
 	netOpts := map[string]netTypes.PerNetworkOptions{
-		networkName: netOpt,
+		NetworkName: netOpt,
 	}
 
 	res, err := containers.CreateWithSpec(m.timeoutCtx(), &specgen.SpecGenerator{

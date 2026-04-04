@@ -14,16 +14,18 @@ import (
 	"go4.org/netipx"
 )
 
-// Responder answers ICMPv6 neighbor solicitations on behalf of container IPs.
+// Responder answers ICMPv6 neighbor solicitations on behalf of container and VM IPs.
 //
 // It responds to solicitations for:
 //   - Any address that falls inside a configured static subnet (Subnets)
 //   - Any IPv6 address currently assigned to a container in the watched Podman network (PodmanNetwork)
+//   - Any IPv6 address assigned to a cloud-hypervisor VM (CloudHVDB)
 type Responder struct {
 	iface      string
 	subnets    *netipx.IPSet
 	podmanNet  string
 	podmanSock string
+	cloudhvDB  interface{} // *db.DB (avoid circular import)
 }
 
 // New creates a Responder.
@@ -32,7 +34,8 @@ type Responder struct {
 //   - subnets:     comma-separated list of IPv6 CIDRs to respond for (may be empty)
 //   - podmanNet:   Podman network name to watch for container IPs (may be empty)
 //   - podmanSock:  path to Podman API socket (e.g. "unix:///run/podman/podman.sock")
-func New(iface string, subnets string, podmanNet string, podmanSock string) (*Responder, error) {
+//   - cloudhvDB:   database for cloud-hypervisor VMs (*db.DB, may be nil)
+func New(iface string, subnets string, podmanNet string, podmanSock string, cloudhvDB interface{}) (*Responder, error) {
 	var b netipx.IPSetBuilder
 	for _, s := range strings.Split(subnets, ",") {
 		s = strings.TrimSpace(s)
@@ -54,6 +57,7 @@ func New(iface string, subnets string, podmanNet string, podmanSock string) (*Re
 		subnets:    ipset,
 		podmanNet:  podmanNet,
 		podmanSock: podmanSock,
+		cloudhvDB:  cloudhvDB,
 	}, nil
 }
 
@@ -87,17 +91,35 @@ func (r *Responder) Run(ctx context.Context) error {
 
 	solicitations := CaptureNeighSolicitation(h)
 
-	var tracker *podmanTracker
-	var newIPsCh <-chan netip.Addr
+	var podmanTracker *podmanTracker
+	var cloudhvTracker *cloudhvTracker
+
+	// Combine newIPs from all active trackers
+	newIPsCh := make(chan netip.Addr, 128)
+
 	if r.podmanNet != "" {
-		tracker = newPodmanTracker(r.podmanSock, r.podmanNet)
-		go tracker.run(ctx)
-		newIPsCh = tracker.newIPs
-	} else {
-		newIPsCh = make(chan netip.Addr) // never sends
+		podmanTracker = newPodmanTracker(r.podmanSock, r.podmanNet)
+		go podmanTracker.run(ctx)
+		go func() {
+			for ip := range podmanTracker.newIPs {
+				newIPsCh <- ip
+			}
+		}()
 	}
 
-	log.Printf("NDP responder started on %s", r.iface)
+	if r.cloudhvDB != nil {
+		cloudhvTracker = newCloudHVTracker(r.cloudhvDB)
+		if cloudhvTracker != nil {
+			go cloudhvTracker.run(ctx)
+			go func() {
+				for ip := range cloudhvTracker.newIPs {
+					newIPsCh <- ip
+				}
+			}()
+		}
+	}
+
+	log.Printf("NDP responder started on %s (podman: %v, cloudhv: %v)", r.iface, podmanTracker != nil, cloudhvTracker != nil)
 	sbuf := gopacket.NewSerializeBuffer()
 
 	for {
@@ -110,7 +132,9 @@ func (r *Responder) Run(ctx context.Context) error {
 				return nil
 			}
 			var respond bool
-			if tracker != nil && tracker.contains(ns.TargetIP) {
+			if podmanTracker != nil && podmanTracker.contains(ns.TargetIP) {
+				respond = true
+			} else if cloudhvTracker != nil && cloudhvTracker.contains(ns.TargetIP) {
 				respond = true
 			} else if ns.DestIP.IsMulticast() && r.subnets.Contains(ns.TargetIP) {
 				respond = true

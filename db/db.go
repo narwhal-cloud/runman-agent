@@ -17,12 +17,17 @@ type Config struct {
 	Token          string `json:"token"`
 	MonitorNIC     string `json:"monitor_nic"`      // 指定监控网卡
 	MonitorDisk    string `json:"monitor_disk"`     // 指定监控磁盘/挂载点
-	VirtType       string `json:"virt_type"`        // 固定虚拟化类型 (podman/kvm)
+	VirtType       string `json:"virt_type"`        // 固定虚拟化类型 (podman/cloudhv)
 	BandwidthMbps  int32  `json:"bandwidth_mbps"`   // 启动测速结果 (Mbps)
 	WebUser        string `json:"web_user"`         // 面板用户名
 	WebPassHash    string `json:"-"`                // bcrypt hash，不暴露到 API
 	Host           string `json:"host"`             // 上报给服务端的入口地址（IPv4/DDNS），空则由服务端自取
 	MaxPortForward int32  `json:"max_port_forward"` // 每个 VM 最大转发端口数
+	// IPv6 配置（cloud-hypervisor 专用）
+	IPv6Mode   string `json:"ipv6_mode"`   // "none"/"subnet"/"snat"
+	IPv6Subnet string `json:"ipv6_subnet"` // 可用子网，如 "2001:db8:1234::/64"（mode=subnet）
+	IPv6Addr   string `json:"ipv6_addr"`   // 单个公网 IPv6，如 "2001:db8::1"（mode=snat）
+	IPv6Iface  string `json:"ipv6_iface"`  // IPv6 所在网卡，用于配置转发
 }
 
 type VMConfig struct {
@@ -43,6 +48,15 @@ type PodmanVMConfig struct {
 	MAC       string // 固定 MAC
 	IPv4      string // 本地ipv4一定存在
 	IPv6      string // 公网ipv6可能存在
+}
+
+// CloudHVVMConfig 存储 cloud-hypervisor 驱动特有的数据
+type CloudHVVMConfig struct {
+	VMID string `gorm:"primaryKey"`
+	Idx  int    // IP/TAP 索引，范围 2-4094
+	MAC  string // 固定 MAC 地址
+	IPv4 string // 静态 IPv4，来自 10.91.0.0/20 段
+	IPv6 string // 静态 IPv6（ULA 或公网 /112），可能为空
 }
 
 // PortForward 持久化端口转发规则。(Protocol, HostPort) 联合主键保证宿主机端口唯一。
@@ -81,7 +95,7 @@ func Init(path string) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	_ = db.AutoMigrate(&Traffic{}, &VMConfig{}, &PodmanVMConfig{}, &Config{}, &PortForward{})
+	_ = db.AutoMigrate(&Traffic{}, &VMConfig{}, &PodmanVMConfig{}, &CloudHVVMConfig{}, &Config{}, &PortForward{})
 
 	// Ensure default config exists
 	var conf Config
@@ -117,7 +131,10 @@ func (d *DB) SaveVMConfig(v *VMConfig) error {
 func (d *DB) GetVMConfig(vmId string) (*VMConfig, error) {
 	var conf VMConfig
 	err := d.orm.First(&conf, "vm_id = ?", vmId).Error
-	return &conf, err
+	if err != nil {
+		return nil, err
+	}
+	return &conf, nil
 }
 
 func (d *DB) ListVMConfigs() ([]*VMConfig, error) {
@@ -226,7 +243,10 @@ func (d *DB) SavePodmanConfig(v *PodmanVMConfig) error {
 func (d *DB) GetPodmanConfig(vmId string) (*PodmanVMConfig, error) {
 	var conf PodmanVMConfig
 	err := d.orm.First(&conf, "vm_id = ?", vmId).Error
-	return &conf, err
+	if err != nil {
+		return nil, err
+	}
+	return &conf, nil
 }
 
 func (d *DB) DeletePodmanConfig(vmId string) error {
@@ -236,4 +256,49 @@ func (d *DB) ListPodmanConfigs() ([]*PodmanVMConfig, error) {
 	var list []*PodmanVMConfig
 	err := d.orm.Find(&list).Error
 	return list, err
+}
+
+// cloud-hypervisor 数据结构
+
+func (d *DB) SaveCloudHVConfig(v *CloudHVVMConfig) error {
+	return d.orm.Save(v).Error
+}
+
+func (d *DB) GetCloudHVConfig(vmId string) (*CloudHVVMConfig, error) {
+	var conf CloudHVVMConfig
+	err := d.orm.First(&conf, "vm_id = ?", vmId).Error
+	if err != nil {
+		return nil, err
+	}
+	return &conf, nil
+}
+
+func (d *DB) DeleteCloudHVConfig(vmId string) error {
+	return d.orm.Delete(&CloudHVVMConfig{}, "vm_id = ?", vmId).Error
+}
+
+func (d *DB) ListCloudHVConfigs() ([]*CloudHVVMConfig, error) {
+	var list []*CloudHVVMConfig
+	err := d.orm.Find(&list).Error
+	return list, err
+}
+
+// NextCloudHVIdx 返回最小可用的 idx（范围 2-4094）
+func (d *DB) NextCloudHVIdx() (int, error) {
+	var configs []*CloudHVVMConfig
+	if err := d.orm.Find(&configs).Error; err != nil {
+		return 2, err
+	}
+
+	used := make(map[int]bool, len(configs))
+	for _, c := range configs {
+		used[c.Idx] = true
+	}
+
+	for idx := 2; idx <= 4094; idx++ {
+		if !used[idx] {
+			return idx, nil
+		}
+	}
+	return -1, gorm.ErrRecordNotFound // 没有可用的 idx
 }

@@ -15,6 +15,7 @@ RFW_BIN_DIR="/opt/rfw"
 PODMAN_NETWORK="narwhal-net"
 
 DOWNLOAD_BASE="https://github.com/narwhal-cloud/runman-agent/releases/latest/download"
+CLOUD_HYPERVISOR_BASE="https://github.com/cloud-hypervisor/cloud-hypervisor/releases/latest/download"
 NETAVARK_BASE="https://github.com/narwhal-cloud/netavark/releases/latest/download"
 RFW_BASE="https://github.com/narwhal-cloud/rfw/releases/latest/download"
 
@@ -43,10 +44,20 @@ cleanup_locks() {
 }
 
 install_packages() {
+    local virt_type="${1:-podman}"
     local max=3 attempt=1
+    local base_packages="curl xfsprogs lxcfs uuid-runtime systemd-zram-generator jq sipcalc chrony"
+    local extra_packages
+
+    if [ "$virt_type" = "cloudhv" ]; then
+        extra_packages="qemu-utils cloud-image-utils"
+    else
+        extra_packages="podman"
+    fi
+
     while [ $attempt -le $max ]; do
         log "$(t "Installing packages (attempt $attempt)..." "安装软件包 (第 $attempt 次)...")"
-        if apt-get update -qq && apt-get install -y curl xfsprogs lxcfs uuid-runtime systemd-zram-generator jq sipcalc podman chrony; then
+        if apt-get update -qq && apt-get install -y $base_packages $extra_packages; then
             log "$(t "Packages installed." "软件包安装成功。")"
             return 0
         fi
@@ -139,25 +150,33 @@ detect_and_configure_ipv6() {
     prefix_len=$(echo "$ipv6_full" | cut -d'/' -f2)
     log "$(t "IPv6 address: $ipv6_addr/$prefix_len" "IPv6 地址: $ipv6_addr/$prefix_len")" >&2
 
-    if [ "$prefix_len" -gt 112 ]; then
+    if [ "$prefix_len" -gt 64 ]; then
         log "$(t "Prefix /$prefix_len too small for subnetting." "前缀 /$prefix_len 不足以分配子网。")" >&2
         echo "local"; return 0
     fi
 
-    local test_addr
-    test_addr=$(ipv6_plus_one "$ipv6_addr")
-    ip addr add "$test_addr/$prefix_len" dev "$iface" 2>/dev/null || { echo "local"; return 0; }
-    sleep 3
-    local ok=0
-    curl -6 --interface "$test_addr" -s --max-time 10 ip.sb >/dev/null 2>&1 && ok=1
-    ip addr del "$test_addr/$prefix_len" dev "$iface" 2>/dev/null
-
-    if [ $ok -eq 1 ]; then
-        log "$(t "✓ Public IPv6 test passed." "✓ 公网 IPv6 测试成功。")" >&2
+    # 对于 /64 或更大的子网，直接接受（无需测试新地址，因为 BGP 学习延迟可能导致测试失败）
+    # 只对 /65-/112 的子网进行可达性测试
+    if [ "$prefix_len" -le 64 ]; then
+        log "$(t "✓ Public IPv6 subnet detected (/$prefix_len)." "✓ 检测到公网 IPv6 子网 (/$prefix_len)。")" >&2
         echo "$iface|$ipv6_addr|$prefix_len"
     else
-        log "$(t "Public IPv6 test failed, using local subnet." "公网 IPv6 测试失败，使用本地网段。")" >&2
-        echo "local"
+        # 测试 /65-/112 的小子网
+        local test_addr
+        test_addr=$(ipv6_plus_one "$ipv6_addr")
+        ip addr add "$test_addr/$prefix_len" dev "$iface" 2>/dev/null || { echo "local"; return 0; }
+        sleep 3
+        local ok=0
+        curl -6 --interface "$test_addr" -s --max-time 10 ip.sb >/dev/null 2>&1 && ok=1
+        ip addr del "$test_addr/$prefix_len" dev "$iface" 2>/dev/null
+
+        if [ $ok -eq 1 ]; then
+            log "$(t "✓ Public IPv6 test passed." "✓ 公网 IPv6 测试成功。")" >&2
+            echo "$iface|$ipv6_addr|$prefix_len"
+        else
+            log "$(t "Public IPv6 test failed, using local subnet." "公网 IPv6 测试失败，使用本地网段。")" >&2
+            echo "local"
+        fi
     fi
 }
 
@@ -218,8 +237,20 @@ EOF
 
 download_agent() {
     local arch=$1
-    log "$(t "Downloading NarwhalCloud Agent ($arch)..." "下载 NarwhalCloud Agent ($arch)...")"
     mkdir -p "$AGENT_BIN_DIR"
+
+    # 调试模式：检查本地文件
+    if [ -f "./runman-agent-linux-$arch" ]; then
+        log "$(t "Found local agent binary: ./runman-agent-linux-$arch (debug mode)" "找到本地 agent 二进制: ./runman-agent-linux-$arch (调试模式)")"
+        cp "./runman-agent-linux-$arch" "$AGENT_BINARY.new"
+        chmod +x "$AGENT_BINARY.new"
+        mv "$AGENT_BINARY.new" "$AGENT_BINARY"
+        log "$(t "✓ NarwhalCloud Agent installed to $AGENT_BINARY (from local)" "✓ NarwhalCloud Agent 已安装到 $AGENT_BINARY (来自本地)")"
+        return 0
+    fi
+
+    # 生产模式：从远程下载
+    log "$(t "Downloading NarwhalCloud Agent ($arch)..." "下载 NarwhalCloud Agent ($arch)...")"
     download_with_retry "$DOWNLOAD_BASE/runman-agent-linux-$arch" "$AGENT_BINARY.new"
     chmod +x "$AGENT_BINARY.new"
     mv "$AGENT_BINARY.new" "$AGENT_BINARY"
@@ -228,12 +259,20 @@ download_agent() {
 
 # write_service_file [NDP_EXTRA_FLAGS]
 write_service_file() {
-    local extra_flags="${1:-}"
+    local virt_type="${1:-podman}"
+    local extra_flags="${2:-}"
     mkdir -p "$AGENT_DATA_DIR"
+
+    # Determine After dependencies based on virt type
+    local after_target="network-online.target"
+    if [ "$virt_type" = "podman" ]; then
+        after_target="network-online.target podman.socket"
+    fi
+
     cat > "/etc/systemd/system/$AGENT_SERVICE.service" <<EOF
 [Unit]
 Description=NarwhalCloud Agent
-After=network-online.target podman.socket
+After=$after_target
 Wants=network-online.target
 
 [Service]
@@ -243,8 +282,7 @@ OOMScoreAdjust=-999
 ExecStart=$AGENT_BINARY \\
   --db $AGENT_DB \\
   --web :$AGENT_WEB_PORT \\
-  --socket unix:///run/podman/podman.sock \\
-  --type podman${extra_flags}
+  --type $virt_type${extra_flags}
 Restart=always
 RestartSec=5
 StandardOutput=journal
@@ -307,7 +345,30 @@ fi
 
 log "$(t "Starting fresh installation..." "开始全新安装流程...")"
 
-install_packages
+# ── Virtualization type selection ──────────────────────────────────────────────
+
+printf "$(t "Select virtualization type:" "选择虚拟化类型：")\n"
+printf "  1) Podman container ($(t "recommended" "推荐"))\n"
+printf "  2) cloud-hypervisor VM ($(t "requires /dev/kvm" "需要 /dev/kvm"))\n"
+read -rp "> " _virt_choice
+case "${_virt_choice}" in
+    2)
+        VIRT_TYPE="cloudhv"
+        # 检查 KVM 支持
+        if [ ! -e "/dev/kvm" ]; then
+            log "$(t "ERROR: /dev/kvm not found. KVM is required for cloud-hypervisor." "错误: 未找到 /dev/kvm。cloud-hypervisor 需要 KVM 支持。")"
+            log "$(t "Please enable KVM in BIOS or use nested virtualization if running in a VM." "请在 BIOS 中启用 KVM，或在虚拟机中启用嵌套虚拟化。")"
+            exit 1
+        fi
+        log "$(t "✓ KVM support detected." "✓ 检测到 KVM 支持。")"
+        ;;
+    *) VIRT_TYPE="podman" ;;
+esac
+log "$(t "Selected virtualization type: $VIRT_TYPE" "选择的虚拟化类型: $VIRT_TYPE")"
+
+# ── Installation ───────────────────────────────────────────────────────────────
+
+install_packages "$VIRT_TYPE"
 enable_bbr
 start_service chrony
 start_service lxcfs
@@ -324,38 +385,44 @@ start_service systemd-zram-setup@zram0.service
 ARCH=$(detect_arch)
 log "$(t "Architecture: $(uname -m) ($ARCH)" "架构: $(uname -m) ($ARCH)")"
 
-start_service podman.socket
-
-# XFS data disk
-if [ -f "/xfs_disk.img" ]; then
-    log "$(t "Data disk already exists, skipping." "数据盘已存在，跳过。")"
-    mkdir -p /data
-    # 启用 noatime 减少元数据压力，增加稳定性
-    mountpoint -q /data || mount -o defaults,pquota,loop,noatime /xfs_disk.img /data
-    # 确保对已存在的镜像也应用配置规则
-    cat > /etc/udev/rules.d/99-loop-directio.rules <<EOF
-ACTION=="add|change", SUBSYSTEM=="block", KERNEL=="loop*", ATTR{loop/backing_file}=="/xfs_disk.img", ATTR{loop/direct_io}="1"
-EOF
-    udevadm control --reload-rules && udevadm trigger
-    local _loop_dev
-    _loop_dev=$(mount | grep "/data" | awk '{print $1}')
-    if [[ "$_loop_dev" == /dev/loop* ]]; then
-        echo 1 > "/sys/block/${_loop_dev#/dev/}/loop/direct_io" 2>/dev/null || true
-    fi
-else
-    read -rp "$(t "Enter data disk size (e.g. 20G): " "请输入数据盘大小 (例如 20G): ")" xfs_size
-    xfs_size=${xfs_size:-20G}
-    # 增加 noatime 优化性能和稳定性
-    create_xfs_disk "/xfs_disk.img" "$xfs_size" "/data" "defaults,pquota,loop,noatime"
+if [ "$VIRT_TYPE" = "podman" ]; then
+    start_service podman.socket
 fi
 
-cat > /etc/containers/storage.conf <<'EOF'
+# XFS data disk (Podman only - for container storage)
+if [ "$VIRT_TYPE" = "podman" ]; then
+    if [ -f "/xfs_disk.img" ]; then
+        log "$(t "Data disk already exists, skipping." "数据盘已存在，跳过。")"
+        mkdir -p /data
+        # 启用 noatime 减少元数据压力，增加稳定性
+        mountpoint -q /data || mount -o defaults,pquota,loop,noatime /xfs_disk.img /data
+        # 确保对已存在的镜像也应用配置规则
+        cat > /etc/udev/rules.d/99-loop-directio.rules <<EOF
+ACTION=="add|change", SUBSYSTEM=="block", KERNEL=="loop*", ATTR{loop/backing_file}=="/xfs_disk.img", ATTR{loop/direct_io}="1"
+EOF
+        udevadm control --reload-rules && udevadm trigger
+        local _loop_dev
+        _loop_dev=$(mount | grep "/data" | awk '{print $1}')
+        if [[ "$_loop_dev" == /dev/loop* ]]; then
+            echo 1 > "/sys/block/${_loop_dev#/dev/}/loop/direct_io" 2>/dev/null || true
+        fi
+    else
+        read -rp "$(t "Enter data disk size (e.g. 20G): " "请输入数据盘大小 (例如 20G): ")" xfs_size
+        xfs_size=${xfs_size:-20G}
+        # 增加 noatime 优化性能和稳定性
+        create_xfs_disk "/xfs_disk.img" "$xfs_size" "/data" "defaults,pquota,loop,noatime"
+    fi
+fi
+
+if [ "$VIRT_TYPE" = "podman" ]; then
+    cat > /etc/containers/storage.conf <<'EOF'
 [storage]
 driver = "overlay"
 runroot = "/run/containers/storage"
 graphroot = "/data/containers/storage"
 EOF
-mkdir -p /data/containers/storage
+    mkdir -p /data/containers/storage
+fi
 
 # ── IPv6 detection ────────────────────────────────────────────────────────────
 
@@ -370,6 +437,102 @@ if [[ "${_ipv6:-Y}" =~ ^[Yy]$ ]]; then
         [[ "${_fb:-Y}" =~ ^[Nn]$ ]] && { log "$(t "Aborted." "已退出。")"; exit 1; }
     fi
 fi
+
+# ── Network setup (conditional on virtualization type) ────────────────────────
+
+if [ "$VIRT_TYPE" = "cloudhv" ]; then
+    # Cloud-hypervisor: IPv6 detection and configuration
+    log "$(t "Setting up cloud-hypervisor network (Linux bridge)..." "配置 cloud-hypervisor 网络 (Linux bridge)...")"
+    mkdir -p /opt/vm-images/instances /run/cloud-hypervisor
+
+    # 检测 IPv6 可分配情况（支持任意前缀）
+    IPV6_MODE="none"
+    IPV6_SUBNET=""
+    IPV6_ADDR=""
+    IPV6_IFACE=""
+
+    # 尝试获取可分配的 IPv6 子网或地址
+    if [ "$IPV6_CONFIG" != "local" ]; then
+        IPV6_IFACE=$(echo "$IPV6_CONFIG" | cut -d'|' -f1)
+        IPV6_ADDR=$(echo "$IPV6_CONFIG" | cut -d'|' -f2)
+        IPV6_PREFIX=$(echo "$IPV6_CONFIG" | cut -d'|' -f3)
+
+        # 支持的前缀范围：/127 或更小（即使是 /64 也支持）
+        # 分配策略：从 /127 分配子网给 VM，如果 /127 则只支持 2 个 VM，等等
+        if [ "$IPV6_PREFIX" -le 127 ]; then
+            IPV6_MODE="subnet"
+            # 计算可分配子网：使用宿主机地址作为基准
+            # 例如：如果宿主机是 2001:db8::/64，则 VM 从 2001:db8::/64 中的 ::2, ::3... 分配
+            # 如果宿主机是 2001:db8:1:2::/127，则 VM 用对端地址
+
+            # Python3 计算可分配子网（Debian 13 标配）
+            read -r IPV6_SUBNET <<< "$(python3 - <<PYEOF
+import ipaddress
+host_prefix = int('$IPV6_PREFIX')
+# 可分配的最小单位是 /128（单个地址）
+# 为了支持多 VM，我们分配 /127 或 /128 级别的地址
+# 简化：直接用主地址段作为子网前缀
+addr = ipaddress.IPv6Address('$IPV6_ADDR')
+net = ipaddress.IPv6Network(f'{addr}/{host_prefix}', strict=False)
+# 返回网络地址（用作 VMs 分配的基准）
+print(str(net))
+PYEOF
+)"
+            log "$(t "✓ IPv6 subnet detected (/$IPV6_PREFIX): $IPV6_SUBNET, VMs will get independent addresses." "✓ 检测到 IPv6 子网 (/$IPV6_PREFIX): $IPV6_SUBNET，VM 将获得独立地址。")"
+        else
+            # 前缀 > 127，不支持（理论不存在）
+            log "$(t "✗ Invalid IPv6 prefix: /$IPV6_PREFIX (must be <= 127)" "✗ 无效的 IPv6 前缀: /$IPV6_PREFIX（必须 <= 127）")"
+            IPV6_MODE="none"
+        fi
+        
+        if [ "$IPV6_MODE" = "subnet" ]; then
+            # 先禁止 SLAAC 自动配置，防止后续再生成 /64 地址（保留 RA 默认路由）
+            sysctl -w "net.ipv6.conf.$IPV6_IFACE.autoconf=0" > /dev/null
+            echo "net.ipv6.conf.$IPV6_IFACE.autoconf=0" >> /etc/sysctl.d/99-narwhalcloud.conf
+            # 获取当前的默认 IPv6 网关
+            _gw6=$(ip -6 route show default dev "$IPV6_IFACE" | awk '{print $3}')
+
+            # 删除该网卡上所有 global scope 的 /64 地址（含隐私地址 mngtmpaddr），消除对应的 /64 内核连接路由。
+            while IFS= read -r _addr64; do
+                ip addr del "$_addr64" dev "$IPV6_IFACE" 2>/dev/null || true
+            done < <(ip -6 addr show dev "$IPV6_IFACE" scope global | awk '/inet6.*\/64/{print $2}')
+            
+            # 以 /128 重新添加宿主机公网地址，不产生连接路由
+            ip addr add "$IPV6_ADDR/128" dev "$IPV6_IFACE" 2>/dev/null || true
+            
+            # 恢复默认路由
+            if [ -n "$_gw6" ]; then
+                ip -6 route add default via "$_gw6" dev "$IPV6_IFACE" 2>/dev/null || true
+            fi
+            
+            log "$(t "✓ All /64 addresses removed, host IPv6 re-added as /128, SLAAC disabled." "✓ 已删除所有 /64 地址，宿主机 IPv6 已改为 /128，SLAAC 已禁用。")"
+        fi
+    fi
+
+    # 创建临时配置文件给 agent 启动时读取
+    mkdir -p "$AGENT_DATA_DIR"
+    cat > "$AGENT_DATA_DIR/ipv6-config.json" <<EOF
+{
+  "ipv6_mode": "$IPV6_MODE",
+  "ipv6_subnet": "$IPV6_SUBNET",
+  "ipv6_addr": "$IPV6_ADDR",
+  "ipv6_iface": "$IPV6_IFACE"
+}
+EOF
+    log "$(t "✓ IPv6 config written to $AGENT_DATA_DIR/ipv6-config.json" "✓ IPv6 配置已写入 $AGENT_DATA_DIR/ipv6-config.json")"
+
+    # Bridge creation will be handled by the agent's ensureBridge() on startup
+    log "$(t "✓ cloud-hypervisor directories created. Bridge will be created on agent startup." "✓ cloud-hypervisor 目录已创建。网桥将在 agent 启动时创建。")"
+
+    # 对于 cloudhv 的 subnet 模式，启用 NDP responder
+    if [ "$IPV6_MODE" = "subnet" ] && [ -n "$IPV6_SUBNET" ] && [ -n "$IPV6_IFACE" ]; then
+        NDP_EXTRA_FLAGS=" \\
+  --ndp-iface $IPV6_IFACE \\
+  --ndp-subnet $IPV6_SUBNET"
+        log "$(t "✓ NDP responder will be enabled for IPv6 subnet mode." "✓ NDP 响应器将在 IPv6 子网模式下启用。")"
+    fi
+else
+    # Podman: create Podman network
 
 if podman network exists "$PODMAN_NETWORK" 2>/dev/null; then
     log "$(t "Podman network $PODMAN_NETWORK already exists, skipping." "Podman 网络 $PODMAN_NETWORK 已存在，跳过创建。")"
@@ -411,13 +574,24 @@ PYEOF
     # 先禁止 SLAAC 自动配置，防止后续再生成 /64 地址（保留 RA 默认路由）
     sysctl -w "net.ipv6.conf.$IPV6_IFACE.autoconf=0" > /dev/null
     echo "net.ipv6.conf.$IPV6_IFACE.autoconf=0" >> /etc/sysctl.d/99-narwhalcloud.conf
+    
+    # 获取当前的默认 IPv6 网关
+    _gw6=$(ip -6 route show default dev "$IPV6_IFACE" | awk '{print $3}')
+
     # 删除该网卡上所有 global scope 的 /64 地址（含隐私地址 mngtmpaddr），
     # 消除对应的 /64 内核连接路由——netavark 检测到该路由时会拒绝创建子集子网。
     while IFS= read -r _addr64; do
         ip addr del "$_addr64" dev "$IPV6_IFACE" 2>/dev/null || true
     done < <(ip -6 addr show dev "$IPV6_IFACE" scope global | awk '/inet6.*\/64/{print $2}')
+    
     # 以 /128 重新添加宿主机公网地址，不产生连接路由
     ip addr add "$IPV6_ADDR/128" dev "$IPV6_IFACE" 2>/dev/null || true
+    
+    # 恢复默认路由
+    if [ -n "$_gw6" ]; then
+        ip -6 route add default via "$_gw6" dev "$IPV6_IFACE" 2>/dev/null || true
+    fi
+    
     log "$(t "✓ All /64 addresses removed, host IPv6 re-added as /128, SLAAC disabled." "✓ 已删除所有 /64 地址，宿主机 IPv6 已改为 /128，SLAAC 已禁用。")"
 
     # 先安装自定义 netavark（支持 snat_ipv6 选项），再操作网络
@@ -467,18 +641,62 @@ EOF
 start_service podman-restart
 
 # Pull container images
-log "$(t "Pulling container images..." "拉取容器镜像...")"
-for image in "docker.io/narwhalcloud/debian:podman" "docker.io/narwhalcloud/alpine:podman"; do
-    podman images --format "{{.Repository}}:{{.Tag}}" | grep -q "$image" \
-        && log "$(t "Image $image already exists." "镜像 $image 已存在。")" \
-        || { log "$(t "Pulling $image..." "拉取 $image...")"; podman pull "$image" \
-            || log "$(t "Warning: failed to pull $image" "警告: $image 拉取失败")"; }
-done
+    log "$(t "Pulling container images..." "拉取容器镜像...")"
+    for image in "docker.io/narwhalcloud/debian:podman" "docker.io/narwhalcloud/alpine:podman"; do
+        podman images --format "{{.Repository}}:{{.Tag}}" | grep -q "$image" \
+            && log "$(t "Image $image already exists." "镜像 $image 已存在。")" \
+            || { log "$(t "Pulling $image..." "拉取 $image...")"; podman pull "$image" \
+                || log "$(t "Warning: failed to pull $image" "警告: $image 拉取失败")"; }
+    done
+fi  # End of Podman vs cloud-hypervisor network setup
+
+# ── Cloud-hypervisor specific setup ────────────────────────────────────────────
+
+if [ "$VIRT_TYPE" = "cloudhv" ]; then
+    log "$(t "Setting up cloud-hypervisor..." "配置 cloud-hypervisor...")"
+
+    # Ensure agent bin directory exists
+    mkdir -p "$AGENT_BIN_DIR"
+
+    # Download cloud-hypervisor binary
+    if ! command -v cloud-hypervisor &>/dev/null && ! [ -f "$AGENT_BIN_DIR/cloud-hypervisor" ]; then
+        # 调试模式：检查本地文件
+        ch_local_name=""
+        case "$ARCH" in
+            amd64) ch_local_name="cloud-hypervisor-static" ;;
+            arm64) ch_local_name="cloud-hypervisor-static-aarch64" ;;
+            *) ch_local_name="cloud-hypervisor-static-$ARCH" ;;
+        esac
+
+        if [ -f "./$ch_local_name" ]; then
+            log "$(t "Found local cloud-hypervisor binary: ./$ch_local_name (debug mode)" "找到本地 cloud-hypervisor 二进制: ./$ch_local_name (调试模式)")"
+            cp "./$ch_local_name" "$AGENT_BIN_DIR/cloud-hypervisor"
+            chmod +x "$AGENT_BIN_DIR/cloud-hypervisor"
+            log "$(t "✓ cloud-hypervisor binary installed (from local)." "✓ cloud-hypervisor 二进制已安装 (来自本地)。")"
+        else
+            # 生产模式：从官方仓库下载
+            log "$(t "Downloading cloud-hypervisor binary from official repository..." "从官方仓库下载 cloud-hypervisor 二进制文件...")"
+            download_with_retry "$CLOUD_HYPERVISOR_BASE/$ch_local_name" "$AGENT_BIN_DIR/cloud-hypervisor"
+            chmod +x "$AGENT_BIN_DIR/cloud-hypervisor"
+            log "$(t "✓ cloud-hypervisor binary installed." "✓ cloud-hypervisor 二进制已安装。")"
+        fi
+    else
+        log "$(t "cloud-hypervisor binary already exists." "cloud-hypervisor 二进制已存在。")"
+    fi
+
+    # Download base VM images (Debian, Alpine)
+    log "$(t "Downloading base VM images..." "下载基础 VM 镜像...")"
+    if [ -f "./scripts/update-vm-images.sh" ]; then
+        bash ./scripts/update-vm-images.sh
+    else
+        log "$(t "Warning: update-vm-images.sh not found, skipping image download." "警告: 未找到 update-vm-images.sh，跳过镜像下载。")"
+    fi
+fi
 
 # ── Install agent ─────────────────────────────────────────────────────────────
 
 download_agent "$ARCH"
-write_service_file "$NDP_EXTRA_FLAGS"
+write_service_file "$VIRT_TYPE" "$NDP_EXTRA_FLAGS"
 start_service "$AGENT_SERVICE"
 
 # ── Optional rfw ─────────────────────────────────────────────────────────────
