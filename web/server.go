@@ -10,6 +10,7 @@ import (
 	"runman-agent/config"
 	"runman-agent/db"
 	"runman-agent/manager"
+	"runman-agent/manager/cloudhv"
 	"runman-agent/manager/portforward"
 	"runman-agent/monitor"
 	"runman-agent/proto/agent"
@@ -42,6 +43,7 @@ type Server struct {
 	db           *db.DB
 	cfg          *config.Manager
 	mgr          manager.VMManager
+	cloudHVMgr   *cloudhv.Manager // 如果使用 CloudHV，保存直接引用以便内存上报
 	hostMon      *monitor.HostMonitor
 	pf           *portforward.Manager
 	agent        interface{}
@@ -49,11 +51,20 @@ type Server struct {
 	vmSnapshotMu sync.Mutex
 }
 
-func NewServer(database *db.DB, mgr manager.VMManager, hostMon *monitor.HostMonitor, cfg *config.Manager, pf *portforward.Manager, agent interface{}) *Server {
+// NewServer 接收两个 manager：
+// - mgr (svc) 是 VMService 包装层
+// - rawMgr 是真正的驱动实现（CloudHV/Podman），用于内存上报等功能
+func NewServer(database *db.DB, mgr manager.VMManager, hostMon *monitor.HostMonitor, cfg *config.Manager, pf *portforward.Manager, agent interface{}, rawMgr manager.VMManager) *Server {
+	var cloudHVMgr *cloudhv.Manager
+	if ch, ok := rawMgr.(*cloudhv.Manager); ok {
+		cloudHVMgr = ch
+	}
+
 	return &Server{
 		db:          database,
 		cfg:         cfg,
 		mgr:         mgr,
+		cloudHVMgr:  cloudHVMgr,
 		hostMon:     hostMon,
 		pf:          pf,
 		agent:       agent,
@@ -63,8 +74,15 @@ func NewServer(database *db.DB, mgr manager.VMManager, hostMon *monitor.HostMoni
 
 // authMiddleware enforces HTTP Basic Auth when WebUser is configured.
 // If no credentials are stored in config the request passes through.
+// /api/vm-memory is always public (used by VMs to report memory stats).
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Skip auth for VM memory reporting endpoint (VMs use it)
+		if r.URL.Path == "/api/vm-memory" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		conf := s.cfg.Get()
 		if conf.WebUser == "" {
 			next.ServeHTTP(w, r)
@@ -99,7 +117,6 @@ func (s *Server) ListenAndServe(addr string) error {
 
 	// VM 单机操作
 	mux.HandleFunc("GET /api/vms/{id}", s.handleGetVM)
-	mux.HandleFunc("PATCH /api/vms/{id}", s.handleUpdateVM)
 	mux.HandleFunc("POST /api/vms/{id}/start", s.handleStartVM)
 	mux.HandleFunc("POST /api/vms/{id}/stop", s.handleStopVM)
 	mux.HandleFunc("POST /api/vms/{id}/restart", s.handleRestartVM)
@@ -115,6 +132,9 @@ func (s *Server) ListenAndServe(addr string) error {
 
 	// 控制台 TTY（WebSocket）
 	mux.HandleFunc("GET /api/vms/{id}/tty", s.handleVMTTY)
+
+	// 虚拟机内存上报
+	mux.HandleFunc("POST /api/vm-memory", s.handleVMMemory)
 
 	// 静态文件
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -456,31 +476,6 @@ func (s *Server) handleGetVM(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, info)
 }
 
-// updateVMRequest 对应 PATCH /api/vms/{id} 请求体，零值字段表示不修改。
-type updateVMRequest struct {
-	Cpu           int32 `json:"cpu"`
-	RamMb         int64 `json:"ram_mb"`
-	DiskGb        int64 `json:"disk_gb"`
-	BandwidthMbps int32 `json:"bandwidth_mbps"`
-}
-
-func (s *Server) handleUpdateVM(w http.ResponseWriter, r *http.Request) {
-	vmID := r.PathValue("id")
-	var req updateVMRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), 400)
-		return
-	}
-
-	ctx := r.Context()
-	if err := s.mgr.UpdateVM(ctx, vmID, req.Cpu, req.RamMb, req.DiskGb, req.BandwidthMbps); err != nil {
-		jsonErr(w, err, 500)
-		return
-	}
-
-	w.WriteHeader(http.StatusNoContent)
-}
-
 func (s *Server) handleStartVM(w http.ResponseWriter, r *http.Request) {
 	if err := s.mgr.StartVM(r.Context(), r.PathValue("id")); err != nil {
 		jsonErr(w, err, 500)
@@ -542,6 +537,9 @@ func (s *Server) handleReinstallVM(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "os_image and root_password are required", 400)
 		return
 	}
+
+	// 清理旧的端口转发规则（重装时会删除旧 VM，新 VM 需要重新添加）
+	s.pf.DeleteVM(r.Context(), vmID)
 
 	cmd := &agent.CmdReinstallVM{
 		VmId:          vmID,
@@ -694,6 +692,34 @@ func (w *wsWriter) Write(p []byte) (int, error) {
 		return 0, err
 	}
 	return len(p), nil
+}
+
+// handleVMMemory 接收虚拟机上报的内存信息（CloudHV only）
+func (s *Server) handleVMMemory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		VmID       string `json:"vm_id"`
+		RamUsedMb  int64  `json:"ram_used_mb"`
+		RamTotalMb int64  `json:"ram_total_mb"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	// 将内存信息交给 CloudHV Manager 处理（仅 CloudHV 支持）
+	if s.cloudHVMgr != nil {
+		s.cloudHVMgr.UpdateVMMemory(req.VmID, req.RamUsedMb, req.RamTotalMb)
+		jsonOK(w, map[string]string{"status": "ok"})
+		return
+	}
+
+	http.Error(w, "Not supported", http.StatusNotImplemented)
 }
 
 // handleVMTTY 升级 HTTP 连接为 WebSocket，并将其与 VM 控制台双向绑定。

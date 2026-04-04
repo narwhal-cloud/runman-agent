@@ -58,29 +58,57 @@ func (s *VMService) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error 
 }
 
 func (s *VMService) StartVM(ctx context.Context, vmID string) error {
-	return s.mgr.StartVM(ctx, vmID)
+	log.Printf("[StartVM] vmID=%s", vmID)
+	err := s.mgr.StartVM(ctx, vmID)
+	if err != nil {
+		log.Printf("[StartVM] error: vmID=%s, err=%v", vmID, err)
+	} else {
+		log.Printf("[StartVM] success: vmID=%s", vmID)
+	}
+	return err
 }
 
 func (s *VMService) StopVM(ctx context.Context, vmID string, force bool) error {
-	return s.mgr.StopVM(ctx, vmID, force)
+	forceStr := "graceful"
+	if force {
+		forceStr = "force"
+	}
+	log.Printf("[StopVM] vmID=%s, mode=%s", vmID, forceStr)
+	err := s.mgr.StopVM(ctx, vmID, force)
+	if err != nil {
+		log.Printf("[StopVM] error: vmID=%s, mode=%s, err=%v", vmID, forceStr, err)
+	} else {
+		log.Printf("[StopVM] success: vmID=%s, mode=%s", vmID, forceStr)
+	}
+	return err
 }
 
 func (s *VMService) RestartVM(ctx context.Context, vmID string) error {
-	return s.mgr.RestartVM(ctx, vmID)
+	log.Printf("[RestartVM] vmID=%s", vmID)
+	err := s.mgr.RestartVM(ctx, vmID)
+	if err != nil {
+		log.Printf("[RestartVM] error: vmID=%s, err=%v", vmID, err)
+	} else {
+		log.Printf("[RestartVM] success: vmID=%s", vmID)
+	}
+	return err
 }
 
 func (s *VMService) DeleteVM(ctx context.Context, vmID string) error {
-	return s.mgr.DeleteVM(ctx, vmID)
+	log.Printf("[DeleteVM] vmID=%s", vmID)
+	err := s.mgr.DeleteVM(ctx, vmID)
+	if err != nil {
+		log.Printf("[DeleteVM] error: vmID=%s, err=%v", vmID, err)
+	} else {
+		log.Printf("[DeleteVM] success: vmID=%s", vmID)
+	}
+	return err
 }
 
 // --- 配置与维护 ---
 
-func (s *VMService) UpdateVM(ctx context.Context, vmID string, cpu int32, ramMB int64, diskGB int64, bandwidthMBPS int32) error {
-	return s.mgr.UpdateVM(ctx, vmID, cpu, ramMB, diskGB, bandwidthMBPS)
-}
-
 func (s *VMService) ReinstallVM(ctx context.Context, req *agent.CmdReinstallVM) error {
-	// 驱动层会处理特定驱动配置的复用与重新分配
+	// 驱动层会处理特定驱动配置的复用与重新分配，并负责保存 VMConfig
 	return s.mgr.ReinstallVM(ctx, req)
 }
 

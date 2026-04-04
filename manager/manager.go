@@ -55,8 +55,7 @@ type VMManager interface {
 	RestartVM(ctx context.Context, vmID string) error
 	DeleteVM(ctx context.Context, vmID string) error
 
-	// UpdateVM 配置与维护
-	UpdateVM(ctx context.Context, vmID string, cpu int32, ramMB int64, diskGB int64, bandwidthMBPS int32) error
+	// 配置与维护
 	ReinstallVM(ctx context.Context, req *agent.CmdReinstallVM) error
 	ResetPassword(ctx context.Context, vmID, password string) error
 

@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -37,17 +38,26 @@ const (
 	tapBase        = "vm" // TAP name: vm2, vm3, ...
 )
 
+// vmMemoryInfo 虚拟机内部上报的内存信息
+type vmMemoryInfo struct {
+	RamUsedMb  int64
+	RamTotalMb int64
+	Timestamp  time.Time
+}
+
 // Manager 实现 VMManager 接口，管理多个 cloud-hypervisor 进程（每个 VM 一个进程）。
 type Manager struct {
 	binary      string // cloud-hypervisor 二进制路径
 	instDir     string // VM 实例数据目录 (imgDir/instances)
 	db          *db.DB
-	ipv6Mode    string // "none"/"subnet"/"snat"
-	ipv6Subnet  string // 可用子网，如 "2001:db8:1234::/64"（mode=subnet）
-	ipv6Addr    string // 单个公网 IPv6（mode=snat）
-	ipv6Iface   string // IPv6 所在网卡
-	ipv6Counter int    // 子网模式下的地址计数器（用于分配 ::2, ::3 等）
-	diskMbps    int    // 磁盘写入速率限制（Mbps）
+	ipv6Mode    string                   // "none"/"subnet"/"snat"
+	ipv6Subnet  string                   // 可用子网，如 "2001:db8:1234::/64"（mode=subnet）
+	ipv6Addr    string                   // 单个公网 IPv6（mode=snat）
+	ipv6Iface   string                   // IPv6 所在网卡
+	ipv6Counter int                      // 子网模式下的地址计数器（用于分配 ::2, ::3 等）
+	diskMbps    int                      // 磁盘写入速率限制（Mbps）
+	vmMemory    map[string]*vmMemoryInfo // 虚拟机上报的内存信息
+	vmMemMu     sync.RWMutex
 }
 
 // --- REST API 请求/响应结构体 ---
@@ -181,6 +191,7 @@ func New(database *db.DB, ipv6Mode, ipv6Subnet, ipv6Addr, ipv6Iface string, disk
 		ipv6Iface:   ipv6Iface,
 		ipv6Counter: 2, // 从 ::2 开始分配
 		diskMbps:    diskMbps,
+		vmMemory:    make(map[string]*vmMemoryInfo),
 	}
 	if m.ipv6Mode == "" {
 		m.ipv6Mode = "none"
@@ -303,6 +314,7 @@ func (m *Manager) allocNetwork(vmID string) (*netConfig, error) {
 	// 分配新 idx
 	idx, err := m.db.NextCloudHVIdx()
 	if err != nil {
+		log.Printf("[allocNetwork] error: failed to allocate idx: %v", err)
 		return nil, fmt.Errorf("no free IP indices available: %w", err)
 	}
 
@@ -326,8 +338,10 @@ func (m *Manager) allocNetwork(vmID string) (*netConfig, error) {
 		IPv6: ipv6,
 	}
 	if err := m.db.SaveCloudHVConfig(conf); err != nil {
+		log.Printf("[allocNetwork] error: failed to save config: %v", err)
 		return nil, fmt.Errorf("save network config: %w", err)
 	}
+	log.Printf("[allocNetwork] allocated new network: vmID=%s idx=%d tap=vm%d ipv4=%s ipv6=%s", vmID, idx, idx, ipv4, ipv6)
 
 	return m.netConfigFromDB(conf), nil
 }
@@ -381,18 +395,34 @@ func (m *Manager) setupNetwork(net *netConfig) error {
 	// 创建 TAP 设备（若已存在则跳过）
 	tapExists := runCmd("ip", "link", "show", net.Tap) == nil
 	if !tapExists {
+		log.Printf("[setupNetwork] creating TAP device: %s", net.Tap)
 		if err := runCmd("ip", "tuntap", "add", net.Tap, "mode", "tap"); err != nil {
+			log.Printf("[setupNetwork] error: failed to create TAP device %s: %v", net.Tap, err)
 			return fmt.Errorf("create tap %s: %w", net.Tap, err)
 		}
+		log.Printf("[setupNetwork] TAP device created: %s", net.Tap)
+	} else {
+		log.Printf("[setupNetwork] TAP device already exists: %s", net.Tap)
 	}
 
 	// 加入 bridge 并启动
-	_ = runCmd("ip", "link", "set", net.Tap, "master", bridge)
-	_ = runCmd("ip", "link", "set", net.Tap, "up")
+	if err := runCmd("ip", "link", "set", net.Tap, "master", bridge); err != nil {
+		log.Printf("[setupNetwork] error: failed to add TAP to bridge: %v", err)
+	}
+	if err := runCmd("ip", "link", "set", net.Tap, "up"); err != nil {
+		log.Printf("[setupNetwork] error: failed to bring TAP up: %v", err)
+	}
+	log.Printf("[setupNetwork] TAP added to bridge and brought up: %s", net.Tap)
 
 	// 开启 TAP 设备的 proxy_ndp，帮助 VM 和外部跨网桥顺畅沟通
-	_ = os.WriteFile(fmt.Sprintf("/proc/sys/net/ipv6/conf/%s/proxy_ndp", net.Tap), []byte("1"), 0644)
-	_ = os.WriteFile(fmt.Sprintf("/proc/sys/net/ipv6/conf/%s/forwarding", net.Tap), []byte("1"), 0644)
+	proxyNdpPath := fmt.Sprintf("/proc/sys/net/ipv6/conf/%s/proxy_ndp", net.Tap)
+	if err := os.WriteFile(proxyNdpPath, []byte("1"), 0644); err != nil {
+		log.Printf("[setupNetwork] warning: failed to enable proxy_ndp on %s: %v", net.Tap, err)
+	}
+	forwardingPath := fmt.Sprintf("/proc/sys/net/ipv6/conf/%s/forwarding", net.Tap)
+	if err := os.WriteFile(forwardingPath, []byte("1"), 0644); err != nil {
+		log.Printf("[setupNetwork] warning: failed to enable forwarding on %s: %v", net.Tap, err)
+	}
 
 	// IPv6 模式特定配置
 	if net.IPv6 != "" {
@@ -457,6 +487,46 @@ func (m *Manager) genCloudInit(vmID, distro, password string, net *netConfig) er
 	_ = os.MkdirAll(ciDir, 0755)
 
 	// 必须严格遵守 YAML 缩进格式
+	// 根据 distro 选择包管理器和服务启动方式
+	var pkgMgr, svcRestart, svcFile, svcEnable string
+	if distro == "alpine" {
+		pkgMgr = "apk add --no-cache"
+		svcRestart = "rc-service sshd restart 2>/dev/null || service sshd restart 2>/dev/null || true"
+		svcFile = `  - path: /etc/init.d/report-memory
+    content: |
+      #!/sbin/openrc-run
+      description="Report VM memory usage to agent"
+      command="/usr/local/bin/report-memory.sh"
+      command_background=true
+      pidfile="/var/run/report-memory.pid"
+    permissions: '0755'`
+		svcEnable = `  - rc-update add report-memory default
+  - rc-service report-memory start`
+	} else {
+		pkgMgr = "apt-get update && apt-get install -y"
+		svcRestart = "systemctl restart sshd 2>/dev/null || service sshd restart 2>/dev/null || true"
+		svcFile = `  - path: /etc/systemd/system/report-memory.service
+    content: |
+      [Unit]
+      Description=Report VM memory usage to agent
+      After=network.target
+
+      [Service]
+      Type=simple
+      ExecStart=/usr/local/bin/report-memory.sh
+      Restart=always
+      RestartSec=10
+      StandardOutput=journal
+      StandardError=journal
+
+      [Install]
+      WantedBy=multi-user.target
+    permissions: '0644'`
+		svcEnable = `  - systemctl daemon-reload
+  - systemctl enable report-memory.service
+  - systemctl start report-memory.service`
+	}
+
 	userData := fmt.Sprintf(`#cloud-config
 ssh_pwauth: true
 chpasswd:
@@ -472,10 +542,28 @@ write_files:
       nameserver 1.1.1.1
       nameserver 2606:4700:4700::1111
     permissions: '0644'
+  - path: /usr/local/bin/report-memory.sh
+    content: |
+      #!/bin/sh
+      VMID="%s"
+      while true; do
+        MEM_USED=$(free -m 2>/dev/null | awk 'NR==2 {print $3}' || echo 0)
+        MEM_TOTAL=$(free -m 2>/dev/null | awk 'NR==2 {print $2}' || echo 0)
+        if [ "$MEM_USED" -gt 0 ] && [ "$MEM_TOTAL" -gt 0 ]; then
+          curl -s -X POST http://10.91.0.1:8792/api/vm-memory \
+            -H "Content-Type: application/json" \
+            -d "{\"vm_id\":\"$VMID\",\"ram_used_mb\":$MEM_USED,\"ram_total_mb\":$MEM_TOTAL}" > /dev/null 2>&1
+        fi
+        sleep 30
+      done
+    permissions: '0755'
+%s
 runcmd:
   - sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
-  - systemctl restart sshd 2>/dev/null || service sshd restart 2>/dev/null || true
-`, password)
+  - %s
+  - %s curl
+%s
+`, password, vmID, svcFile, svcRestart, pkgMgr, svcEnable)
 
 	metaData := fmt.Sprintf("instance-id: %s\nlocal-hostname: %s\n", vmID, vmID)
 
@@ -745,7 +833,16 @@ func (m *Manager) saveInstanceConfig(vmID string, cfg *instanceConfig) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(m.instDir, vmID, "config.json"), data, 0644)
+	dir := filepath.Join(m.instDir, vmID)
+	// 确保目录存在
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", dir, err)
+	}
+	cfgPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfgPath, data, 0644); err != nil {
+		return fmt.Errorf("write config %s: %w", cfgPath, err)
+	}
+	return nil
 }
 
 // ─── buildVmConfig 根据实例配置构造 REST API 请求 ────────────────────────────
@@ -849,7 +946,7 @@ func (m *Manager) buildVmConfig(vmID string, icfg *instanceConfig, net *netConfi
 }
 
 func (m *Manager) CreateVM(_ context.Context, req *agent.CmdCreateVM) error {
-	log.Printf("[CreateVM] vmID=%s image=%s cpu=%d ramMb=%d diskGb=%d", req.VmId, req.OsImage, req.Cpu, req.RamMb, req.DiskGb)
+	log.Printf("[CreateVM] start: vmID=%s image=%s cpu=%d ramMb=%d diskGb=%d", req.VmId, req.OsImage, req.Cpu, req.RamMb, req.DiskGb)
 
 	// 限制最低配置：CPU 1核，内存 256MB，磁盘 3GB
 	if req.Cpu < 1 {
@@ -863,7 +960,11 @@ func (m *Manager) CreateVM(_ context.Context, req *agent.CmdCreateVM) error {
 	}
 
 	dir := filepath.Join(m.instDir, req.VmId)
+	// 确保目录干净（重装时删除旧目录）
+	_ = os.RemoveAll(dir)
+	log.Printf("[CreateVM] directory cleaned: %s", dir)
 	if err := os.MkdirAll(dir, 0755); err != nil {
+		log.Printf("[CreateVM] error: failed to create directory: %v", err)
 		return err
 	}
 
@@ -876,52 +977,88 @@ func (m *Manager) CreateVM(_ context.Context, req *agent.CmdCreateVM) error {
 	}
 
 	if err := m.saveInstanceConfig(req.VmId, icfg); err != nil {
+		log.Printf("[CreateVM] error: failed to save config: %v", err)
 		return err
 	}
+	log.Printf("[CreateVM] config saved: vmID=%s", req.VmId)
 
 	srcCmdline := filepath.Join(imgDir, req.OsImage, "cmdline")
 	cmdlineData, readErr := os.ReadFile(srcCmdline)
 	if readErr != nil {
+		log.Printf("[CreateVM] error: cmdline not found for distro %q: %v", req.OsImage, readErr)
 		return fmt.Errorf("cmdline not found for distro %q: %w", req.OsImage, readErr)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "cmdline"), cmdlineData, 0644); err != nil {
+		log.Printf("[CreateVM] error: failed to write cmdline: %v", err)
 		return err
 	}
+	log.Printf("[CreateVM] cmdline written: %s", req.OsImage)
 
 	netCfg, err := m.allocNetwork(req.VmId)
 	if err != nil {
+		log.Printf("[CreateVM] error: failed to allocate network: %v", err)
 		return err
 	}
+	log.Printf("[CreateVM] network allocated: tap=%s ipv4=%s ipv6=%s", netCfg.Tap, netCfg.IPv4, netCfg.IPv6)
 
 	if err := m.prepareDisks(req.VmId, req.OsImage, req.DiskGb); err != nil {
+		log.Printf("[CreateVM] error: failed to prepare disks: %v", err)
 		return err
 	}
+	log.Printf("[CreateVM] disks prepared: vmID=%s", req.VmId)
 
 	if err := m.genCloudInit(req.VmId, req.OsImage, req.RootPassword, netCfg); err != nil {
+		log.Printf("[CreateVM] error: failed to generate cloud-init: %v", err)
 		return err
 	}
+	log.Printf("[CreateVM] cloud-init generated: vmID=%s", req.VmId)
 
 	if err := m.setupNetwork(netCfg); err != nil {
+		log.Printf("[CreateVM] error: failed to setup network: %v", err)
 		return err
 	}
+	log.Printf("[CreateVM] network setup completed: tap=%s", netCfg.Tap)
 
 	if err := m.launchProcess(req.VmId); err != nil {
+		log.Printf("[CreateVM] error: failed to launch process: %v", err)
 		return err
 	}
+	log.Printf("[CreateVM] process launched: vmID=%s", req.VmId)
 
 	vmCfg, err := m.buildVmConfig(req.VmId, icfg, netCfg)
 	if err != nil {
+		log.Printf("[CreateVM] error: failed to build vm config: %v", err)
 		return err
 	}
 	if err := m.apiPut(req.VmId, "vm.create", vmCfg); err != nil {
+		log.Printf("[CreateVM] error: vm.create API failed: %v", err)
 		return err
 	}
+	log.Printf("[CreateVM] vm.create API called: vmID=%s", req.VmId)
 
 	if err := m.apiPut(req.VmId, "vm.boot", nil); err != nil {
+		log.Printf("[CreateVM] error: vm.boot API failed: %v", err)
 		return err
 	}
+	log.Printf("[CreateVM] vm.boot API called: vmID=%s", req.VmId)
 
-	log.Printf("[CloudHV] CreateVM %s completed successfully", req.VmId)
+	// 保存业务层通用配置到数据库
+	bizConf, _ := m.db.GetVMConfig(req.VmId)
+	if bizConf == nil {
+		bizConf = &db.VMConfig{VMID: req.VmId}
+	}
+	bizConf.CPU = int(req.Cpu)
+	bizConf.MemoryMB = req.RamMb
+	bizConf.DiskGB = req.DiskGb
+	bizConf.Image = req.OsImage
+	bizConf.Status = "running"
+	if err := m.db.SaveVMConfig(bizConf); err != nil {
+		log.Printf("[CreateVM] warning: SaveVMConfig failed: %v", err)
+	}
+	log.Printf("[CreateVM] VMConfig saved: vmID=%s cpu=%d ram=%dMB disk=%dGB image=%s",
+		req.VmId, req.Cpu, req.RamMb, req.DiskGb, req.OsImage)
+
+	log.Printf("[CreateVM] success: vmID=%s", req.VmId)
 	return nil
 }
 
@@ -1001,20 +1138,28 @@ func (m *Manager) RestartVM(_ context.Context, vmID string) error {
 }
 
 func (m *Manager) DeleteVM(_ context.Context, vmID string) error {
-	_ = m.db.DeleteVMConfig(vmID)
-	_ = m.db.DeleteCloudHVConfig(vmID)
+	log.Printf("[DeleteVM] vmID=%s", vmID)
 
 	if m.isRunning(vmID) {
+		log.Printf("[DeleteVM] stopping running VM: %s", vmID)
 		_ = m.apiPut(vmID, "vm.shutdown", nil)
 		time.Sleep(3 * time.Second)
 		_ = m.killProcess(vmID)
+		log.Printf("[DeleteVM] VM stopped: %s", vmID)
 	}
 
+	// 获取网络配置（在删除 DB 记录之前）
 	netCfg, err := m.allocNetwork(vmID)
 	if err == nil {
-		_ = runCmd("ip", "link", "delete", netCfg.Tap)
+		log.Printf("[DeleteVM] deleting TAP device: %s", netCfg.Tap)
+		if err := runCmd("ip", "link", "delete", netCfg.Tap); err != nil {
+			log.Printf("[DeleteVM] warning: failed to delete TAP device: %v", err)
+		}
+	} else {
+		log.Printf("[DeleteVM] warning: failed to get network config: %v", err)
 	}
 
+	// 清理运行时文件
 	for _, f := range []string{
 		m.pidFile(vmID),
 		m.sockPath(vmID),
@@ -1024,68 +1169,29 @@ func (m *Manager) DeleteVM(_ context.Context, vmID string) error {
 		_ = os.Remove(f)
 	}
 
-	return os.RemoveAll(filepath.Join(m.instDir, vmID))
-}
+	// 最后才删除 DB 记录
+	_ = m.db.DeleteVMConfig(vmID)
+	_ = m.db.DeleteCloudHVConfig(vmID)
+	log.Printf("[DeleteVM] database records deleted: %s", vmID)
 
-func (m *Manager) UpdateVM(_ context.Context, vmID string, cpu int32, ramMB int64, diskGB int64, bandwidthMBPS int32) error {
-	if !m.isRunning(vmID) {
-		return fmt.Errorf("VM %q is not running", vmID)
-	}
-
-	// 限制最低配置
-	if ramMB > 0 && ramMB < 256 {
-		ramMB = 256
-	}
-	if diskGB > 0 && diskGB < 3 {
-		diskGB = 3
-	}
-
-	icfg, err := m.loadInstanceConfig(vmID)
-	if err != nil {
+	// 删除实例目录
+	instPath := filepath.Join(m.instDir, vmID)
+	if err := os.RemoveAll(instPath); err != nil {
+		log.Printf("[DeleteVM] error: failed to remove instance directory %q: %v", instPath, err)
 		return err
 	}
-
-	resizeReq := &vmResizeReq{}
-	needResize := false
-
-	if cpu > 0 {
-		v := int(cpu)
-		resizeReq.DesiredVcpus = &v
-		icfg.CPU = v
-		needResize = true
-	}
-	if ramMB > 0 {
-		b := ramMB * 1024 * 1024
-		resizeReq.DesiredRam = &b
-		icfg.MemoryMB = ramMB
-		needResize = true
-	}
-
-	if bandwidthMBPS > 0 {
-		icfg.BandwidthMbps = int(bandwidthMBPS)
-		nc, netErr := m.allocNetwork(vmID)
-		if netErr == nil {
-			_ = m.apiPut(vmID, "vm.remove-device", &vmRemoveDevice{ID: "net0"})
-			newNet := netCfg{
-				Tap:               nc.Tap,
-				Mac:               nc.MAC,
-				ID:                "net0",
-				RateLimiterConfig: buildNetRateLimit(icfg.BandwidthMbps),
-			}
-			_ = m.apiPut(vmID, "vm.add-net", &newNet)
-		}
-	}
-
-	_ = m.saveInstanceConfig(vmID, icfg)
-
-	if !needResize {
-		return nil
-	}
-	return m.apiPut(vmID, "vm.resize", resizeReq)
+	log.Printf("[DeleteVM] success: instance directory removed: %s", vmID)
+	return nil
 }
 
 func (m *Manager) ReinstallVM(ctx context.Context, req *agent.CmdReinstallVM) error {
-	_ = m.DeleteVM(ctx, req.VmId)
+	log.Printf("[ReinstallVM] start: vmID=%s image=%s", req.VmId, req.OsImage)
+	if err := m.DeleteVM(ctx, req.VmId); err != nil {
+		log.Printf("[ReinstallVM] warning: DeleteVM returned error: %v", err)
+		// 继续重建，不因为删除失败而中止
+	}
+	log.Printf("[ReinstallVM] deleted old VM, now creating new one: vmID=%s", req.VmId)
+	// CreateVM 会先删除旧目录再重建，确保干净的重装
 	return m.CreateVM(ctx, &agent.CmdCreateVM{
 		VmId:         req.VmId,
 		OsImage:      req.OsImage,
@@ -1172,6 +1278,7 @@ func (m *Manager) ListVMs(_ context.Context) ([]*agent.VMSummary, error) {
 		}
 		vmID := e.Name()
 		if _, err := m.loadInstanceConfig(vmID); err != nil {
+			log.Printf("[ListVMs] WARNING: failed to load config for %s: %v", vmID, err)
 			continue
 		}
 
@@ -1327,6 +1434,10 @@ func (m *Manager) killProcess(vmID string) error {
 }
 
 func (m *Manager) getUsage(vmID string) (cpuPct float32, ramUsedMb int64) {
+	// 获取虚拟机上报的内存信息（或配置值）
+	ramUsedMb, _ = m.GetVMMemory(vmID)
+
+	// CPU 使用率：从 cloud-hypervisor 进程获取
 	data, err := os.ReadFile(m.pidFile(vmID))
 	if err != nil {
 		return
@@ -1344,10 +1455,6 @@ func (m *Manager) getUsage(vmID string) (cpuPct float32, ramUsedMb int64) {
 	pct, _ := p.CPUPercent()
 	cpuPct = float32(pct)
 
-	mem, _ := p.MemoryInfo()
-	if mem != nil {
-		ramUsedMb = int64(mem.RSS / 1024 / 1024)
-	}
 	return
 }
 
@@ -1491,4 +1598,34 @@ func buildNetRateLimit(mbps int) *rateLimiterConfig {
 		RefillTime:   1000,
 	}
 	return &rateLimiterConfig{Bandwidth: bucket}
+}
+
+// UpdateVMMemory 接收虚拟机上报的内存信息
+// 路由: POST /api/vm-memory
+func (m *Manager) UpdateVMMemory(vmID string, usedMb, totalMb int64) {
+	m.vmMemMu.Lock()
+	defer m.vmMemMu.Unlock()
+	m.vmMemory[vmID] = &vmMemoryInfo{
+		RamUsedMb:  usedMb,
+		RamTotalMb: totalMb,
+		Timestamp:  time.Now(),
+	}
+}
+
+// GetVMMemory 获取虚拟机的内存信息（从虚拟机上报或配置）
+func (m *Manager) GetVMMemory(vmID string) (usedMb, totalMb int64) {
+	m.vmMemMu.RLock()
+	memInfo, exists := m.vmMemory[vmID]
+	m.vmMemMu.RUnlock()
+
+	if exists && time.Since(memInfo.Timestamp) < 5*time.Minute {
+		// 使用虚拟机上报的数据（5分钟内有效）
+		return memInfo.RamUsedMb, memInfo.RamTotalMb
+	}
+
+	// 返回虚拟机配置的内存值（作为总量）
+	if icfg, err := m.loadInstanceConfig(vmID); err == nil {
+		return 0, icfg.MemoryMB
+	}
+	return 0, 0
 }

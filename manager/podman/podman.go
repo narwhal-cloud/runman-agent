@@ -20,7 +20,6 @@ import (
 	"github.com/containers/podman/v5/pkg/bindings"
 	"github.com/containers/podman/v5/pkg/bindings/containers"
 	"github.com/containers/podman/v5/pkg/bindings/images"
-	containerTypes "github.com/containers/podman/v5/pkg/domain/entities/types"
 	"github.com/containers/podman/v5/pkg/specgen"
 	dockerContainer "github.com/docker/docker/api/types/container"
 	"github.com/opencontainers/runtime-spec/specs-go"
@@ -407,46 +406,6 @@ func (m *Manager) RestartVM(_ context.Context, vmID string) error {
 func (m *Manager) DeleteVM(_ context.Context, vmID string) error {
 	_ = m.db.DeleteVMConfig(vmID)
 	return m.deleteByID(vmID)
-}
-
-func (m *Manager) UpdateVM(_ context.Context, vmID string, cpu int32, ramMB int64, _ int64, _ int32) error {
-	resources := specs.LinuxResources{}
-	changed := false
-	if cpu > 0 {
-		var cpuSet string
-		if conf, err := m.db.GetPodmanConfig(vmID); err == nil {
-			m.alloc.Release(conf.Cpuset)
-			cpuSet, _ = m.alloc.Allocate(int(cpu))
-			conf.Cpuset = cpuSet
-			_ = m.db.SavePodmanConfig(conf)
-		} else {
-			cpuSet, _ = m.alloc.Allocate(int(cpu))
-		}
-
-		resources.CPU = &specs.LinuxCPU{
-			Quota:  ptr(int64(100000) * int64(cpu)),
-			Period: ptr(uint64(100000)),
-			Cpus:   cpuSet,
-		}
-		changed = true
-	}
-	if ramMB > 0 {
-		if ramMB < 128 {
-			ramMB = 128
-		}
-		resources.Memory = &specs.LinuxMemory{
-			Limit: ptr(ramMB * 1024 * 1024),
-		}
-		changed = true
-	}
-	if !changed {
-		return nil
-	}
-	_, err := containers.Update(m.timeoutCtx(), &containerTypes.ContainerUpdateOptions{
-		NameOrID:  vmID,
-		Resources: &resources,
-	})
-	return err
 }
 
 func (m *Manager) ReinstallVM(ctx context.Context, req *agent.CmdReinstallVM) error {

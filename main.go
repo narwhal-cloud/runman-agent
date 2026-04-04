@@ -133,7 +133,8 @@ func main() {
 	}
 
 	// 启动本地 Web 状态页，供运维人员直接查看节点信息
-	ws := web.NewServer(database, svc, hostMon, cfg, a.pf, a)
+	// 同时传入 rawMgr 以便 Web 服务能访问具体的 Manager 实现（如 CloudHV 的内存报告）
+	ws := web.NewServer(database, svc, hostMon, cfg, a.pf, a, rawMgr)
 	go func() {
 		log.Printf("Starting web server on %s", conf.Web)
 		_ = ws.ListenAndServe(conf.Web)
@@ -366,8 +367,12 @@ func (a *Agent) handleCommand(stream agent.AgentGateway_ConnectClient, env *agen
 		err = a.mgr.CreateVM(ctx, p.CreateVm)
 
 	case *agent.PlatformEnvelope_ReinstallVm:
+		// 清理旧的端口转发规则（重装时会删除旧 VM，新 VM 需要重新添加）
+		a.pf.DeleteVM(ctx, p.ReinstallVm.VmId)
+
 		_, err = a.db.GetVMConfig(p.ReinstallVm.VmId)
 		if err != nil {
+			// 母鸡 DB 丢失，直接创建
 			err = a.mgr.CreateVM(ctx, &agent.CmdCreateVM{
 				VmId:          p.ReinstallVm.VmId,
 				Cpu:           p.ReinstallVm.Cpu,
@@ -378,9 +383,9 @@ func (a *Agent) handleCommand(stream agent.AgentGateway_ConnectClient, env *agen
 				RootPassword:  p.ReinstallVm.RootPassword,
 			})
 		} else {
+			// 正常重装流程
 			err = a.mgr.ReinstallVM(ctx, p.ReinstallVm)
 		}
-		a.pf.RefreshVM(ctx, p.ReinstallVm.VmId)
 	case *agent.PlatformEnvelope_DeleteVm:
 		err = a.mgr.DeleteVM(ctx, p.DeleteVm.VmId)
 		_ = a.db.DeleteVMConfig(p.DeleteVm.VmId)
