@@ -30,11 +30,19 @@ var wsUpgrader = websocket.Upgrader{
 }
 
 type Server struct {
-	db      *db.DB
-	mgr     manager.VMManager
-	hostMon *monitor.HostMonitor
-	pf      *portforward.Manager
-	agent   interface{}
+	db        *db.DB
+	mgr       manager.VMManager
+	hostMon   *monitor.HostMonitor
+	pf        *portforward.Manager
+	agent     interface{}
+	vmStats   map[string]*vmLastStats
+	vmStatsMu sync.Mutex
+}
+
+type vmLastStats struct {
+	lastIn   int64
+	lastOut  int64
+	lastTime time.Time
 }
 
 func NewServer(database *db.DB, mgr manager.VMManager, hostMon *monitor.HostMonitor, pf *portforward.Manager, agent interface{}) *Server {
@@ -44,6 +52,7 @@ func NewServer(database *db.DB, mgr manager.VMManager, hostMon *monitor.HostMoni
 		hostMon: hostMon,
 		pf:      pf,
 		agent:   agent,
+		vmStats: make(map[string]*vmLastStats),
 	}
 }
 
@@ -283,6 +292,8 @@ type vmListItem struct {
 	RamTotalMb        int64    `json:"ram_total_mb"`
 	TrafficInBytes    int64    `json:"traffic_in_bytes"`
 	TrafficOutBytes   int64    `json:"traffic_out_bytes"`
+	NetInBps          int64    `json:"net_in_bps"`
+	NetOutBps         int64    `json:"net_out_bps"`
 	MonthlyTrafficIn  int64    `json:"monthly_traffic_in"`
 	MonthlyTrafficOut int64    `json:"monthly_traffic_out"`
 	Ips               []string `json:"ips"`
@@ -290,6 +301,10 @@ type vmListItem struct {
 
 func (s *Server) handleListVMs(w http.ResponseWriter, r *http.Request) {
 	vms, _ := s.mgr.ListVMs(r.Context())
+
+	s.vmStatsMu.Lock()
+	defer s.vmStatsMu.Unlock()
+	now := time.Now()
 
 	items := make([]vmListItem, len(vms))
 	for i, vm := range vms {
@@ -309,6 +324,27 @@ func (s *Server) handleListVMs(w http.ResponseWriter, r *http.Request) {
 			item.TrafficInBytes = t.TotalIn
 			item.TrafficOutBytes = t.TotalOut
 		}
+
+		// 计算实时速率
+		if stats, ok := s.vmStats[vm.VmId]; ok {
+			elapsed := now.Sub(stats.lastTime).Seconds()
+			if elapsed > 0.5 {
+				item.NetInBps = int64(float64(item.TrafficInBytes-stats.lastIn) / elapsed)
+				item.NetOutBps = int64(float64(item.TrafficOutBytes-stats.lastOut) / elapsed)
+				if item.NetInBps < 0 {
+					item.NetInBps = 0
+				}
+				if item.NetOutBps < 0 {
+					item.NetOutBps = 0
+				}
+			}
+		}
+		s.vmStats[vm.VmId] = &vmLastStats{
+			lastIn:   item.TrafficInBytes,
+			lastOut:  item.TrafficOutBytes,
+			lastTime: now,
+		}
+
 		if conf, _ := s.db.GetVMConfig(vm.VmId); conf != nil {
 			item.RamTotalMb = conf.MemoryMB
 		}

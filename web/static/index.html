@@ -366,7 +366,7 @@
                 <button onclick="closeConsole()" class="text-gray-500 hover:text-gray-300 text-xl leading-none">&times;</button>
             </div>
         </div>
-        <div id="terminal-container" class="flex-1 p-3 overflow-hidden bg-black"></div>
+        <div id="terminal-container" class="flex-1 overflow-hidden bg-black"></div>
         <!-- Resize handle for better visibility -->
         <div class="absolute bottom-0 right-0 w-4 h-4 cursor-nwse-resize z-10 opacity-30 hover:opacity-100 transition-opacity pointer-events-none">
             <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2"><path d="M21 15L15 21M21 8L8 21"/></svg>
@@ -514,6 +514,10 @@ async function refreshVMs() {
                 <div class="text-slate-500"><span class="text-[9px] font-bold uppercase w-8 inline-block">RAM</span> ${vm.ram_used_mb||0}/${vm.ram_total_mb||'?'} MB</div>
             </td>
             <td class="px-4 py-3 font-mono text-[10px] text-slate-400 space-y-0.5 whitespace-nowrap">
+                <div class="flex flex-col mb-1 border-b border-slate-100 pb-1">
+                    <span class="text-sky-500 font-bold">↓ ${formatBps((vm.net_in_bps||0)*8)}</span>
+                    <span class="text-indigo-500 font-bold">↑ ${formatBps((vm.net_out_bps||0)*8)}</span>
+                </div>
                 <div title="Total Traffic">
                     ↓ ${formatBytes(vm.traffic_in_bytes||0)} / ↑ ${formatBytes(vm.traffic_out_bytes||0)}
                 </div>
