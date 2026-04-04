@@ -91,8 +91,8 @@
                 <div class="text-sm font-bold text-sky-500">↓ <span id="net-in-rate">0 bps</span></div>
             </div>
             <div class="flex gap-4 mt-2 text-[10px] font-mono text-slate-400">
-                <span>Total ↑ <span id="net-out-total">0 B</span></span>
-                <span>↓ <span id="net-in-total">0 B</span></span>
+                <span title="Monthly Outbound">MTD ↑ <span id="net-out-month">0 B</span></span>
+                <span title="Monthly Inbound">↓ <span id="net-in-month">0 B</span></span>
             </div>
             <p class="text-[10px] text-slate-400 mt-1">BW: <span id="bandwidth">--</span> Mbps &nbsp;|&nbsp; Up: <span id="uptime">--</span></p>
         </div>
@@ -479,8 +479,8 @@ async function refreshStatus() {
         if (d.disk_total_gb) $('disk-bar').style.width = (d.disk_used_gb/d.disk_total_gb*100)+'%';
         $('net-out-rate').textContent = formatBps((d.net_out_bps||0)*8);
         $('net-in-rate').textContent  = formatBps((d.net_in_bps||0)*8);
-        $('net-out-total').textContent = formatBytes(d.net_out_total||0);
-        $('net-in-total').textContent  = formatBytes(d.net_in_total||0);
+        $('net-out-month').textContent = formatBytes(d.month_out_total||0);
+        $('net-in-month').textContent  = formatBytes(d.month_in_total||0);
         $('bandwidth').textContent = d.bandwidth_mbps||'--';
         $('uptime').textContent = d.uptime ? formatUptime(d.uptime) : '--';
     } catch(e){}
@@ -517,9 +517,6 @@ async function refreshVMs() {
                 <div class="flex flex-col mb-1 border-b border-slate-100 pb-1">
                     <span class="text-sky-500 font-bold">↓ ${formatBps((vm.net_in_bps||0)*8)}</span>
                     <span class="text-indigo-500 font-bold">↑ ${formatBps((vm.net_out_bps||0)*8)}</span>
-                </div>
-                <div title="Total Traffic">
-                    ↓ ${formatBytes(vm.traffic_in_bytes||0)} / ↑ ${formatBytes(vm.traffic_out_bytes||0)}
                 </div>
                 <div class="text-indigo-400 font-bold" title="Monthly Traffic">
                     📅 ↓ ${formatBytes(vm.monthly_traffic_in||0)} / ↑ ${formatBytes(vm.monthly_traffic_out||0)}

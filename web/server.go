@@ -148,6 +148,12 @@ func jsonErr(w http.ResponseWriter, err error, code int) {
 
 // ─── 系统 ──────────────────────────────────────────────────────────────────────
 
+type hostStatusResponse struct {
+	*monitor.HostStats
+	MonthInTotal  int64 `json:"month_in_total"`
+	MonthOutTotal int64 `json:"month_out_total"`
+}
+
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	conf, _ := s.db.GetConfig()
 	ctx := context.WithValue(r.Context(), monitor.NICKey, conf.MonitorNIC)
@@ -158,7 +164,22 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, err, 500)
 		return
 	}
-	jsonOK(w, stats)
+
+	// 汇总所有 VM 的月度流量
+	vms, _ := s.mgr.ListVMs(ctx)
+	var mIn, mOut int64
+	for _, vm := range vms {
+		if t, err := s.db.GetTraffic(vm.VmId); err == nil {
+			mIn += t.MonthIn
+			mOut += t.MonthOut
+		}
+	}
+
+	jsonOK(w, hostStatusResponse{
+		HostStats:     stats,
+		MonthInTotal:  mIn,
+		MonthOutTotal: mOut,
+	})
 }
 
 func (s *Server) handleSystemInfo(w http.ResponseWriter, _ *http.Request) {
@@ -291,8 +312,6 @@ type vmListItem struct {
 	CpuPct            float32  `json:"cpu_pct"`
 	RamUsedMb         int64    `json:"ram_used_mb"`
 	RamTotalMb        int64    `json:"ram_total_mb"`
-	TrafficInBytes    int64    `json:"traffic_in_bytes"`
-	TrafficOutBytes   int64    `json:"traffic_out_bytes"`
 	NetInBps          int64    `json:"net_in_bps"`
 	NetOutBps         int64    `json:"net_out_bps"`
 	MonthlyTrafficIn  int64    `json:"monthly_traffic_in"`
@@ -306,32 +325,34 @@ func (s *Server) handleListVMs(w http.ResponseWriter, r *http.Request) {
 	s.vmStatsMu.Lock()
 	defer s.vmStatsMu.Unlock()
 	now := time.Now()
+	currentMonth := now.Format("2006-01")
 
 	items := make([]vmListItem, len(vms))
 	for i, vm := range vms {
+		// 驱动层获取的实时流量计数器
+		currIn := vm.TrafficInBytes
+		currOut := vm.TrafficOutBytes
+
+		// 重要：即使没填 Token 没连平台，只要 Web 界面有请求，我们就顺便更新数据库
+		// 这样可以保证流量记录的连续性，且速率计算更准确
+		_, _, mIn, mOut, _ := s.db.UpdateTraffic(vm.VmId, currIn, currOut, currentMonth)
+
 		item := vmListItem{
-			VmId:            vm.VmId,
-			Status:          int32(vm.Status),
-			CpuPct:          vm.CpuPct,
-			RamUsedMb:       vm.RamUsedMb,
-			TrafficInBytes:  vm.TrafficInBytes,
-			TrafficOutBytes: vm.TrafficOutBytes,
-			Ips:             vm.Ips,
-		}
-		// 从数据库补全：流量历史 & 配置字段
-		if t, err := s.db.GetTraffic(vm.VmId); err == nil {
-			item.MonthlyTrafficIn = t.MonthIn
-			item.MonthlyTrafficOut = t.MonthOut
-			item.TrafficInBytes = t.TotalIn
-			item.TrafficOutBytes = t.TotalOut
+			VmId:              vm.VmId,
+			Status:            int32(vm.Status),
+			CpuPct:            vm.CpuPct,
+			RamUsedMb:         vm.RamUsedMb,
+			Ips:               vm.Ips,
+			MonthlyTrafficIn:  mIn,
+			MonthlyTrafficOut: mOut,
 		}
 
-		// 计算实时速率
+		// 计算速率
 		if stats, ok := s.vmStats[vm.VmId]; ok {
 			elapsed := now.Sub(stats.lastTime).Seconds()
-			if elapsed > 0.5 {
-				item.NetInBps = int64(float64(item.TrafficInBytes-stats.lastIn) / elapsed)
-				item.NetOutBps = int64(float64(item.TrafficOutBytes-stats.lastOut) / elapsed)
+			if elapsed > 0.1 {
+				item.NetInBps = int64(float64(currIn-stats.lastIn) / elapsed)
+				item.NetOutBps = int64(float64(currOut-stats.lastOut) / elapsed)
 				if item.NetInBps < 0 {
 					item.NetInBps = 0
 				}
@@ -340,9 +361,11 @@ func (s *Server) handleListVMs(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+
+		// 保存当前实时值用于下次计算
 		s.vmStats[vm.VmId] = &vmLastStats{
-			lastIn:   item.TrafficInBytes,
-			lastOut:  item.TrafficOutBytes,
+			lastIn:   currIn,
+			lastOut:  currOut,
 			lastTime: now,
 		}
 

@@ -337,14 +337,12 @@ func (m *Manager) computeIPv6(idx int) string {
 	switch m.ipv6Mode {
 	case "subnet":
 		// 从子网中分配独立 IPv6
-		// 例如：2001:db8:1234::/64 → 2001:db8:1234::2, ::3, ...
 		if m.ipv6Subnet != "" {
-			// 解析子网，计算第 idx 个地址
 			return m.allocIPv6FromSubnet(idx)
 		}
 	case "snat":
-		// SNAT 模式：所有 VM 共享宿主机的 IPv6 出站，不分配独立地址
-		return ""
+		// SNAT 模式：分配 ULA 私有地址，后续通过宿主机 ip6tables 进行 MASQUERADE
+		return fmt.Sprintf("fd91:cafe:cafe:10::%d", idx)
 	}
 	// 默认：使用 ULA 段（即使 mode=none 或 mode=""）
 	return fmt.Sprintf("fd91:cafe:cafe:10::%d", idx)
