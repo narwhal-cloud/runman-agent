@@ -74,11 +74,11 @@ func NewServer(database *db.DB, mgr manager.VMManager, hostMon *monitor.HostMoni
 
 // authMiddleware enforces HTTP Basic Auth when WebUser is configured.
 // If no credentials are stored in config the request passes through.
-// /api/vm-memory is always public (used by VMs to report memory stats).
+// /api/vm-status is always public (used by VMs to report status).
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Skip auth for VM memory reporting endpoint (VMs use it)
-		if r.URL.Path == "/api/vm-memory" {
+		// Skip auth for VM status reporting endpoint (VMs use it)
+		if r.URL.Path == "/api/vm-status" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -133,8 +133,8 @@ func (s *Server) ListenAndServe(addr string) error {
 	// 控制台 TTY（WebSocket）
 	mux.HandleFunc("GET /api/vms/{id}/tty", s.handleVMTTY)
 
-	// 虚拟机内存上报
-	mux.HandleFunc("POST /api/vm-memory", s.handleVMMemory)
+	// 虚拟机状态上报
+	mux.HandleFunc("POST /api/vm-status", s.handleVMStatus)
 
 	// 静态文件
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -694,17 +694,18 @@ func (w *wsWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// handleVMMemory 接收虚拟机上报的内存信息（CloudHV only）
-func (s *Server) handleVMMemory(w http.ResponseWriter, r *http.Request) {
+// handleVMStatus 接收虚拟机上报的状态信息：CPU占用率、内存使用情况（CloudHV only）
+func (s *Server) handleVMStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
 	var req struct {
-		VmID       string `json:"vm_id"`
-		RamUsedMb  int64  `json:"ram_used_mb"`
-		RamTotalMb int64  `json:"ram_total_mb"`
+		VmID       string  `json:"vm_id"`
+		CpuPercent float32 `json:"cpu_percent"`
+		RamUsedMb  int64   `json:"ram_used_mb"`
+		RamTotalMb int64   `json:"ram_total_mb"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -712,9 +713,9 @@ func (s *Server) handleVMMemory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 将内存信息交给 CloudHV Manager 处理（仅 CloudHV 支持）
+	// 将状态信息交给 CloudHV Manager 处理（仅 CloudHV 支持）
 	if s.cloudHVMgr != nil {
-		s.cloudHVMgr.UpdateVMMemory(req.VmID, req.RamUsedMb, req.RamTotalMb)
+		s.cloudHVMgr.UpdateVMStatus(req.VmID, req.CpuPercent, req.RamUsedMb, req.RamTotalMb)
 		jsonOK(w, map[string]string{"status": "ok"})
 		return
 	}

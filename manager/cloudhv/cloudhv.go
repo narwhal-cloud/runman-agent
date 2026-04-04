@@ -22,8 +22,6 @@ import (
 	"runman-agent/db"
 	"runman-agent/manager"
 	"runman-agent/proto/agent"
-
-	"github.com/shirou/gopsutil/v4/process"
 )
 
 const (
@@ -38,8 +36,9 @@ const (
 	tapBase        = "vm" // TAP name: vm2, vm3, ...
 )
 
-// vmMemoryInfo 虚拟机内部上报的内存信息
-type vmMemoryInfo struct {
+// vmStatusInfo 虚拟机内部上报的状态信息
+type vmStatusInfo struct {
+	CpuPercent float32
 	RamUsedMb  int64
 	RamTotalMb int64
 	Timestamp  time.Time
@@ -56,8 +55,8 @@ type Manager struct {
 	ipv6Iface   string                   // IPv6 所在网卡
 	ipv6Counter int                      // 子网模式下的地址计数器（用于分配 ::2, ::3 等）
 	diskMbps    int                      // 磁盘写入速率限制（Mbps）
-	vmMemory    map[string]*vmMemoryInfo // 虚拟机上报的内存信息
-	vmMemMu     sync.RWMutex
+	vmStatus    map[string]*vmStatusInfo // 虚拟机上报的状态信息（CPU+内存）
+	vmStatusMu  sync.RWMutex
 }
 
 // --- REST API 请求/响应结构体 ---
@@ -191,7 +190,7 @@ func New(database *db.DB, ipv6Mode, ipv6Subnet, ipv6Addr, ipv6Iface string, disk
 		ipv6Iface:   ipv6Iface,
 		ipv6Counter: 2, // 从 ::2 开始分配
 		diskMbps:    diskMbps,
-		vmMemory:    make(map[string]*vmMemoryInfo),
+		vmStatus:    make(map[string]*vmStatusInfo),
 	}
 	if m.ipv6Mode == "" {
 		m.ipv6Mode = "none"
@@ -546,13 +545,37 @@ write_files:
     content: |
       #!/bin/sh
       VMID="%s"
+
       while true; do
         MEM_USED=$(free -m 2>/dev/null | awk 'NR==2 {print $3}' || echo 0)
         MEM_TOTAL=$(free -m 2>/dev/null | awk 'NR==2 {print $2}' || echo 0)
+
+        stat1=$(cat /proc/stat 2>/dev/null | head -n1)
+        sleep 1
+        stat2=$(cat /proc/stat 2>/dev/null | head -n1)
+
+        set -- $stat1
+        u1=$2; n1=$3; s1=$4; i1=$5
+        set -- $stat2
+        u2=$2; n2=$3; s2=$4; i2=$5
+
+        ud=$((u2 - u1))
+        nd=$((n2 - n1))
+        sd=$((s2 - s1))
+        id=$((i2 - i1))
+        total=$((ud + nd + sd + id))
+
+        if [ "$total" -le 0 ]; then
+          CPU_PERCENT=0
+        else
+          used=$((ud + nd + sd))
+          CPU_PERCENT=$((used * 100 / total))
+        fi
+
         if [ "$MEM_USED" -gt 0 ] && [ "$MEM_TOTAL" -gt 0 ]; then
-          curl -s -X POST http://10.91.0.1:8792/api/vm-memory \
+          curl -s -X POST http://10.91.0.1:8792/api/vm-status \
             -H "Content-Type: application/json" \
-            -d "{\"vm_id\":\"$VMID\",\"ram_used_mb\":$MEM_USED,\"ram_total_mb\":$MEM_TOTAL}" > /dev/null 2>&1
+            -d "{\"vm_id\":\"$VMID\",\"cpu_percent\":$CPU_PERCENT,\"ram_used_mb\":$MEM_USED,\"ram_total_mb\":$MEM_TOTAL}" > /dev/null 2>&1
         fi
         sleep 30
       done
@@ -1438,27 +1461,8 @@ func (m *Manager) killProcess(vmID string) error {
 }
 
 func (m *Manager) getUsage(vmID string) (cpuPct float32, ramUsedMb int64) {
-	// 获取虚拟机上报的内存信息（或配置值）
-	ramUsedMb, _ = m.GetVMMemory(vmID)
-
-	// CPU 使用率：从 cloud-hypervisor 进程获取
-	data, err := os.ReadFile(m.pidFile(vmID))
-	if err != nil {
-		return
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil {
-		return
-	}
-
-	p, err := process.NewProcess(int32(pid))
-	if err != nil {
-		return
-	}
-
-	pct, _ := p.CPUPercent()
-	cpuPct = float32(pct)
-
+	// 获取虚拟机上报的状态信息（CPU + 内存，或配置值）
+	cpuPct, ramUsedMb, _ = m.GetVMStatus(vmID)
 	return
 }
 
@@ -1606,30 +1610,31 @@ func buildNetRateLimit(mbps int) *rateLimiterConfig {
 
 // UpdateVMMemory 接收虚拟机上报的内存信息
 // 路由: POST /api/vm-memory
-func (m *Manager) UpdateVMMemory(vmID string, usedMb, totalMb int64) {
-	m.vmMemMu.Lock()
-	defer m.vmMemMu.Unlock()
-	m.vmMemory[vmID] = &vmMemoryInfo{
+func (m *Manager) UpdateVMStatus(vmID string, cpuPercent float32, usedMb, totalMb int64) {
+	m.vmStatusMu.Lock()
+	defer m.vmStatusMu.Unlock()
+	m.vmStatus[vmID] = &vmStatusInfo{
+		CpuPercent: cpuPercent,
 		RamUsedMb:  usedMb,
 		RamTotalMb: totalMb,
 		Timestamp:  time.Now(),
 	}
 }
 
-// GetVMMemory 获取虚拟机的内存信息（从虚拟机上报或配置）
-func (m *Manager) GetVMMemory(vmID string) (usedMb, totalMb int64) {
-	m.vmMemMu.RLock()
-	memInfo, exists := m.vmMemory[vmID]
-	m.vmMemMu.RUnlock()
+// GetVMStatus 获取虚拟机的状态信息（CPU + 内存，从虚拟机上报或配置）
+func (m *Manager) GetVMStatus(vmID string) (cpuPercent float32, usedMb, totalMb int64) {
+	m.vmStatusMu.RLock()
+	status, exists := m.vmStatus[vmID]
+	m.vmStatusMu.RUnlock()
 
-	if exists && time.Since(memInfo.Timestamp) < 5*time.Minute {
+	if exists && time.Since(status.Timestamp) < 5*time.Minute {
 		// 使用虚拟机上报的数据（5分钟内有效）
-		return memInfo.RamUsedMb, memInfo.RamTotalMb
+		return status.CpuPercent, status.RamUsedMb, status.RamTotalMb
 	}
 
 	// 返回虚拟机配置的内存值（作为总量）
 	if icfg, err := m.loadInstanceConfig(vmID); err == nil {
-		return 0, icfg.MemoryMB
+		return 0, 0, int64(icfg.MemoryMB)
 	}
-	return 0, 0
+	return 0, 0, 0
 }
