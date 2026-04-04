@@ -5,11 +5,13 @@ set -e
 # NarwhalCloud Agent install / update script
 # ────────────────────────────────────────────────────────────────────────────────
 
-AGENT_BINARY="/opt/runman-agent"
-AGENT_SERVICE="runman-agent"
-AGENT_DATA_DIR="/var/lib/runman-agent"
+AGENT_BIN_DIR="/opt/narwhal-agent"
+AGENT_BINARY="$AGENT_BIN_DIR/narwhal-agent"
+AGENT_SERVICE="narwhal-agent"
+AGENT_DATA_DIR="/var/lib/narwhal-agent"
 AGENT_DB="$AGENT_DATA_DIR/agent.db"
 AGENT_WEB_PORT="8792"
+RFW_BIN_DIR="/opt/rfw"
 PODMAN_NETWORK="narwhal-net"
 
 DOWNLOAD_BASE="https://github.com/narwhal-cloud/runman-agent/releases/latest/download"
@@ -217,6 +219,7 @@ EOF
 download_agent() {
     local arch=$1
     log "$(t "Downloading NarwhalCloud Agent ($arch)..." "下载 NarwhalCloud Agent ($arch)...")"
+    mkdir -p "$AGENT_BIN_DIR"
     download_with_retry "$DOWNLOAD_BASE/runman-agent-linux-$arch" "$AGENT_BINARY.new"
     chmod +x "$AGENT_BINARY.new"
     mv "$AGENT_BINARY.new" "$AGENT_BINARY"
@@ -274,16 +277,16 @@ if systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null || [ -f "$AGENT_BINA
     log "$(t "✓ NarwhalCloud Agent updated." "✓ NarwhalCloud Agent 已更新。")"
 
     # Update rfw if installed
-    if [ -f "/opt/rfw/rfw" ] && [ -f "/etc/systemd/system/rfw.service" ]; then
+    if [ -f "$RFW_BIN_DIR/rfw" ] && [ -f "/etc/systemd/system/rfw.service" ]; then
         log "$(t "rfw detected, updating..." "检测到 rfw，开始更新...")"
         EXISTING_IFACE=$(grep "ExecStart=" /etc/systemd/system/rfw.service | grep -oP '(?<=--iface )[^ ]+' || true)
         if [ -n "$EXISTING_IFACE" ]; then
             RFW_ARCH=$(uname -m)
-            if download_with_retry "$RFW_BASE/rfw-$RFW_ARCH-unknown-linux-musl" "/opt/rfw/rfw.new"; then
-                chmod +x /opt/rfw/rfw.new
+            if download_with_retry "$RFW_BASE/rfw-$RFW_ARCH-unknown-linux-musl" "$RFW_BIN_DIR/rfw.new"; then
+                chmod +x "$RFW_BIN_DIR/rfw.new"
                 systemctl is-active --quiet rfw && systemctl stop rfw
-                mv /opt/rfw/rfw.new /opt/rfw/rfw
-                sed -i "s|^ExecStart=.*|ExecStart=/opt/rfw/rfw --iface $EXISTING_IFACE --block-email --block-http --block-socks5 --block-fet-strict --block-wireguard --countries CN|" \
+                mv "$RFW_BIN_DIR/rfw.new" "$RFW_BIN_DIR/rfw"
+                sed -i "s|^ExecStart=.*|ExecStart=$RFW_BIN_DIR/rfw --iface $EXISTING_IFACE --block-email --block-http --block-socks5 --block-fet-strict --block-wireguard --countries CN|" \
                     /etc/systemd/system/rfw.service
                 systemctl daemon-reload && systemctl start rfw
                 log "$(t "✓ rfw updated." "✓ rfw 已更新。")"
@@ -482,11 +485,11 @@ start_service "$AGENT_SERVICE"
 
 read -rp "$(t "Install rfw firewall? [Y/n]: " "是否安装 rfw 防火墙? [Y/n]: ")" _rfw
 if [[ "${_rfw:-Y}" =~ ^[Yy]$ ]]; then
-    mkdir -p /opt/rfw
+    mkdir -p "$RFW_BIN_DIR"
     RFW_ARCH=$(uname -m)
-    if [ ! -f "/opt/rfw/rfw" ]; then
-        download_with_retry "$RFW_BASE/rfw-$RFW_ARCH-unknown-linux-musl" "/opt/rfw/rfw"
-        chmod +x /opt/rfw/rfw
+    if [ ! -f "$RFW_BIN_DIR/rfw" ]; then
+        download_with_retry "$RFW_BASE/rfw-$RFW_ARCH-unknown-linux-musl" "$RFW_BIN_DIR/rfw"
+        chmod +x "$RFW_BIN_DIR/rfw"
     else
         log "$(t "rfw already exists, skipping download." "rfw 已存在，跳过下载。")"
     fi
@@ -512,7 +515,7 @@ After=network.target
 Type=simple
 User=root
 Environment=RUST_LOG=info
-ExecStart=/opt/rfw/rfw --iface $SEL_IFACE --block-email --block-http --block-socks5 --block-fet-strict --block-wireguard --countries CN
+ExecStart=$RFW_BIN_DIR/rfw --iface $SEL_IFACE --block-email --block-http --block-socks5 --block-fet-strict --block-wireguard --countries CN
 Restart=always
 RestartSec=5
 
