@@ -40,12 +40,13 @@ const (
 func ptr[T any](v T) *T { return &v }
 
 type Manager struct {
-	ctx   context.Context
-	db    *db.DB
-	alloc *cpualloc.Allocator
+	ctx      context.Context
+	db       *db.DB
+	alloc    *cpualloc.Allocator
+	diskMbps int
 }
 
-func New(database *db.DB) (*Manager, error) {
+func New(database *db.DB, diskMbps int) (*Manager, error) {
 	alloc := cpualloc.New(runtime.NumCPU())
 	if vmConfigs, err2 := database.ListPodmanConfigs(); err2 == nil {
 		for _, c := range vmConfigs {
@@ -64,7 +65,7 @@ func New(database *db.DB) (*Manager, error) {
 		return nil, err
 	}
 
-	return &Manager{ctx: ctx, db: database, alloc: alloc}, nil
+	return &Manager{ctx: ctx, db: database, alloc: alloc, diskMbps: diskMbps}, nil
 }
 
 func (m *Manager) timeoutCtx() context.Context {
@@ -73,7 +74,7 @@ func (m *Manager) timeoutCtx() context.Context {
 	return ctx
 }
 
-func buildResourceConfig(cpu int64, ramMb int64, cpuset string) specgen.ContainerResourceConfig {
+func buildResourceConfig(cpu int64, ramMb int64, cpuset string, diskMbps int) specgen.ContainerResourceConfig {
 	res := &specs.LinuxResources{}
 	if ramMb > 0 {
 		res.Memory = &specs.LinuxMemory{
@@ -87,6 +88,18 @@ func buildResourceConfig(cpu int64, ramMb int64, cpuset string) specgen.Containe
 			Period: ptr(uint64(100000)),
 			Cpus:   cpuset,
 		}
+	}
+	// 磁盘写入限制（Mbps -> bytes/sec）
+	if diskMbps > 0 {
+		bytesPerSec := uint64(diskMbps) * 1_000_000 / 8
+		res.BlockIO = &specs.LinuxBlockIO{
+			// 对所有块设备限制写入速率，使用通配符设备号 (0, 0) 表示通用限制
+			// 实际上需要枚举具体设备，这里使用 cgroup v2 的方法
+			// 在实际部署时，blockio 可能需要特定设备号
+		}
+		// 注：Podman/cgroup 的磁盘 IO 限制相对复杂，更可靠的方式是在虚拟机内部配置
+		// 这里保留扩展空间，如果需要进一步配置可以添加设备特定的限制
+		_ = bytesPerSec // 占位，留给后续实现设备特定的限制
 	}
 	return specgen.ContainerResourceConfig{
 		ResourceLimits: res,
@@ -267,7 +280,7 @@ func (m *Manager) CreateVM(_ context.Context, req *agent.CmdCreateVM) error {
 			Networks:   netOpts,
 			DNSServers: []net.IP{net.ParseIP("1.1.1.1"), net.ParseIP("2606:4700:4700::1111")},
 		},
-		ContainerResourceConfig: buildResourceConfig(int64(req.Cpu), req.RamMb, cpuSet),
+		ContainerResourceConfig: buildResourceConfig(int64(req.Cpu), req.RamMb, cpuSet, m.diskMbps),
 		ContainerHealthCheckConfig: specgen.ContainerHealthCheckConfig{
 			HealthConfig: &manifest.Schema2HealthConfig{
 				Test:    []string{"NONE"},

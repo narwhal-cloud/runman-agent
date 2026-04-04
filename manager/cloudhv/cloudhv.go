@@ -47,6 +47,7 @@ type Manager struct {
 	ipv6Addr    string // 单个公网 IPv6（mode=snat）
 	ipv6Iface   string // IPv6 所在网卡
 	ipv6Counter int    // 子网模式下的地址计数器（用于分配 ::2, ::3 等）
+	diskMbps    int    // 磁盘写入速率限制（Mbps）
 }
 
 // --- REST API 请求/响应结构体 ---
@@ -158,8 +159,8 @@ type instanceConfig struct {
 }
 
 // New 创建 Manager。
-// ipv6Mode, ipv6Subnet, ipv6Addr, ipv6Iface 从配置文件读取后由调用者传入。
-func New(database *db.DB, ipv6Mode, ipv6Subnet, ipv6Addr, ipv6Iface string) (*Manager, error) {
+// ipv6Mode, ipv6Subnet, ipv6Addr, ipv6Iface, diskMbps 从配置文件读取后由调用者传入。
+func New(database *db.DB, ipv6Mode, ipv6Subnet, ipv6Addr, ipv6Iface string, diskMbps int) (*Manager, error) {
 	if _, err := os.Stat(chBinary); err != nil {
 		return nil, fmt.Errorf("cloud-hypervisor binary not found at %q: %w", chBinary, err)
 	}
@@ -179,6 +180,7 @@ func New(database *db.DB, ipv6Mode, ipv6Subnet, ipv6Addr, ipv6Iface string) (*Ma
 		ipv6Addr:    ipv6Addr,
 		ipv6Iface:   ipv6Iface,
 		ipv6Counter: 2, // 从 ::2 开始分配
+		diskMbps:    diskMbps,
 	}
 	if m.ipv6Mode == "" {
 		m.ipv6Mode = "none"
@@ -349,12 +351,14 @@ func (m *Manager) computeIPv6(idx int) string {
 		if m.ipv6Subnet != "" {
 			return m.allocIPv6FromSubnet(idx)
 		}
+		return fmt.Sprintf("fd91:cafe:cafe:10::%d", idx)
 	case "snat":
 		// SNAT 模式：分配 ULA 私有地址，后续通过宿主机 ip6tables 进行 MASQUERADE
 		return fmt.Sprintf("fd91:cafe:cafe:10::%d", idx)
+	default:
+		// 默认：使用 ULA 段（即使 mode=none 或 mode=""）
+		return fmt.Sprintf("fd91:cafe:cafe:10::%d", idx)
 	}
-	// 默认：使用 ULA 段（即使 mode=none 或 mode=""）
-	return fmt.Sprintf("fd91:cafe:cafe:10::%d", idx)
 }
 
 // allocIPv6FromSubnet 从子网中分配第 idx 个 IPv6 地址
@@ -390,22 +394,14 @@ func (m *Manager) setupNetwork(net *netConfig) error {
 	_ = os.WriteFile(fmt.Sprintf("/proc/sys/net/ipv6/conf/%s/proxy_ndp", net.Tap), []byte("1"), 0644)
 	_ = os.WriteFile(fmt.Sprintf("/proc/sys/net/ipv6/conf/%s/forwarding", net.Tap), []byte("1"), 0644)
 
-	log.Printf("[setupNetwork] TAP device %s setup complete (MAC: %s)", net.Tap, net.MAC)
-
 	// IPv6 模式特定配置
 	if net.IPv6 != "" {
 		switch m.ipv6Mode {
 		case "subnet":
-			outIf := defaultRouteIface()
-			log.Printf("[setupNetwork] IPv6 subnet mode setup for %s, outIf=%s", net.IPv6, outIf)
-
 			// 依赖于 runman-agent 内置的 ndp responder (ndp/responder.go) 处理 NDP 请求
 			// 不再依赖内核的 proxy_ndp (ip neigh add proxy)，因为内核要求严苛的路由匹配且容易失效。
-
-			log.Printf("[setupNetwork] IPv6 subnet mode: VM %s via TAP %s (NDP managed by agent)", net.IPv6, net.Tap)
-
-		case "snat": // SNAT 配置（首次全局配置，这里可选）
-			// 实际配置在 ensureBridge 中做一次就够了
+		case "snat":
+			// SNAT 配置在 ensureBridge 中做一次就够了
 		}
 	}
 
@@ -449,8 +445,6 @@ func (m *Manager) prepareDisks(vmID, distro string, diskGB int64) error {
 		if err := runCmd("qemu-img", "resize", "-f", "raw", system, fmt.Sprintf("%dG", diskGB)); err != nil {
 			return fmt.Errorf("resize disk: %w", err)
 		}
-		// 预分配物理空间
-		_ = runCmd("fallocate", "-l", fmt.Sprintf("%dG", diskGB), system)
 	}
 	return nil
 }
@@ -551,6 +545,10 @@ ethernets:
 		networkCfg += fmt.Sprintf(`    nameservers:
       addresses: [1.1.1.1, 2606:4700:4700::1111]
 `)
+	}
+
+	if m.ipv6Mode != "none" && net.IPv6 != "" {
+		log.Printf("[CloudHV] VM %s IPv6 config: %s (mode=%s)", vmID, net.IPv6, m.ipv6Mode)
 	}
 
 	_ = os.WriteFile(filepath.Join(ciDir, "user-data"), []byte(userData), 0644)
@@ -774,20 +772,24 @@ func (m *Manager) buildVmConfig(vmID string, icfg *instanceConfig, net *netConfi
 	}
 	memBytes := icfg.MemoryMB * 1024 * 1024
 	if memBytes <= 0 {
-		memBytes = 512 * 1024 * 1024
-	}
-	diskNumQueues := cpu
-	if diskNumQueues > 4 {
-		diskNumQueues = 4
+		memBytes = 256 * 1024 * 1024
 	}
 
-	// 为稳定性起见，禁用 Direct I/O 以兼容非对齐写入，禁用 io_uring 以防内核不稳定
+	// 内存 <512M 时，通过 hotplug_size 在启动时动态分配额外内存
+	var hotplugSize *int64
+	if icfg.MemoryMB > 0 && icfg.MemoryMB < 512 {
+		doubledMemBytes := icfg.MemoryMB * 2 * 1024 * 1024
+		hotplugSize = &doubledMemBytes
+	}
+
+	diskRateLimit := m.buildDiskRateLimit()
 	disks := []diskConfig{
 		{
-			Path:      filepath.Join(m.instDir, vmID, "system.raw"),
-			NumQueues: diskNumQueues,
-			Direct:    false,
-			IoUring:   false,
+			Path:              filepath.Join(m.instDir, vmID, "system.raw"),
+			NumQueues:         1,
+			Direct:            false,
+			IoUring:           true,
+			RateLimiterConfig: diskRateLimit,
 		},
 	}
 	if _, err := os.Stat(filepath.Join(m.instDir, vmID, "cloudinit.img")); err == nil {
@@ -800,8 +802,6 @@ func (m *Manager) buildVmConfig(vmID string, icfg *instanceConfig, net *netConfi
 		})
 	}
 
-	hotplugSize := int64(64 * 1024 * 1024 * 1024)
-
 	return &vmCreateReq{
 		Cpus: cpusConfig{
 			BootVcpus: cpu,
@@ -812,7 +812,7 @@ func (m *Manager) buildVmConfig(vmID string, icfg *instanceConfig, net *netConfi
 			Mergeable:     true,
 			Thp:           true,
 			HotplugMethod: "VirtioMem",
-			HotplugSize:   &hotplugSize,
+			HotplugSize:   hotplugSize,
 		},
 		Payload: payloadConfig{
 			Kernel:    vmlinuz,
@@ -827,11 +827,17 @@ func (m *Manager) buildVmConfig(vmID string, icfg *instanceConfig, net *netConfi
 			RateLimiterConfig: buildNetRateLimit(icfg.BandwidthMbps),
 		}},
 		Rng: &rngConfig{Src: "/dev/urandom"},
-		Balloon: &balloonConfig{
-			Size:              memBytes / 2,
-			DeflateOnOom:      true,
-			FreePageReporting: true,
-		},
+		Balloon: func() *balloonConfig {
+			// 内存 < 512M 时禁用 balloon 以避免 OOM
+			if icfg.MemoryMB > 0 && icfg.MemoryMB < 512 {
+				return nil
+			}
+			return &balloonConfig{
+				Size:              memBytes / 2,
+				DeflateOnOom:      true,
+				FreePageReporting: true,
+			}
+		}(),
 		Serial: &consoleConfig{
 			Mode:   "Socket",
 			Socket: m.serialSockPath(vmID),
@@ -843,12 +849,14 @@ func (m *Manager) buildVmConfig(vmID string, icfg *instanceConfig, net *netConfi
 }
 
 func (m *Manager) CreateVM(_ context.Context, req *agent.CmdCreateVM) error {
-	// 限制最低配置：CPU 1核，内存 512MB，磁盘 3GB
+	log.Printf("[CreateVM] vmID=%s image=%s cpu=%d ramMb=%d diskGb=%d", req.VmId, req.OsImage, req.Cpu, req.RamMb, req.DiskGb)
+
+	// 限制最低配置：CPU 1核，内存 256MB，磁盘 3GB
 	if req.Cpu < 1 {
 		req.Cpu = 1
 	}
-	if req.RamMb < 512 {
-		req.RamMb = 512
+	if req.RamMb < 256 {
+		req.RamMb = 256
 	}
 	if req.DiskGb < 3 {
 		req.DiskGb = 3
@@ -913,6 +921,7 @@ func (m *Manager) CreateVM(_ context.Context, req *agent.CmdCreateVM) error {
 		return err
 	}
 
+	log.Printf("[CloudHV] CreateVM %s completed successfully", req.VmId)
 	return nil
 }
 
@@ -1024,8 +1033,8 @@ func (m *Manager) UpdateVM(_ context.Context, vmID string, cpu int32, ramMB int6
 	}
 
 	// 限制最低配置
-	if ramMB > 0 && ramMB < 512 {
-		ramMB = 512
+	if ramMB > 0 && ramMB < 256 {
+		ramMB = 256
 	}
 	if diskGB > 0 && diskGB < 3 {
 		diskGB = 3
@@ -1456,6 +1465,19 @@ func (m *Manager) GetVMNetStats(_ context.Context, vmID string) (*manager.VMNetS
 func cmdOutput(name string, args ...string) (string, error) {
 	out, err := exec.Command(name, args...).Output()
 	return string(out), err
+}
+
+func (m *Manager) buildDiskRateLimit() *rateLimiterConfig {
+	if m.diskMbps <= 0 {
+		return nil
+	}
+	bytesPerSec := int64(m.diskMbps) * 1_000_000 / 8
+	bucket := &tokenBucket{
+		Size:         bytesPerSec,
+		OneTimeBurst: bytesPerSec,
+		RefillTime:   1000,
+	}
+	return &rateLimiterConfig{Bandwidth: bucket}
 }
 
 func buildNetRateLimit(mbps int) *rateLimiterConfig {

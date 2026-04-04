@@ -120,7 +120,12 @@ detect_and_configure_ipv6() {
     log "$(t "Default IPv6 interface: $iface" "默认 IPv6 网卡: $iface")" >&2
 
     local ipv6_full ipv6_addr prefix_len
-    ipv6_full=$(ip -6 addr show dev "$iface" 2>/dev/null | grep -v "fe80" | grep "scope global" | head -1 | awk '{print $2}')
+    # 优先选择子网（/64 或更小），其次选择单地址（/128）
+    # 这样可以最大化利用可用的 IPv6 地址空间
+
+    # 先获取所有全局地址，按前缀长度排序（较小的前缀优先）
+    ipv6_full=$(ip -6 addr show dev "$iface" 2>/dev/null | grep "scope global" | grep -v "fe80" | awk '{print $2}' | sort -t'/' -k2 -n | head -1)
+
     if [ -z "$ipv6_full" ]; then
         log "$(t "No global IPv6 address found." "未找到全局 IPv6 地址。")" >&2
         echo "local"; return 0
@@ -130,18 +135,14 @@ detect_and_configure_ipv6() {
     prefix_len=$(echo "$ipv6_full" | cut -d'/' -f2)
     log "$(t "IPv6 address: $ipv6_addr/$prefix_len" "IPv6 地址: $ipv6_addr/$prefix_len")" >&2
 
-    if [ "$prefix_len" -gt 64 ]; then
-        log "$(t "Prefix /$prefix_len too small for subnetting." "前缀 /$prefix_len 不足以分配子网。")" >&2
-        echo "local"; return 0
-    fi
-
     # 对于 /64 或更大的子网，直接接受（无需测试新地址，因为 BGP 学习延迟可能导致测试失败）
-    # 只对 /65-/112 的子网进行可达性测试
-    if [ "$prefix_len" -le 64 ]; then
-        log "$(t "✓ Public IPv6 subnet detected (/$prefix_len)." "✓ 检测到公网 IPv6 子网 (/$prefix_len)。")" >&2
+    # 对于 /128 单地址，直接接受（SNAT 模式）
+    # 只对 /65-/127 的小子网进行可达性测试
+    if [ "$prefix_len" -le 64 ] || [ "$prefix_len" -eq 128 ]; then
+        log "$(t "✓ Public IPv6 address detected (/$prefix_len)." "✓ 检测到公网 IPv6 地址 (/$prefix_len)。")" >&2
         echo "$iface|$ipv6_addr|$prefix_len"
-    else
-        # 测试 /65-/112 的小子网
+    elif [ "$prefix_len" -gt 64 ] && [ "$prefix_len" -lt 128 ]; then
+        # 测试 /65-/127 的小子网
         local test_addr
         test_addr=$(ipv6_plus_one "$ipv6_addr")
         ip addr add "$test_addr/$prefix_len" dev "$iface" 2>/dev/null || { echo "local"; return 0; }
@@ -157,6 +158,8 @@ detect_and_configure_ipv6() {
             log "$(t "Public IPv6 test failed, using local subnet." "公网 IPv6 测试失败，使用本地网段。")" >&2
             echo "local"
         fi
+    else
+        echo "local"; return 0
     fi
 }
 
@@ -280,6 +283,7 @@ write_config_file() {
     local ndp_iface="${6:-}"
     local ndp_subnets="${7:-}"
     local ndp_network="${8:-}"
+    local disk_mbps="${9:-100}"
 
     mkdir -p "$AGENT_CONFIG_DIR"
 
@@ -295,6 +299,7 @@ write_config_file() {
     "web_pass_hash": "",
     "host": "",
     "max_port_forward": 20,
+    "disk_mbps": $disk_mbps,
     "ipv6_mode": "$ipv6_mode",
     "ipv6_subnet": "$ipv6_subnet",
     "ipv6_addr": "$ipv6_addr",
@@ -703,7 +708,7 @@ if [ "$VIRT_TYPE" = "cloudhv" ]; then
     mkdir -p /opt/vm-images/instances /run/cloud-hypervisor
 
     # 检测 IPv6 可分配情况（支持任意前缀）
-    IPV6_MODE="none"
+    # 如果用户通过环境变量指定了 IPv6_MODE，则直接使用；否则自动检测
     IPV6_SUBNET=""
     IPV6_ADDR=""
     IPV6_IFACE=""
@@ -715,8 +720,19 @@ if [ "$VIRT_TYPE" = "cloudhv" ]; then
         IPV6_PREFIX=$(echo "$IPV6_CONFIG" | cut -d'|' -f3)
 
         # 支持的前缀范围：/127 或更小（即使是 /64 也支持）
-        # 分配策略：从 /127 分配子网给 VM，如果 /127 则只支持 2 个 VM，等等
-        if [ "$IPV6_PREFIX" -le 127 ]; then
+        # 分配策略：
+        #   - 用户指定 IPV6_MODE=snat：SNAT 模式（VM 用私有 ULA，宿主机做 MASQUERADE）
+        #   - 用户指定 IPV6_MODE=subnet：subnet 模式（VM 各自获得独立地址）
+        #   - 自动检测：
+        #     - /128：使用 SNAT 模式
+        #     - <= 127：使用 subnet 模式
+        if [ -n "${IPV6_MODE}" ]; then
+            # 用户显式指定了模式
+            log "$(t "✓ IPv6 mode explicitly set to: $IPV6_MODE" "✓ IPv6 模式已指定为: $IPV6_MODE")"
+        elif [ "$IPV6_PREFIX" = "128" ]; then
+            IPV6_MODE="snat"
+            log "$(t "✓ IPv6 single address detected (/$IPV6_PREFIX): $IPV6_ADDR, using SNAT mode." "✓ 检测到 IPv6 单地址 (/$IPV6_PREFIX): $IPV6_ADDR，使用 SNAT 模式。")"
+        elif [ "$IPV6_PREFIX" -le 127 ]; then
             IPV6_MODE="subnet"
             # 计算可分配子网：使用宿主机地址作为基准
             # 例如：如果宿主机是 2001:db8::/64，则 VM 从 2001:db8::/64 中的 ::2, ::3... 分配
@@ -903,8 +919,8 @@ if [ "$VIRT_TYPE" = "cloudhv" ] && [ "$IPV6_MODE" = "subnet" ]; then
     NDP_SUBNETS="$IPV6_SUBNET"
 fi
 
-# 生成配置文件（包含所有启动参数和IPv6配置）
-write_config_file "$VIRT_TYPE" "$IPV6_MODE" "$IPV6_SUBNET" "$IPV6_ADDR" "$IPV6_IFACE" "$NDP_IFACE" "$NDP_SUBNETS" "$NDP_NETWORK"
+# 生成配置文件（包含所有启动参数、IPv6配置和磁盘限制）
+write_config_file "$VIRT_TYPE" "$IPV6_MODE" "$IPV6_SUBNET" "$IPV6_ADDR" "$IPV6_IFACE" "$NDP_IFACE" "$NDP_SUBNETS" "$NDP_NETWORK" "100"
 
 write_service_file "$VIRT_TYPE"
 start_service "$AGENT_SERVICE"
@@ -923,16 +939,28 @@ if [[ "${_rfw:-Y}" =~ ^[Yy]$ ]]; then
     fi
 
     if [ ! -f "/etc/systemd/system/rfw.service" ]; then
-        mapfile -t interfaces < <(ip -o link show | awk -F': ' '{print $2}' | grep -v lo)
-        echo "$(t "Available interfaces:" "可用网络接口：")"
-        for i in "${!interfaces[@]}"; do echo "  $((i+1)). ${interfaces[$i]}"; done
-        while true; do
-            read -rp "$(t "Select interface number (1-${#interfaces[@]}): " "请选择网卡编号 (1-${#interfaces[@]}): ")" choice
-            [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#interfaces[@]}" ] && break
-            echo "$(t "Invalid choice, please try again." "无效选择，请重新输入。")"
-        done
-        SEL_IFACE="${interfaces[$((choice-1))]}"
-        log "$(t "Selected interface: $SEL_IFACE" "选择网卡: $SEL_IFACE")"
+        # 过滤掉 lo 和 narwhal-net（Podman 网络）
+        mapfile -t interfaces < <(ip -o link show | awk -F': ' '{print $2}' | grep -v "^lo$" | grep -v "^narwhal-net$")
+
+        if [ ${#interfaces[@]} -eq 0 ]; then
+            log "$(t "Error: no available WAN interfaces found." "错误: 未找到可用的 WAN 网卡。")"
+            return 1
+        elif [ ${#interfaces[@]} -eq 1 ]; then
+            # 只有1个网卡，直接使用
+            SEL_IFACE="${interfaces[0]}"
+            log "$(t "Only one WAN interface found, using: $SEL_IFACE" "只找到一个 WAN 网卡，使用: $SEL_IFACE")"
+        else
+            # 多个网卡，让用户选择
+            echo "$(t "Available WAN interfaces:" "可用 WAN 网卡：")"
+            for i in "${!interfaces[@]}"; do echo "  $((i+1)). ${interfaces[$i]}"; done
+            while true; do
+                read -rp "$(t "Select interface number (1-${#interfaces[@]}): " "请选择网卡编号 (1-${#interfaces[@]}): ")" choice
+                [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#interfaces[@]}" ] && break
+                echo "$(t "Invalid choice, please try again." "无效选择，请重新输入。")"
+            done
+            SEL_IFACE="${interfaces[$((choice-1))]}"
+            log "$(t "Selected interface: $SEL_IFACE" "选择网卡: $SEL_IFACE")"
+        fi
 
         cat > /etc/systemd/system/rfw.service <<EOF
 [Unit]
