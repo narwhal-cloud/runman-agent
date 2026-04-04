@@ -875,7 +875,11 @@ func (m *Manager) buildVmConfig(vmID string, icfg *instanceConfig, net *netConfi
 	// 内存 <512M 时，通过 hotplug_size 在启动时动态分配额外内存
 	var hotplugSize *int64
 	if icfg.MemoryMB > 0 && icfg.MemoryMB < 512 {
+		// virtio-mem 要求对齐到 128MB 的倍数
+		const virtioMemAlignment = int64(128 * 1024 * 1024) // 128MB
 		doubledMemBytes := icfg.MemoryMB * 2 * 1024 * 1024
+		// 向上对齐到 128MB 倍数
+		doubledMemBytes = ((doubledMemBytes + virtioMemAlignment - 1) / virtioMemAlignment) * virtioMemAlignment
 		hotplugSize = &doubledMemBytes
 	}
 
