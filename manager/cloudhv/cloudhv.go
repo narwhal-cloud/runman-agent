@@ -987,7 +987,7 @@ func (m *Manager) buildVmConfig(vmID string, icfg *instanceConfig, net *netConfi
 				return nil
 			}
 			return &balloonConfig{
-				Size:              memBytes / 2,
+				Size:              0,
 				DeflateOnOom:      true,
 				FreePageReporting: true,
 			}
