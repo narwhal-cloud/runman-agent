@@ -391,18 +391,24 @@ func (m *Manager) allocIPv6FromSubnet(idx int) string {
 }
 
 func (m *Manager) setupNetwork(net *netConfig) error {
-	// 创建 TAP 设备（若已存在则跳过）
-	tapExists := runCmd("ip", "link", "show", net.Tap) == nil
-	if !tapExists {
-		log.Printf("[setupNetwork] creating TAP device: %s", net.Tap)
-		if err := runCmd("ip", "tuntap", "add", net.Tap, "mode", "tap"); err != nil {
-			log.Printf("[setupNetwork] error: failed to create TAP device %s: %v", net.Tap, err)
-			return fmt.Errorf("create tap %s: %w", net.Tap, err)
+	// 如果 TAP 已存在且已加入正确的 bridge，说明 VM 仍在运行，跳过重建避免断网
+	if runCmd("ip", "link", "show", net.Tap) == nil {
+		master, _ := cmdOutput("ip", "-o", "link", "show", net.Tap)
+		if strings.Contains(master, "master "+bridge) {
+			log.Printf("[setupNetwork] TAP already up on bridge, skipping recreate: %s", net.Tap)
+			goto applyProcSys
 		}
-		log.Printf("[setupNetwork] TAP device created: %s", net.Tap)
-	} else {
-		log.Printf("[setupNetwork] TAP device already exists: %s", net.Tap)
+		log.Printf("[setupNetwork] removing old TAP device: %s", net.Tap)
+		_ = runCmd("ip", "link", "delete", net.Tap)
 	}
+
+	// 创建新的 TAP 设备
+	log.Printf("[setupNetwork] creating TAP device: %s", net.Tap)
+	if err := runCmd("ip", "tuntap", "add", net.Tap, "mode", "tap"); err != nil {
+		log.Printf("[setupNetwork] error: failed to create TAP device %s: %v", net.Tap, err)
+		return fmt.Errorf("create tap %s: %w", net.Tap, err)
+	}
+	log.Printf("[setupNetwork] TAP device created: %s", net.Tap)
 
 	// 加入 bridge 并启动
 	if err := runCmd("ip", "link", "set", net.Tap, "master", bridge); err != nil {
@@ -412,6 +418,8 @@ func (m *Manager) setupNetwork(net *netConfig) error {
 		log.Printf("[setupNetwork] error: failed to bring TAP up: %v", err)
 	}
 	log.Printf("[setupNetwork] TAP added to bridge and brought up: %s", net.Tap)
+
+applyProcSys:
 
 	// 开启 TAP 设备的 proxy_ndp，帮助 VM 和外部跨网桥顺畅沟通
 	proxyNdpPath := fmt.Sprintf("/proc/sys/net/ipv6/conf/%s/proxy_ndp", net.Tap)
@@ -474,7 +482,26 @@ func (m *Manager) prepareDisks(vmID, distro string, diskGB int64) error {
 		if err := runCmd("qemu-img", "resize", "-f", "raw", system, fmt.Sprintf("%dG", diskGB)); err != nil {
 			return fmt.Errorf("resize disk: %w", err)
 		}
+		// 在宿主机端扩展根分区，使其填满磁盘
+		if err := expandRootPartition(system); err != nil {
+			log.Printf("[prepareDisks] warning: expand root partition failed: %v", err)
+		}
 	}
+	return nil
+}
+
+// expandRootPartition 使用 sfdisk 扩展 raw 磁盘镜像中的分区 1（根分区）。
+// sfdisk 是 util-linux 的一部分，无需额外安装。
+// ", +" 表示保持起始扇区不变，扩展到最大可用空间。
+// sfdisk 写入时会自动修复 GPT 备份头。
+func expandRootPartition(diskPath string) error {
+	cmd := exec.Command("sfdisk", "-N", "1", "--force", diskPath)
+	cmd.Stdin = strings.NewReader(", +\n")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("sfdisk expand partition 1: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	log.Printf("[expandRootPartition] success: %s", diskPath)
 	return nil
 }
 
@@ -487,9 +514,10 @@ func (m *Manager) genCloudInit(vmID, distro, password string, net *netConfig) er
 
 	// 必须严格遵守 YAML 缩进格式
 	// 根据 distro 选择包管理器和服务启动方式
-	var pkgMgr, svcRestart, svcFile, svcEnable string
+	var pkgMgr, pkgList, svcRestart, svcFile, svcEnable string
 	if distro == "alpine" {
 		pkgMgr = "apk add --no-cache"
+		pkgList = "curl e2fsprogs"
 		svcRestart = "rc-service sshd restart 2>/dev/null || service sshd restart 2>/dev/null || true"
 		svcFile = `  - path: /etc/init.d/report-memory
     content: |
@@ -503,6 +531,7 @@ func (m *Manager) genCloudInit(vmID, distro, password string, net *netConfig) er
   - rc-service report-memory start`
 	} else {
 		pkgMgr = "apt-get update && apt-get install -y"
+		pkgList = "curl e2fsprogs cloud-guest-utils"
 		svcRestart = "systemctl restart sshd 2>/dev/null || service sshd restart 2>/dev/null || true"
 		svcFile = `  - path: /etc/systemd/system/report-memory.service
     content: |
@@ -582,11 +611,12 @@ write_files:
     permissions: '0755'
 %s
 runcmd:
+  - resize2fs /dev/vda1 || true
   - sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
   - %s
-  - %s curl
-%s
-`, password, vmID, svcFile, svcRestart, pkgMgr, svcEnable)
+  - %s %s
+  - %s
+`, password, vmID, svcFile, svcRestart, pkgMgr, pkgList, svcEnable)
 
 	metaData := fmt.Sprintf("instance-id: %s\nlocal-hostname: %s\n", vmID, vmID)
 

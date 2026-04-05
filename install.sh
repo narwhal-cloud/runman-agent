@@ -261,6 +261,7 @@ Wants=network-online.target
 Type=simple
 User=root
 OOMScoreAdjust=-999
+KillMode=process
 ExecStart=$AGENT_BINARY --config $AGENT_CONFIG_FILE
 Restart=always
 RestartSec=5
