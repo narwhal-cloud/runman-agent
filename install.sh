@@ -284,7 +284,6 @@ write_config_file() {
     local ndp_iface="${6:-}"
     local ndp_subnets="${7:-}"
     local ndp_network="${8:-}"
-    local disk_mbps="${9:-100}"
 
     mkdir -p "$AGENT_CONFIG_DIR"
 
@@ -300,7 +299,6 @@ write_config_file() {
     "web_pass_hash": "",
     "host": "",
     "max_port_forward": 20,
-    "disk_mbps": $disk_mbps,
     "ipv6_mode": "$ipv6_mode",
     "ipv6_subnet": "$ipv6_subnet",
     "ipv6_addr": "$ipv6_addr",
@@ -921,7 +919,7 @@ if [ "$VIRT_TYPE" = "cloudhv" ] && [ "$IPV6_MODE" = "subnet" ]; then
 fi
 
 # 生成配置文件（包含所有启动参数、IPv6配置和磁盘限制）
-write_config_file "$VIRT_TYPE" "$IPV6_MODE" "$IPV6_SUBNET" "$IPV6_ADDR" "$IPV6_IFACE" "$NDP_IFACE" "$NDP_SUBNETS" "$NDP_NETWORK" "100"
+write_config_file "$VIRT_TYPE" "$IPV6_MODE" "$IPV6_SUBNET" "$IPV6_ADDR" "$IPV6_IFACE" "$NDP_IFACE" "$NDP_SUBNETS" "$NDP_NETWORK"
 
 write_service_file "$VIRT_TYPE"
 start_service "$AGENT_SERVICE"

@@ -54,7 +54,6 @@ type Manager struct {
 	ipv6Addr    string                   // 单个公网 IPv6（mode=snat）
 	ipv6Iface   string                   // IPv6 所在网卡
 	ipv6Counter int                      // 子网模式下的地址计数器（用于分配 ::2, ::3 等）
-	diskMbps    int                      // 磁盘写入速率限制（Mbps）
 	vmStatus    map[string]*vmStatusInfo // 虚拟机上报的状态信息（CPU+内存）
 	vmStatusMu  sync.RWMutex
 }
@@ -168,8 +167,8 @@ type instanceConfig struct {
 }
 
 // New 创建 Manager。
-// ipv6Mode, ipv6Subnet, ipv6Addr, ipv6Iface, diskMbps 从配置文件读取后由调用者传入。
-func New(database *db.DB, ipv6Mode, ipv6Subnet, ipv6Addr, ipv6Iface string, diskMbps int) (*Manager, error) {
+// ipv6Mode, ipv6Subnet, ipv6Addr, ipv6Iface 从配置文件读取后由调用者传入。
+func New(database *db.DB, ipv6Mode, ipv6Subnet, ipv6Addr, ipv6Iface string) (*Manager, error) {
 	if _, err := os.Stat(chBinary); err != nil {
 		return nil, fmt.Errorf("cloud-hypervisor binary not found at %q: %w", chBinary, err)
 	}
@@ -189,7 +188,6 @@ func New(database *db.DB, ipv6Mode, ipv6Subnet, ipv6Addr, ipv6Iface string, disk
 		ipv6Addr:    ipv6Addr,
 		ipv6Iface:   ipv6Iface,
 		ipv6Counter: 2, // 从 ::2 开始分配
-		diskMbps:    diskMbps,
 		vmStatus:    make(map[string]*vmStatusInfo),
 	}
 	if m.ipv6Mode == "" {
@@ -936,14 +934,13 @@ func (m *Manager) buildVmConfig(vmID string, icfg *instanceConfig, net *netConfi
 		hotplugSize = &doubledMemBytes
 	}
 
-	diskRateLimit := m.buildDiskRateLimit()
 	disks := []diskConfig{
 		{
 			Path:              filepath.Join(m.instDir, vmID, "system.raw"),
 			NumQueues:         1,
 			Direct:            false,
 			IoUring:           true,
-			RateLimiterConfig: diskRateLimit,
+			RateLimiterConfig: buildDiskRateLimit(icfg.BandwidthMbps),
 		},
 	}
 	if _, err := os.Stat(filepath.Join(m.instDir, vmID, "cloudinit.img")); err == nil {
@@ -1612,11 +1609,12 @@ func cmdOutput(name string, args ...string) (string, error) {
 	return string(out), err
 }
 
-func (m *Manager) buildDiskRateLimit() *rateLimiterConfig {
-	if m.diskMbps <= 0 {
-		return nil
+func buildDiskRateLimit(mbps int) *rateLimiterConfig {
+	// 磁盘速率最小100mbps
+	if mbps <= 0 {
+		mbps = 100
 	}
-	bytesPerSec := int64(m.diskMbps) * 1_000_000 / 8
+	bytesPerSec := int64(mbps) * 1_000_000 / 8
 	bucket := &tokenBucket{
 		Size:         bytesPerSec,
 		OneTimeBurst: bytesPerSec,

@@ -81,10 +81,10 @@ func main() {
 	var rawMgr manager.VMManager
 	switch conf.VirtType {
 	case "podman":
-		rawMgr, err = podman.New(database, conf.DiskMbps)
+		rawMgr, err = podman.New(database)
 	case "cloudhv":
-		// cloud-hypervisor 初始化时传入 IPv6 配置和磁盘限制（从配置文件读取）
-		rawMgr, err = cloudhv.New(database, conf.IPv6Mode, conf.IPv6Subnet, conf.IPv6Addr, conf.IPv6Iface, conf.DiskMbps)
+		// cloud-hypervisor 初始化时传入 IPv6 配置（从配置文件读取）
+		rawMgr, err = cloudhv.New(database, conf.IPv6Mode, conf.IPv6Subnet, conf.IPv6Addr, conf.IPv6Iface)
 	default:
 		log.Fatalf("unsupported virt type: %q (supported: podman, cloudhv)", conf.VirtType)
 	}

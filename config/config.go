@@ -10,7 +10,6 @@ const (
 	DefaultDB             = "/opt/narwhal-agent/agent.db"
 	DefaultWeb            = ":8792"
 	DefaultMaxPortForward = 20
-	DefaultDiskMbps       = 100
 )
 
 // Config 是 agent 的全局配置，从 JSON 配置文件读取，通过 Web API 可修改。
@@ -37,9 +36,6 @@ type Config struct {
 
 	// 每个 VM 最大端口转发数
 	MaxPortForward int32 `json:"max_port_forward"`
-
-	// 虚拟机磁盘写入速率限制（Mbps）
-	DiskMbps int `json:"disk_mbps"`
 
 	// IPv6 配置（cloud-hypervisor 专用）
 	IPv6Mode   string `json:"ipv6_mode"`   // "none"/"subnet"/"snat"
@@ -109,9 +105,6 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.MaxPortForward <= 0 {
 		cfg.MaxPortForward = DefaultMaxPortForward
-	}
-	if cfg.DiskMbps <= 0 {
-		cfg.DiskMbps = DefaultDiskMbps
 	}
 	if cfg.IPv6Mode == "" {
 		cfg.IPv6Mode = "none"
