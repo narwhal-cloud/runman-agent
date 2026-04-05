@@ -389,20 +389,16 @@ func (m *Manager) allocIPv6FromSubnet(idx int) string {
 }
 
 func (m *Manager) setupNetwork(net *netConfig) error {
-	// 如果 TAP 已存在且已加入正确的 bridge，说明 VM 仍在运行，跳过重建避免断网
+	// 清理旧的 TAP 设备。避免被遗留的 vhost 占用，或者之前创建时没有带 multi_queue 参数，
+	// 导致后续 CPU > 1 的 VM 启动时内核返回 Resource busy (os error 16)。
 	if runCmd("ip", "link", "show", net.Tap) == nil {
-		master, _ := cmdOutput("ip", "-o", "link", "show", net.Tap)
-		if strings.Contains(master, "master "+bridge) {
-			log.Printf("[setupNetwork] TAP already up on bridge, skipping recreate: %s", net.Tap)
-			goto applyProcSys
-		}
 		log.Printf("[setupNetwork] removing old TAP device: %s", net.Tap)
 		_ = runCmd("ip", "link", "delete", net.Tap)
 	}
 
-	// 创建新的 TAP 设备
-	log.Printf("[setupNetwork] creating TAP device: %s", net.Tap)
-	if err := runCmd("ip", "tuntap", "add", net.Tap, "mode", "tap"); err != nil {
+	// 创建新的 TAP 设备，必须开启 multi_queue 才能被 Cloud-Hypervisor 用来支持多队列网卡
+	log.Printf("[setupNetwork] creating TAP device with multi_queue: %s", net.Tap)
+	if err := runCmd("ip", "tuntap", "add", net.Tap, "mode", "tap", "multi_queue"); err != nil {
 		log.Printf("[setupNetwork] error: failed to create TAP device %s: %v", net.Tap, err)
 		return fmt.Errorf("create tap %s: %w", net.Tap, err)
 	}
@@ -416,8 +412,6 @@ func (m *Manager) setupNetwork(net *netConfig) error {
 		log.Printf("[setupNetwork] error: failed to bring TAP up: %v", err)
 	}
 	log.Printf("[setupNetwork] TAP added to bridge and brought up: %s", net.Tap)
-
-applyProcSys:
 
 	// 开启 TAP 设备的 proxy_ndp，帮助 VM 和外部跨网桥顺畅沟通
 	proxyNdpPath := fmt.Sprintf("/proc/sys/net/ipv6/conf/%s/proxy_ndp", net.Tap)

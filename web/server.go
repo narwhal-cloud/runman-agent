@@ -538,9 +538,6 @@ func (s *Server) handleReinstallVM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 清理旧的端口转发规则（重装时会删除旧 VM，新 VM 需要重新添加）
-	s.pf.DeleteVM(r.Context(), vmID)
-
 	cmd := &agent.CmdReinstallVM{
 		VmId:          vmID,
 		OsImage:       req.OsImage,
@@ -555,6 +552,9 @@ func (s *Server) handleReinstallVM(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, err, 500)
 		return
 	}
+
+	// 重新加载端口转发规则（因为重装可能分配了新的内网 IP）
+	s.pf.RefreshVM(r.Context(), vmID)
 
 	w.WriteHeader(http.StatusNoContent)
 }

@@ -367,9 +367,6 @@ func (a *Agent) handleCommand(stream agent.AgentGateway_ConnectClient, env *agen
 		err = a.mgr.CreateVM(ctx, p.CreateVm)
 
 	case *agent.PlatformEnvelope_ReinstallVm:
-		// 清理旧的端口转发规则（重装时会删除旧 VM，新 VM 需要重新添加）
-		a.pf.DeleteVM(ctx, p.ReinstallVm.VmId)
-
 		_, err = a.db.GetVMConfig(p.ReinstallVm.VmId)
 		if err != nil {
 			// 母鸡 DB 丢失，直接创建
@@ -385,6 +382,9 @@ func (a *Agent) handleCommand(stream agent.AgentGateway_ConnectClient, env *agen
 		} else {
 			// 正常重装流程
 			err = a.mgr.ReinstallVM(ctx, p.ReinstallVm)
+		}
+		if err == nil {
+			a.pf.RefreshVM(ctx, p.ReinstallVm.VmId)
 		}
 	case *agent.PlatformEnvelope_DeleteVm:
 		err = a.mgr.DeleteVM(ctx, p.DeleteVm.VmId)
