@@ -111,6 +111,7 @@ type netCfg struct {
 	Tap               string             `json:"tap"`
 	Mac               string             `json:"mac"`
 	ID                string             `json:"id,omitempty"`
+	NumQueues         int                `json:"num_queues,omitempty"`
 	RateLimiterConfig *rateLimiterConfig `json:"rate_limiter_config,omitempty"`
 }
 
@@ -969,6 +970,7 @@ func (m *Manager) buildVmConfig(vmID string, icfg *instanceConfig, net *netConfi
 			Tap:               net.Tap,
 			Mac:               net.MAC,
 			ID:                "net0",
+			NumQueues:         icfg.CPU * 2, // 必须显式告诉 cloud-hypervisor 使用几个队列，通常建议为 vCPU * 2（RX/TX）
 			RateLimiterConfig: buildNetRateLimit(icfg.BandwidthMbps),
 		}},
 		Rng: &rngConfig{Src: "/dev/urandom"},
