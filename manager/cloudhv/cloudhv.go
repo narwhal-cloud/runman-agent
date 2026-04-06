@@ -389,7 +389,7 @@ func (m *Manager) allocIPv6FromSubnet(idx int) string {
 	return fmt.Sprintf("fd91:cafe:cafe:10::%d", idx)
 }
 
-func (m *Manager) setupNetwork(net *netConfig) error {
+func (m *Manager) setupNetwork(net *netConfig, cpu int) error {
 	// 清理旧的 TAP 设备。避免被遗留的 vhost 占用，或者之前创建时没有带 multi_queue 参数，
 	// 导致后续 CPU > 1 的 VM 启动时内核返回 Resource busy (os error 16)。
 	if runCmd("ip", "link", "show", net.Tap) == nil {
@@ -397,9 +397,14 @@ func (m *Manager) setupNetwork(net *netConfig) error {
 		_ = runCmd("ip", "link", "delete", net.Tap)
 	}
 
-	// 创建新的 TAP 设备，必须开启 multi_queue 才能被 Cloud-Hypervisor 用来支持多队列网卡
-	log.Printf("[setupNetwork] creating TAP device with multi_queue: %s", net.Tap)
-	if err := runCmd("ip", "tuntap", "add", net.Tap, "mode", "tap", "multi_queue"); err != nil {
+	// CPU > 1 时才开启 multi_queue：cloud-hypervisor 在 num_queues=2（单队列）时打开 TAP
+	// 不带 IFF_MULTI_QUEUE，而 multi_queue TAP 要求所有 FD 都带该 flag，否则内核报错。
+	tapArgs := []string{"tuntap", "add", net.Tap, "mode", "tap"}
+	if cpu > 1 {
+		tapArgs = append(tapArgs, "multi_queue")
+	}
+	log.Printf("[setupNetwork] creating TAP device (multi_queue=%v): %s", cpu > 1, net.Tap)
+	if err := runCmd("ip", tapArgs...); err != nil {
 		log.Printf("[setupNetwork] error: failed to create TAP device %s: %v", net.Tap, err)
 		return fmt.Errorf("create tap %s: %w", net.Tap, err)
 	}
@@ -1063,7 +1068,7 @@ func (m *Manager) CreateVM(_ context.Context, req *agent.CmdCreateVM) error {
 	}
 	log.Printf("[CreateVM] cloud-init generated: vmID=%s", req.VmId)
 
-	if err := m.setupNetwork(netCfg); err != nil {
+	if err := m.setupNetwork(netCfg, int(req.Cpu)); err != nil {
 		log.Printf("[CreateVM] error: failed to setup network: %v", err)
 		return err
 	}
@@ -1122,7 +1127,7 @@ func (m *Manager) StartVM(_ context.Context, vmID string) error {
 		if err != nil {
 			return err
 		}
-		if err := m.setupNetwork(netCfg); err != nil {
+		if err := m.setupNetwork(netCfg, icfg.CPU); err != nil {
 			return err
 		}
 		if err := m.launchProcess(vmID); err != nil {

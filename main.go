@@ -56,6 +56,9 @@ type Agent struct {
 	lastConnected time.Time
 	entryIPv4     string // 公网 IPv4，启动时自动检测
 	entryIPv6     string // 公网 IPv6，启动时自动检测
+
+	// ping 健康检测（用于检测僵尸连接）
+	lastPingTime time.Time // 最后收到 Ping 的时间
 }
 
 func main() {
@@ -267,12 +270,29 @@ func (a *Agent) connectAndLoop() error {
 	log.Printf("Connected to platform: %s", serverAddr)
 	a.setConnected(true, "")
 
+	// 初始化 ping 监测
+	a.mu.Lock()
+	a.lastPingTime = time.Now()
+	a.mu.Unlock()
+
 	// 连接后立即上报一次状态，无需等待第一个 ticker
 	go a.sendHeartbeat(stream)
 
 	go a.heartbeatLoop(stream)
 
+	// 启动 ping 超时检测：如果 60 秒未收到 Ping，判定连接死亡
+	pingDead := make(chan struct{})
+	go a.monitorPingTimeout(pingDead)
+
 	for {
+		select {
+		case <-stream.Context().Done():
+			return stream.Context().Err()
+		case <-pingDead:
+			return errors.New("ping timeout: connection dead")
+		default:
+		}
+
 		env, err := stream.Recv()
 		if err == io.EOF {
 			return nil
@@ -422,6 +442,10 @@ func (a *Agent) handleCommand(stream agent.AgentGateway_ConnectClient, env *agen
 		err = a.pf.RemoveMapping(ctx, p.DelPortFwd.VmId, proto, int(p.DelPortFwd.HostPort))
 
 	case *agent.PlatformEnvelope_Ping:
+		// 更新最后收到 Ping 的时间（心跳检测）
+		a.mu.Lock()
+		a.lastPingTime = time.Now()
+		a.mu.Unlock()
 		return
 
 	case *agent.PlatformEnvelope_GetPortFwds:
@@ -556,4 +580,29 @@ func pickFreePort(min, max int) (int, error) {
 		}
 	}
 	return 0, fmt.Errorf("no free port found in [%d, %d)", min, max)
+}
+
+// monitorPingTimeout 定期检查是否长时间未收到 Ping，检测僵尸连接。
+// 如果 pingTimeout (60秒) 内未收到任何 Ping，则向 pingDead 通道发送信号。
+func (a *Agent) monitorPingTimeout(pingDead chan<- struct{}) {
+	const pingTimeout = 60 * time.Second
+	const checkInterval = 10 * time.Second
+
+	ticker := time.NewTicker(checkInterval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		a.mu.RLock()
+		lastPingTime := a.lastPingTime
+		a.mu.RUnlock()
+
+		if time.Since(lastPingTime) > pingTimeout {
+			log.Printf("Ping timeout: no ping received for %v", pingTimeout)
+			select {
+			case pingDead <- struct{}{}:
+			default:
+			}
+			return
+		}
+	}
 }
