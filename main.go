@@ -41,6 +41,14 @@ var version = "dev"
 
 const serverAddr = "hosting.fuckip.me:443"
 
+// agentConsoleSession 保存一个活跃的控制台 TTY 会话的状态，
+// 用于将平台下发的 stdin / resize 消息路由到正确的 AttachTTY 调用。
+type agentConsoleSession struct {
+	stdinPW  *io.PipeWriter
+	resizeCh chan manager.ResizeEvent
+	cancel   context.CancelFunc
+}
+
 // Agent 是运行在宿主机上的代理进程，负责管理容器生命周期、
 // 收集监控指标并通过 gRPC 双向流与平台保持长连接。
 type Agent struct {
@@ -59,6 +67,14 @@ type Agent struct {
 
 	// ping 健康检测（用于检测僵尸连接）
 	lastPingTime time.Time // 最后收到 Ping 的时间
+
+	// consoleSessions 存储 sessionID (string) → *agentConsoleSession，
+	// 跨多个 handleCommand goroutine 并发安全访问。
+	consoleSessions sync.Map
+
+	// streamMu 序列化对 gRPC 客户端流的并发 Send 调用。
+	// gRPC Go 客户端的 Send 内部可能无锁，控制台高频输出必须显式加锁。
+	streamMu sync.Mutex
 }
 
 func main() {
@@ -224,6 +240,113 @@ func (a *Agent) run() {
 		a.setConnected(false, err.Error())
 		time.Sleep(5 * time.Second)
 	}
+}
+
+// safeSend 线程安全地向 gRPC 流发送消息，序列化所有并发 Send 调用。
+func (a *Agent) safeSend(stream agent.AgentGateway_ConnectClient, msg *agent.AgentEnvelope) error {
+	a.streamMu.Lock()
+	defer a.streamMu.Unlock()
+	return stream.Send(msg)
+}
+
+// getConsoleSession 从 consoleSessions 中查找指定 ID 的控制台会话。
+func (a *Agent) getConsoleSession(sessionID string) *agentConsoleSession {
+	if v, ok := a.consoleSessions.Load(sessionID); ok {
+		return v.(*agentConsoleSession)
+	}
+	return nil
+}
+
+// handleConsoleOpen 在本地打开一个 VM 控制台 TTY 会话，
+// 附接成功后持续将 TTY 输出回传给平台，直到会话结束。
+func (a *Agent) handleConsoleOpen(stream agent.AgentGateway_ConnectClient, cmd *agent.CmdConsoleOpen) {
+	sessCtx, cancel := context.WithCancel(context.Background())
+	stdinPR, stdinPW := io.Pipe()
+	resizeCh := make(chan manager.ResizeEvent, 8)
+
+	sess := &agentConsoleSession{
+		stdinPW:  stdinPW,
+		resizeCh: resizeCh,
+		cancel:   cancel,
+	}
+	a.consoleSessions.Store(cmd.SessionId, sess)
+	defer func() {
+		a.consoleSessions.Delete(cmd.SessionId)
+		cancel()
+		_ = stdinPW.Close()
+	}()
+
+	// 发送初始 resize 以设置终端尺寸（在 CONNECTED 之前）
+	if cmd.Cols > 0 && cmd.Rows > 0 {
+		select {
+		case resizeCh <- manager.ResizeEvent{Cols: uint(cmd.Cols), Rows: uint(cmd.Rows)}:
+		default:
+		}
+	}
+
+	// consoleWriter 将 TTY 输出写回平台（每次 Write 对应一条 ConsoleOutput 消息）
+	cw := &consoleWriter{
+		sessionID: cmd.SessionId,
+		agent:     a,
+		stream:    stream,
+	}
+
+	// 通知平台：TTY 已成功附接
+	_ = a.safeSend(stream, &agent.AgentEnvelope{
+		MessageId: uuid.NewString(),
+		Payload: &agent.AgentEnvelope_ConsoleEvent{
+			ConsoleEvent: &agent.ConsoleEvent{
+				SessionId: cmd.SessionId,
+				Type:      agent.ConsoleEventType_CONSOLE_EVENT_CONNECTED,
+			},
+		},
+	})
+
+	// 阻塞直到 AttachTTY 返回（TTY 结束或 ctx 取消）
+	attachErr := a.mgr.AttachTTY(sessCtx, cmd.VmId, stdinPR, cw, resizeCh)
+
+	// 通知平台：TTY 已断开
+	evtType := agent.ConsoleEventType_CONSOLE_EVENT_DISCONNECTED
+	reason := ""
+	if attachErr != nil && sessCtx.Err() == nil {
+		evtType = agent.ConsoleEventType_CONSOLE_EVENT_ERROR
+		reason = attachErr.Error()
+	}
+	_ = a.safeSend(stream, &agent.AgentEnvelope{
+		MessageId: uuid.NewString(),
+		Payload: &agent.AgentEnvelope_ConsoleEvent{
+			ConsoleEvent: &agent.ConsoleEvent{
+				SessionId: cmd.SessionId,
+				Type:      evtType,
+				Reason:    reason,
+			},
+		},
+	})
+}
+
+// consoleWriter 实现 io.Writer，将 TTY 输出封装为 ConsoleOutput 消息发送给平台。
+type consoleWriter struct {
+	sessionID string
+	agent     *Agent
+	stream    agent.AgentGateway_ConnectClient
+}
+
+func (cw *consoleWriter) Write(p []byte) (int, error) {
+	data := make([]byte, len(p))
+	copy(data, p)
+	err := cw.agent.safeSend(cw.stream, &agent.AgentEnvelope{
+		MessageId: uuid.NewString(),
+		Payload: &agent.AgentEnvelope_ConsoleOutput{
+			ConsoleOutput: &agent.ConsoleOutput{
+				SessionId: cw.sessionID,
+				Data:      data,
+			},
+		},
+	})
+	if err != nil {
+		return 0, err
+	}
+	return len(p), nil
 }
 
 // setConnected 线程安全地更新连接状态
@@ -466,7 +589,7 @@ func (a *Agent) handleCommand(stream agent.AgentGateway_ConnectClient, env *agen
 					Description: pf.Description,
 				})
 			}
-			_ = stream.Send(&agent.AgentEnvelope{
+			_ = a.safeSend(stream, &agent.AgentEnvelope{
 				MessageId: uuid.NewString(),
 				Payload: &agent.AgentEnvelope_PortFwdList{
 					PortFwdList: &agent.PortForwardList{
@@ -477,6 +600,36 @@ func (a *Agent) handleCommand(stream agent.AgentGateway_ConnectClient, env *agen
 			})
 			return // 已单独回复，跳过末尾的 CommandResult
 		}
+
+	// ---- 控制台 TTY（不走 CommandResult 流程）----
+
+	case *agent.PlatformEnvelope_ConsoleOpen:
+		go a.handleConsoleOpen(stream, p.ConsoleOpen)
+		return
+
+	case *agent.PlatformEnvelope_ConsoleInput:
+		if sess := a.getConsoleSession(p.ConsoleInput.SessionId); sess != nil {
+			_, _ = sess.stdinPW.Write(p.ConsoleInput.Data)
+		}
+		return
+
+	case *agent.PlatformEnvelope_ConsoleResize:
+		if sess := a.getConsoleSession(p.ConsoleResize.SessionId); sess != nil {
+			select {
+			case sess.resizeCh <- manager.ResizeEvent{
+				Cols: uint(p.ConsoleResize.Cols),
+				Rows: uint(p.ConsoleResize.Rows),
+			}:
+			default:
+			}
+		}
+		return
+
+	case *agent.PlatformEnvelope_ConsoleClose:
+		if sess := a.getConsoleSession(p.ConsoleClose.SessionId); sess != nil {
+			sess.cancel()
+		}
+		return
 	}
 
 	res := &agent.CommandResult{CommandId: env.CommandId, Success: err == nil}

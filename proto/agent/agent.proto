@@ -34,6 +34,14 @@ enum Protocol {
   PROTOCOL_UDP         = 2;
 }
 
+// 控制台会话事件类型
+enum ConsoleEventType {
+  CONSOLE_EVENT_UNSPECIFIED  = 0;
+  CONSOLE_EVENT_CONNECTED    = 1; // TTY 已成功附接到 VM
+  CONSOLE_EVENT_DISCONNECTED = 2; // TTY 正常断开
+  CONSOLE_EVENT_ERROR        = 3; // TTY 异常断开
+}
+
 // ================================================================
 // 上行消息：Agent → Platform
 // ================================================================
@@ -44,10 +52,25 @@ message AgentEnvelope {
   string message_id = 1;
 
   oneof payload {
-    Heartbeat       heartbeat     = 2; // 心跳（每 30 秒上报一次）
-    CommandResult   cmd_result    = 4; // 平台命令的执行结果
-    PortForwardList port_fwd_list = 5; // CmdGetPortForwards 的响应
+    Heartbeat       heartbeat      = 2; // 心跳（每 30 秒上报一次）
+    CommandResult   cmd_result     = 4; // 平台命令的执行结果
+    PortForwardList port_fwd_list  = 5; // CmdGetPortForwards 的响应
+    ConsoleOutput   console_output = 8; // 控制台 TTY 输出数据
+    ConsoleEvent    console_event  = 9; // 控制台会话生命周期事件
   }
+}
+
+// 控制台 TTY 输出（stdout/stderr 原始字节）
+message ConsoleOutput {
+  string session_id = 1; // 会话唯一 ID
+  bytes  data       = 2; // TTY 原始输出字节
+}
+
+// 控制台会话生命周期事件
+message ConsoleEvent {
+  string           session_id = 1;
+  ConsoleEventType type       = 2;
+  string           reason     = 3; // DISCONNECTED / ERROR 时的原因描述
 }
 
 // 心跳包 — 携带宿主机实时负载与 VM 摘要列表。
@@ -146,7 +169,37 @@ message PlatformEnvelope {
     CmdReinstallVM      reinstall_vm    = 13; // 重装 VM 系统
     CmdGetPortForwards  get_port_fwds   = 14; // 查询某 VM 的端口转发规则列表
     Ping                ping            = 15; // 服务端保活 ping，agent 忽略即可
+    CmdConsoleOpen      console_open    = 16; // 打开控制台会话
+    CmdConsoleInput     console_input   = 17; // 转发键盘输入
+    CmdConsoleResize    console_resize  = 18; // 调整终端尺寸
+    CmdConsoleClose     console_close   = 19; // 关闭控制台会话
   }
+}
+
+// 打开控制台会话
+message CmdConsoleOpen {
+  string vm_id      = 1; // VM UUID
+  string session_id = 2; // 平台生成的唯一会话 ID
+  uint32 cols       = 3; // 初始终端宽度（列）
+  uint32 rows       = 4; // 初始终端高度（行）
+}
+
+// 转发键盘输入到控制台
+message CmdConsoleInput {
+  string session_id = 1;
+  bytes  data       = 2; // stdin 原始字节
+}
+
+// 调整控制台终端尺寸
+message CmdConsoleResize {
+  string session_id = 1;
+  uint32 cols       = 2;
+  uint32 rows       = 3;
+}
+
+// 关闭控制台会话
+message CmdConsoleClose {
+  string session_id = 1;
 }
 
 // 服务端定期下发的保活消息，用于维持 CF 代理的下行连接活跃。

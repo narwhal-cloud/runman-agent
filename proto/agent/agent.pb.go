@@ -127,6 +127,59 @@ func (Protocol) EnumDescriptor() ([]byte, []int) {
 	return file_proto_agent_agent_proto_rawDescGZIP(), []int{1}
 }
 
+// 控制台会话事件类型
+type ConsoleEventType int32
+
+const (
+	ConsoleEventType_CONSOLE_EVENT_UNSPECIFIED  ConsoleEventType = 0
+	ConsoleEventType_CONSOLE_EVENT_CONNECTED    ConsoleEventType = 1 // TTY 已成功附接到 VM
+	ConsoleEventType_CONSOLE_EVENT_DISCONNECTED ConsoleEventType = 2 // TTY 正常断开
+	ConsoleEventType_CONSOLE_EVENT_ERROR        ConsoleEventType = 3 // TTY 异常断开
+)
+
+// Enum value maps for ConsoleEventType.
+var (
+	ConsoleEventType_name = map[int32]string{
+		0: "CONSOLE_EVENT_UNSPECIFIED",
+		1: "CONSOLE_EVENT_CONNECTED",
+		2: "CONSOLE_EVENT_DISCONNECTED",
+		3: "CONSOLE_EVENT_ERROR",
+	}
+	ConsoleEventType_value = map[string]int32{
+		"CONSOLE_EVENT_UNSPECIFIED":  0,
+		"CONSOLE_EVENT_CONNECTED":    1,
+		"CONSOLE_EVENT_DISCONNECTED": 2,
+		"CONSOLE_EVENT_ERROR":        3,
+	}
+)
+
+func (x ConsoleEventType) Enum() *ConsoleEventType {
+	p := new(ConsoleEventType)
+	*p = x
+	return p
+}
+
+func (x ConsoleEventType) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ConsoleEventType) Descriptor() protoreflect.EnumDescriptor {
+	return file_proto_agent_agent_proto_enumTypes[2].Descriptor()
+}
+
+func (ConsoleEventType) Type() protoreflect.EnumType {
+	return &file_proto_agent_agent_proto_enumTypes[2]
+}
+
+func (x ConsoleEventType) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ConsoleEventType.Descriptor instead.
+func (ConsoleEventType) EnumDescriptor() ([]byte, []int) {
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{2}
+}
+
 // Agent 发往平台的信封，每条消息携带唯一 message_id 用于追踪。
 type AgentEnvelope struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -137,6 +190,8 @@ type AgentEnvelope struct {
 	//	*AgentEnvelope_Heartbeat
 	//	*AgentEnvelope_CmdResult
 	//	*AgentEnvelope_PortFwdList
+	//	*AgentEnvelope_ConsoleOutput
+	//	*AgentEnvelope_ConsoleEvent
 	Payload       isAgentEnvelope_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -213,6 +268,24 @@ func (x *AgentEnvelope) GetPortFwdList() *PortForwardList {
 	return nil
 }
 
+func (x *AgentEnvelope) GetConsoleOutput() *ConsoleOutput {
+	if x != nil {
+		if x, ok := x.Payload.(*AgentEnvelope_ConsoleOutput); ok {
+			return x.ConsoleOutput
+		}
+	}
+	return nil
+}
+
+func (x *AgentEnvelope) GetConsoleEvent() *ConsoleEvent {
+	if x != nil {
+		if x, ok := x.Payload.(*AgentEnvelope_ConsoleEvent); ok {
+			return x.ConsoleEvent
+		}
+	}
+	return nil
+}
+
 type isAgentEnvelope_Payload interface {
 	isAgentEnvelope_Payload()
 }
@@ -229,11 +302,137 @@ type AgentEnvelope_PortFwdList struct {
 	PortFwdList *PortForwardList `protobuf:"bytes,5,opt,name=port_fwd_list,json=portFwdList,proto3,oneof"` // CmdGetPortForwards 的响应
 }
 
+type AgentEnvelope_ConsoleOutput struct {
+	ConsoleOutput *ConsoleOutput `protobuf:"bytes,8,opt,name=console_output,json=consoleOutput,proto3,oneof"` // 控制台 TTY 输出数据
+}
+
+type AgentEnvelope_ConsoleEvent struct {
+	ConsoleEvent *ConsoleEvent `protobuf:"bytes,9,opt,name=console_event,json=consoleEvent,proto3,oneof"` // 控制台会话生命周期事件
+}
+
 func (*AgentEnvelope_Heartbeat) isAgentEnvelope_Payload() {}
 
 func (*AgentEnvelope_CmdResult) isAgentEnvelope_Payload() {}
 
 func (*AgentEnvelope_PortFwdList) isAgentEnvelope_Payload() {}
+
+func (*AgentEnvelope_ConsoleOutput) isAgentEnvelope_Payload() {}
+
+func (*AgentEnvelope_ConsoleEvent) isAgentEnvelope_Payload() {}
+
+// 控制台 TTY 输出（stdout/stderr 原始字节）
+type ConsoleOutput struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"` // 会话唯一 ID
+	Data          []byte                 `protobuf:"bytes,2,opt,name=data,proto3" json:"data,omitempty"`                            // TTY 原始输出字节
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ConsoleOutput) Reset() {
+	*x = ConsoleOutput{}
+	mi := &file_proto_agent_agent_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ConsoleOutput) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ConsoleOutput) ProtoMessage() {}
+
+func (x *ConsoleOutput) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_agent_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ConsoleOutput.ProtoReflect.Descriptor instead.
+func (*ConsoleOutput) Descriptor() ([]byte, []int) {
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *ConsoleOutput) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *ConsoleOutput) GetData() []byte {
+	if x != nil {
+		return x.Data
+	}
+	return nil
+}
+
+// 控制台会话生命周期事件
+type ConsoleEvent struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	Type          ConsoleEventType       `protobuf:"varint,2,opt,name=type,proto3,enum=agent.ConsoleEventType" json:"type,omitempty"`
+	Reason        string                 `protobuf:"bytes,3,opt,name=reason,proto3" json:"reason,omitempty"` // DISCONNECTED / ERROR 时的原因描述
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ConsoleEvent) Reset() {
+	*x = ConsoleEvent{}
+	mi := &file_proto_agent_agent_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ConsoleEvent) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ConsoleEvent) ProtoMessage() {}
+
+func (x *ConsoleEvent) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_agent_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ConsoleEvent.ProtoReflect.Descriptor instead.
+func (*ConsoleEvent) Descriptor() ([]byte, []int) {
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *ConsoleEvent) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *ConsoleEvent) GetType() ConsoleEventType {
+	if x != nil {
+		return x.Type
+	}
+	return ConsoleEventType_CONSOLE_EVENT_UNSPECIFIED
+}
+
+func (x *ConsoleEvent) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
 
 // 心跳包 — 携带宿主机实时负载与 VM 摘要列表。
 type Heartbeat struct {
@@ -267,7 +466,7 @@ type Heartbeat struct {
 
 func (x *Heartbeat) Reset() {
 	*x = Heartbeat{}
-	mi := &file_proto_agent_agent_proto_msgTypes[1]
+	mi := &file_proto_agent_agent_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -279,7 +478,7 @@ func (x *Heartbeat) String() string {
 func (*Heartbeat) ProtoMessage() {}
 
 func (x *Heartbeat) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[1]
+	mi := &file_proto_agent_agent_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -292,7 +491,7 @@ func (x *Heartbeat) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Heartbeat.ProtoReflect.Descriptor instead.
 func (*Heartbeat) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{1}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *Heartbeat) GetTimestamp() int64 {
@@ -439,7 +638,7 @@ type OSImageInfo struct {
 
 func (x *OSImageInfo) Reset() {
 	*x = OSImageInfo{}
-	mi := &file_proto_agent_agent_proto_msgTypes[2]
+	mi := &file_proto_agent_agent_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -451,7 +650,7 @@ func (x *OSImageInfo) String() string {
 func (*OSImageInfo) ProtoMessage() {}
 
 func (x *OSImageInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[2]
+	mi := &file_proto_agent_agent_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -464,7 +663,7 @@ func (x *OSImageInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OSImageInfo.ProtoReflect.Descriptor instead.
 func (*OSImageInfo) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{2}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *OSImageInfo) GetId() string {
@@ -499,7 +698,7 @@ type VMSummary struct {
 
 func (x *VMSummary) Reset() {
 	*x = VMSummary{}
-	mi := &file_proto_agent_agent_proto_msgTypes[3]
+	mi := &file_proto_agent_agent_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -511,7 +710,7 @@ func (x *VMSummary) String() string {
 func (*VMSummary) ProtoMessage() {}
 
 func (x *VMSummary) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[3]
+	mi := &file_proto_agent_agent_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -524,7 +723,7 @@ func (x *VMSummary) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VMSummary.ProtoReflect.Descriptor instead.
 func (*VMSummary) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{3}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *VMSummary) GetVmId() string {
@@ -601,7 +800,7 @@ type PortForwardList struct {
 
 func (x *PortForwardList) Reset() {
 	*x = PortForwardList{}
-	mi := &file_proto_agent_agent_proto_msgTypes[4]
+	mi := &file_proto_agent_agent_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -613,7 +812,7 @@ func (x *PortForwardList) String() string {
 func (*PortForwardList) ProtoMessage() {}
 
 func (x *PortForwardList) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[4]
+	mi := &file_proto_agent_agent_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -626,7 +825,7 @@ func (x *PortForwardList) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PortForwardList.ProtoReflect.Descriptor instead.
 func (*PortForwardList) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{4}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *PortForwardList) GetCommandId() string {
@@ -657,7 +856,7 @@ type PortForwardEntry struct {
 
 func (x *PortForwardEntry) Reset() {
 	*x = PortForwardEntry{}
-	mi := &file_proto_agent_agent_proto_msgTypes[5]
+	mi := &file_proto_agent_agent_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -669,7 +868,7 @@ func (x *PortForwardEntry) String() string {
 func (*PortForwardEntry) ProtoMessage() {}
 
 func (x *PortForwardEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[5]
+	mi := &file_proto_agent_agent_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -682,7 +881,7 @@ func (x *PortForwardEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PortForwardEntry.ProtoReflect.Descriptor instead.
 func (*PortForwardEntry) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{5}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *PortForwardEntry) GetVmId() string {
@@ -733,7 +932,7 @@ type CommandResult struct {
 
 func (x *CommandResult) Reset() {
 	*x = CommandResult{}
-	mi := &file_proto_agent_agent_proto_msgTypes[6]
+	mi := &file_proto_agent_agent_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -745,7 +944,7 @@ func (x *CommandResult) String() string {
 func (*CommandResult) ProtoMessage() {}
 
 func (x *CommandResult) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[6]
+	mi := &file_proto_agent_agent_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -758,7 +957,7 @@ func (x *CommandResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommandResult.ProtoReflect.Descriptor instead.
 func (*CommandResult) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{6}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *CommandResult) GetCommandId() string {
@@ -808,6 +1007,10 @@ type PlatformEnvelope struct {
 	//	*PlatformEnvelope_ReinstallVm
 	//	*PlatformEnvelope_GetPortFwds
 	//	*PlatformEnvelope_Ping
+	//	*PlatformEnvelope_ConsoleOpen
+	//	*PlatformEnvelope_ConsoleInput
+	//	*PlatformEnvelope_ConsoleResize
+	//	*PlatformEnvelope_ConsoleClose
 	Payload       isPlatformEnvelope_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -815,7 +1018,7 @@ type PlatformEnvelope struct {
 
 func (x *PlatformEnvelope) Reset() {
 	*x = PlatformEnvelope{}
-	mi := &file_proto_agent_agent_proto_msgTypes[7]
+	mi := &file_proto_agent_agent_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -827,7 +1030,7 @@ func (x *PlatformEnvelope) String() string {
 func (*PlatformEnvelope) ProtoMessage() {}
 
 func (x *PlatformEnvelope) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[7]
+	mi := &file_proto_agent_agent_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -840,7 +1043,7 @@ func (x *PlatformEnvelope) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PlatformEnvelope.ProtoReflect.Descriptor instead.
 func (*PlatformEnvelope) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{7}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *PlatformEnvelope) GetCommandId() string {
@@ -956,6 +1159,42 @@ func (x *PlatformEnvelope) GetPing() *Ping {
 	return nil
 }
 
+func (x *PlatformEnvelope) GetConsoleOpen() *CmdConsoleOpen {
+	if x != nil {
+		if x, ok := x.Payload.(*PlatformEnvelope_ConsoleOpen); ok {
+			return x.ConsoleOpen
+		}
+	}
+	return nil
+}
+
+func (x *PlatformEnvelope) GetConsoleInput() *CmdConsoleInput {
+	if x != nil {
+		if x, ok := x.Payload.(*PlatformEnvelope_ConsoleInput); ok {
+			return x.ConsoleInput
+		}
+	}
+	return nil
+}
+
+func (x *PlatformEnvelope) GetConsoleResize() *CmdConsoleResize {
+	if x != nil {
+		if x, ok := x.Payload.(*PlatformEnvelope_ConsoleResize); ok {
+			return x.ConsoleResize
+		}
+	}
+	return nil
+}
+
+func (x *PlatformEnvelope) GetConsoleClose() *CmdConsoleClose {
+	if x != nil {
+		if x, ok := x.Payload.(*PlatformEnvelope_ConsoleClose); ok {
+			return x.ConsoleClose
+		}
+	}
+	return nil
+}
+
 type isPlatformEnvelope_Payload interface {
 	isPlatformEnvelope_Payload()
 }
@@ -1004,6 +1243,22 @@ type PlatformEnvelope_Ping struct {
 	Ping *Ping `protobuf:"bytes,15,opt,name=ping,proto3,oneof"` // 服务端保活 ping，agent 忽略即可
 }
 
+type PlatformEnvelope_ConsoleOpen struct {
+	ConsoleOpen *CmdConsoleOpen `protobuf:"bytes,16,opt,name=console_open,json=consoleOpen,proto3,oneof"` // 打开控制台会话
+}
+
+type PlatformEnvelope_ConsoleInput struct {
+	ConsoleInput *CmdConsoleInput `protobuf:"bytes,17,opt,name=console_input,json=consoleInput,proto3,oneof"` // 转发键盘输入
+}
+
+type PlatformEnvelope_ConsoleResize struct {
+	ConsoleResize *CmdConsoleResize `protobuf:"bytes,18,opt,name=console_resize,json=consoleResize,proto3,oneof"` // 调整终端尺寸
+}
+
+type PlatformEnvelope_ConsoleClose struct {
+	ConsoleClose *CmdConsoleClose `protobuf:"bytes,19,opt,name=console_close,json=consoleClose,proto3,oneof"` // 关闭控制台会话
+}
+
 func (*PlatformEnvelope_CreateVm) isPlatformEnvelope_Payload() {}
 
 func (*PlatformEnvelope_StartVm) isPlatformEnvelope_Payload() {}
@@ -1026,6 +1281,242 @@ func (*PlatformEnvelope_GetPortFwds) isPlatformEnvelope_Payload() {}
 
 func (*PlatformEnvelope_Ping) isPlatformEnvelope_Payload() {}
 
+func (*PlatformEnvelope_ConsoleOpen) isPlatformEnvelope_Payload() {}
+
+func (*PlatformEnvelope_ConsoleInput) isPlatformEnvelope_Payload() {}
+
+func (*PlatformEnvelope_ConsoleResize) isPlatformEnvelope_Payload() {}
+
+func (*PlatformEnvelope_ConsoleClose) isPlatformEnvelope_Payload() {}
+
+// 打开控制台会话
+type CmdConsoleOpen struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	VmId          string                 `protobuf:"bytes,1,opt,name=vm_id,json=vmId,proto3" json:"vm_id,omitempty"`                // VM UUID
+	SessionId     string                 `protobuf:"bytes,2,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"` // 平台生成的唯一会话 ID
+	Cols          uint32                 `protobuf:"varint,3,opt,name=cols,proto3" json:"cols,omitempty"`                           // 初始终端宽度（列）
+	Rows          uint32                 `protobuf:"varint,4,opt,name=rows,proto3" json:"rows,omitempty"`                           // 初始终端高度（行）
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CmdConsoleOpen) Reset() {
+	*x = CmdConsoleOpen{}
+	mi := &file_proto_agent_agent_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CmdConsoleOpen) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CmdConsoleOpen) ProtoMessage() {}
+
+func (x *CmdConsoleOpen) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_agent_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CmdConsoleOpen.ProtoReflect.Descriptor instead.
+func (*CmdConsoleOpen) Descriptor() ([]byte, []int) {
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *CmdConsoleOpen) GetVmId() string {
+	if x != nil {
+		return x.VmId
+	}
+	return ""
+}
+
+func (x *CmdConsoleOpen) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *CmdConsoleOpen) GetCols() uint32 {
+	if x != nil {
+		return x.Cols
+	}
+	return 0
+}
+
+func (x *CmdConsoleOpen) GetRows() uint32 {
+	if x != nil {
+		return x.Rows
+	}
+	return 0
+}
+
+// 转发键盘输入到控制台
+type CmdConsoleInput struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	Data          []byte                 `protobuf:"bytes,2,opt,name=data,proto3" json:"data,omitempty"` // stdin 原始字节
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CmdConsoleInput) Reset() {
+	*x = CmdConsoleInput{}
+	mi := &file_proto_agent_agent_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CmdConsoleInput) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CmdConsoleInput) ProtoMessage() {}
+
+func (x *CmdConsoleInput) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_agent_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CmdConsoleInput.ProtoReflect.Descriptor instead.
+func (*CmdConsoleInput) Descriptor() ([]byte, []int) {
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *CmdConsoleInput) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *CmdConsoleInput) GetData() []byte {
+	if x != nil {
+		return x.Data
+	}
+	return nil
+}
+
+// 调整控制台终端尺寸
+type CmdConsoleResize struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	Cols          uint32                 `protobuf:"varint,2,opt,name=cols,proto3" json:"cols,omitempty"`
+	Rows          uint32                 `protobuf:"varint,3,opt,name=rows,proto3" json:"rows,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CmdConsoleResize) Reset() {
+	*x = CmdConsoleResize{}
+	mi := &file_proto_agent_agent_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CmdConsoleResize) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CmdConsoleResize) ProtoMessage() {}
+
+func (x *CmdConsoleResize) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_agent_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CmdConsoleResize.ProtoReflect.Descriptor instead.
+func (*CmdConsoleResize) Descriptor() ([]byte, []int) {
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *CmdConsoleResize) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *CmdConsoleResize) GetCols() uint32 {
+	if x != nil {
+		return x.Cols
+	}
+	return 0
+}
+
+func (x *CmdConsoleResize) GetRows() uint32 {
+	if x != nil {
+		return x.Rows
+	}
+	return 0
+}
+
+// 关闭控制台会话
+type CmdConsoleClose struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CmdConsoleClose) Reset() {
+	*x = CmdConsoleClose{}
+	mi := &file_proto_agent_agent_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CmdConsoleClose) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CmdConsoleClose) ProtoMessage() {}
+
+func (x *CmdConsoleClose) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_agent_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CmdConsoleClose.ProtoReflect.Descriptor instead.
+func (*CmdConsoleClose) Descriptor() ([]byte, []int) {
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *CmdConsoleClose) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
 // 服务端定期下发的保活消息，用于维持 CF 代理的下行连接活跃。
 type Ping struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -1035,7 +1526,7 @@ type Ping struct {
 
 func (x *Ping) Reset() {
 	*x = Ping{}
-	mi := &file_proto_agent_agent_proto_msgTypes[8]
+	mi := &file_proto_agent_agent_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1047,7 +1538,7 @@ func (x *Ping) String() string {
 func (*Ping) ProtoMessage() {}
 
 func (x *Ping) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[8]
+	mi := &file_proto_agent_agent_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1060,7 +1551,7 @@ func (x *Ping) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ping.ProtoReflect.Descriptor instead.
 func (*Ping) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{8}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{14}
 }
 
 // 重装 VM
@@ -1079,7 +1570,7 @@ type CmdReinstallVM struct {
 
 func (x *CmdReinstallVM) Reset() {
 	*x = CmdReinstallVM{}
-	mi := &file_proto_agent_agent_proto_msgTypes[9]
+	mi := &file_proto_agent_agent_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1091,7 +1582,7 @@ func (x *CmdReinstallVM) String() string {
 func (*CmdReinstallVM) ProtoMessage() {}
 
 func (x *CmdReinstallVM) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[9]
+	mi := &file_proto_agent_agent_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1104,7 +1595,7 @@ func (x *CmdReinstallVM) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CmdReinstallVM.ProtoReflect.Descriptor instead.
 func (*CmdReinstallVM) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{9}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *CmdReinstallVM) GetVmId() string {
@@ -1172,7 +1663,7 @@ type CmdCreateVM struct {
 
 func (x *CmdCreateVM) Reset() {
 	*x = CmdCreateVM{}
-	mi := &file_proto_agent_agent_proto_msgTypes[10]
+	mi := &file_proto_agent_agent_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1184,7 +1675,7 @@ func (x *CmdCreateVM) String() string {
 func (*CmdCreateVM) ProtoMessage() {}
 
 func (x *CmdCreateVM) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[10]
+	mi := &file_proto_agent_agent_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1197,7 +1688,7 @@ func (x *CmdCreateVM) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CmdCreateVM.ProtoReflect.Descriptor instead.
 func (*CmdCreateVM) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{10}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *CmdCreateVM) GetVmId() string {
@@ -1259,7 +1750,7 @@ type CmdStartVM struct {
 
 func (x *CmdStartVM) Reset() {
 	*x = CmdStartVM{}
-	mi := &file_proto_agent_agent_proto_msgTypes[11]
+	mi := &file_proto_agent_agent_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1271,7 +1762,7 @@ func (x *CmdStartVM) String() string {
 func (*CmdStartVM) ProtoMessage() {}
 
 func (x *CmdStartVM) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[11]
+	mi := &file_proto_agent_agent_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1284,7 +1775,7 @@ func (x *CmdStartVM) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CmdStartVM.ProtoReflect.Descriptor instead.
 func (*CmdStartVM) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{11}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *CmdStartVM) GetVmId() string {
@@ -1305,7 +1796,7 @@ type CmdStopVM struct {
 
 func (x *CmdStopVM) Reset() {
 	*x = CmdStopVM{}
-	mi := &file_proto_agent_agent_proto_msgTypes[12]
+	mi := &file_proto_agent_agent_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1317,7 +1808,7 @@ func (x *CmdStopVM) String() string {
 func (*CmdStopVM) ProtoMessage() {}
 
 func (x *CmdStopVM) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[12]
+	mi := &file_proto_agent_agent_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1330,7 +1821,7 @@ func (x *CmdStopVM) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CmdStopVM.ProtoReflect.Descriptor instead.
 func (*CmdStopVM) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{12}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *CmdStopVM) GetVmId() string {
@@ -1357,7 +1848,7 @@ type CmdRestartVM struct {
 
 func (x *CmdRestartVM) Reset() {
 	*x = CmdRestartVM{}
-	mi := &file_proto_agent_agent_proto_msgTypes[13]
+	mi := &file_proto_agent_agent_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1369,7 +1860,7 @@ func (x *CmdRestartVM) String() string {
 func (*CmdRestartVM) ProtoMessage() {}
 
 func (x *CmdRestartVM) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[13]
+	mi := &file_proto_agent_agent_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1382,7 +1873,7 @@ func (x *CmdRestartVM) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CmdRestartVM.ProtoReflect.Descriptor instead.
 func (*CmdRestartVM) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{13}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *CmdRestartVM) GetVmId() string {
@@ -1402,7 +1893,7 @@ type CmdDeleteVM struct {
 
 func (x *CmdDeleteVM) Reset() {
 	*x = CmdDeleteVM{}
-	mi := &file_proto_agent_agent_proto_msgTypes[14]
+	mi := &file_proto_agent_agent_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1414,7 +1905,7 @@ func (x *CmdDeleteVM) String() string {
 func (*CmdDeleteVM) ProtoMessage() {}
 
 func (x *CmdDeleteVM) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[14]
+	mi := &file_proto_agent_agent_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1427,7 +1918,7 @@ func (x *CmdDeleteVM) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CmdDeleteVM.ProtoReflect.Descriptor instead.
 func (*CmdDeleteVM) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{14}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *CmdDeleteVM) GetVmId() string {
@@ -1448,7 +1939,7 @@ type CmdResetPassword struct {
 
 func (x *CmdResetPassword) Reset() {
 	*x = CmdResetPassword{}
-	mi := &file_proto_agent_agent_proto_msgTypes[15]
+	mi := &file_proto_agent_agent_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1460,7 +1951,7 @@ func (x *CmdResetPassword) String() string {
 func (*CmdResetPassword) ProtoMessage() {}
 
 func (x *CmdResetPassword) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[15]
+	mi := &file_proto_agent_agent_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1473,7 +1964,7 @@ func (x *CmdResetPassword) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CmdResetPassword.ProtoReflect.Descriptor instead.
 func (*CmdResetPassword) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{15}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *CmdResetPassword) GetVmId() string {
@@ -1504,7 +1995,7 @@ type CmdSetPortForward struct {
 
 func (x *CmdSetPortForward) Reset() {
 	*x = CmdSetPortForward{}
-	mi := &file_proto_agent_agent_proto_msgTypes[16]
+	mi := &file_proto_agent_agent_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1516,7 +2007,7 @@ func (x *CmdSetPortForward) String() string {
 func (*CmdSetPortForward) ProtoMessage() {}
 
 func (x *CmdSetPortForward) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[16]
+	mi := &file_proto_agent_agent_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1529,7 +2020,7 @@ func (x *CmdSetPortForward) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CmdSetPortForward.ProtoReflect.Descriptor instead.
 func (*CmdSetPortForward) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{16}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *CmdSetPortForward) GetVmId() string {
@@ -1579,7 +2070,7 @@ type CmdDelPortForward struct {
 
 func (x *CmdDelPortForward) Reset() {
 	*x = CmdDelPortForward{}
-	mi := &file_proto_agent_agent_proto_msgTypes[17]
+	mi := &file_proto_agent_agent_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1591,7 +2082,7 @@ func (x *CmdDelPortForward) String() string {
 func (*CmdDelPortForward) ProtoMessage() {}
 
 func (x *CmdDelPortForward) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[17]
+	mi := &file_proto_agent_agent_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1604,7 +2095,7 @@ func (x *CmdDelPortForward) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CmdDelPortForward.ProtoReflect.Descriptor instead.
 func (*CmdDelPortForward) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{17}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *CmdDelPortForward) GetVmId() string {
@@ -1638,7 +2129,7 @@ type CmdGetPortForwards struct {
 
 func (x *CmdGetPortForwards) Reset() {
 	*x = CmdGetPortForwards{}
-	mi := &file_proto_agent_agent_proto_msgTypes[18]
+	mi := &file_proto_agent_agent_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1650,7 +2141,7 @@ func (x *CmdGetPortForwards) String() string {
 func (*CmdGetPortForwards) ProtoMessage() {}
 
 func (x *CmdGetPortForwards) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[18]
+	mi := &file_proto_agent_agent_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1663,7 +2154,7 @@ func (x *CmdGetPortForwards) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CmdGetPortForwards.ProtoReflect.Descriptor instead.
 func (*CmdGetPortForwards) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{18}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *CmdGetPortForwards) GetVmId() string {
@@ -1677,15 +2168,26 @@ var File_proto_agent_agent_proto protoreflect.FileDescriptor
 
 const file_proto_agent_agent_proto_rawDesc = "" +
 	"\n" +
-	"\x17proto/agent/agent.proto\x12\x05agent\"\xe0\x01\n" +
+	"\x17proto/agent/agent.proto\x12\x05agent\"\xdb\x02\n" +
 	"\rAgentEnvelope\x12\x1d\n" +
 	"\n" +
 	"message_id\x18\x01 \x01(\tR\tmessageId\x120\n" +
 	"\theartbeat\x18\x02 \x01(\v2\x10.agent.HeartbeatH\x00R\theartbeat\x125\n" +
 	"\n" +
 	"cmd_result\x18\x04 \x01(\v2\x14.agent.CommandResultH\x00R\tcmdResult\x12<\n" +
-	"\rport_fwd_list\x18\x05 \x01(\v2\x16.agent.PortForwardListH\x00R\vportFwdListB\t\n" +
-	"\apayload\"\xcf\x04\n" +
+	"\rport_fwd_list\x18\x05 \x01(\v2\x16.agent.PortForwardListH\x00R\vportFwdList\x12=\n" +
+	"\x0econsole_output\x18\b \x01(\v2\x14.agent.ConsoleOutputH\x00R\rconsoleOutput\x12:\n" +
+	"\rconsole_event\x18\t \x01(\v2\x13.agent.ConsoleEventH\x00R\fconsoleEventB\t\n" +
+	"\apayload\"B\n" +
+	"\rConsoleOutput\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x12\n" +
+	"\x04data\x18\x02 \x01(\fR\x04data\"r\n" +
+	"\fConsoleEvent\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12+\n" +
+	"\x04type\x18\x02 \x01(\x0e2\x17.agent.ConsoleEventTypeR\x04type\x12\x16\n" +
+	"\x06reason\x18\x03 \x01(\tR\x06reason\"\xcf\x04\n" +
 	"\tHeartbeat\x12\x1c\n" +
 	"\ttimestamp\x18\x01 \x01(\x03R\ttimestamp\x12\x17\n" +
 	"\acpu_pct\x18\x02 \x01(\x02R\x06cpuPct\x12\x1e\n" +
@@ -1741,7 +2243,7 @@ const file_proto_agent_agent_proto_rawDesc = "" +
 	"command_id\x18\x01 \x01(\tR\tcommandId\x12\x18\n" +
 	"\asuccess\x18\x02 \x01(\bR\asuccess\x12\x14\n" +
 	"\x05error\x18\x03 \x01(\tR\x05error\x12\x12\n" +
-	"\x04data\x18\x04 \x01(\fR\x04data\"\xa5\x05\n" +
+	"\x04data\x18\x04 \x01(\fR\x04data\"\xa1\a\n" +
 	"\x10PlatformEnvelope\x12\x1d\n" +
 	"\n" +
 	"command_id\x18\x01 \x01(\tR\tcommandId\x121\n" +
@@ -1758,9 +2260,31 @@ const file_proto_agent_agent_proto_rawDesc = "" +
 	"delPortFwd\x12:\n" +
 	"\freinstall_vm\x18\r \x01(\v2\x15.agent.CmdReinstallVMH\x00R\vreinstallVm\x12?\n" +
 	"\rget_port_fwds\x18\x0e \x01(\v2\x19.agent.CmdGetPortForwardsH\x00R\vgetPortFwds\x12!\n" +
-	"\x04ping\x18\x0f \x01(\v2\v.agent.PingH\x00R\x04pingB\t\n" +
+	"\x04ping\x18\x0f \x01(\v2\v.agent.PingH\x00R\x04ping\x12:\n" +
+	"\fconsole_open\x18\x10 \x01(\v2\x15.agent.CmdConsoleOpenH\x00R\vconsoleOpen\x12=\n" +
+	"\rconsole_input\x18\x11 \x01(\v2\x16.agent.CmdConsoleInputH\x00R\fconsoleInput\x12@\n" +
+	"\x0econsole_resize\x18\x12 \x01(\v2\x17.agent.CmdConsoleResizeH\x00R\rconsoleResize\x12=\n" +
+	"\rconsole_close\x18\x13 \x01(\v2\x16.agent.CmdConsoleCloseH\x00R\fconsoleCloseB\t\n" +
 	"\apayloadJ\x04\b\n" +
-	"\x10\vJ\x04\b\v\x10\fJ\x04\b\f\x10\r\"\x06\n" +
+	"\x10\vJ\x04\b\v\x10\fJ\x04\b\f\x10\r\"l\n" +
+	"\x0eCmdConsoleOpen\x12\x13\n" +
+	"\x05vm_id\x18\x01 \x01(\tR\x04vmId\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x02 \x01(\tR\tsessionId\x12\x12\n" +
+	"\x04cols\x18\x03 \x01(\rR\x04cols\x12\x12\n" +
+	"\x04rows\x18\x04 \x01(\rR\x04rows\"D\n" +
+	"\x0fCmdConsoleInput\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x12\n" +
+	"\x04data\x18\x02 \x01(\fR\x04data\"Y\n" +
+	"\x10CmdConsoleResize\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x12\n" +
+	"\x04cols\x18\x02 \x01(\rR\x04cols\x12\x12\n" +
+	"\x04rows\x18\x03 \x01(\rR\x04rows\"0\n" +
+	"\x0fCmdConsoleClose\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\"\x06\n" +
 	"\x04Ping\"\xce\x01\n" +
 	"\x0eCmdReinstallVM\x12\x13\n" +
 	"\x05vm_id\x18\x01 \x01(\tR\x04vmId\x12\x19\n" +
@@ -1813,7 +2337,12 @@ const file_proto_agent_agent_proto_rawDesc = "" +
 	"\bProtocol\x12\x18\n" +
 	"\x14PROTOCOL_UNSPECIFIED\x10\x00\x12\x10\n" +
 	"\fPROTOCOL_TCP\x10\x01\x12\x10\n" +
-	"\fPROTOCOL_UDP\x10\x022L\n" +
+	"\fPROTOCOL_UDP\x10\x02*\x87\x01\n" +
+	"\x10ConsoleEventType\x12\x1d\n" +
+	"\x19CONSOLE_EVENT_UNSPECIFIED\x10\x00\x12\x1b\n" +
+	"\x17CONSOLE_EVENT_CONNECTED\x10\x01\x12\x1e\n" +
+	"\x1aCONSOLE_EVENT_DISCONNECTED\x10\x02\x12\x17\n" +
+	"\x13CONSOLE_EVENT_ERROR\x10\x032L\n" +
 	"\fAgentGateway\x12<\n" +
 	"\aConnect\x12\x14.agent.AgentEnvelope\x1a\x17.agent.PlatformEnvelope(\x010\x01B\x17Z\x15runman-v2/proto/agentb\x06proto3"
 
@@ -1829,60 +2358,74 @@ func file_proto_agent_agent_proto_rawDescGZIP() []byte {
 	return file_proto_agent_agent_proto_rawDescData
 }
 
-var file_proto_agent_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_proto_agent_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
+var file_proto_agent_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
+var file_proto_agent_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
 var file_proto_agent_agent_proto_goTypes = []any{
 	(VMStatus)(0),              // 0: agent.VMStatus
 	(Protocol)(0),              // 1: agent.Protocol
-	(*AgentEnvelope)(nil),      // 2: agent.AgentEnvelope
-	(*Heartbeat)(nil),          // 3: agent.Heartbeat
-	(*OSImageInfo)(nil),        // 4: agent.OSImageInfo
-	(*VMSummary)(nil),          // 5: agent.VMSummary
-	(*PortForwardList)(nil),    // 6: agent.PortForwardList
-	(*PortForwardEntry)(nil),   // 7: agent.PortForwardEntry
-	(*CommandResult)(nil),      // 8: agent.CommandResult
-	(*PlatformEnvelope)(nil),   // 9: agent.PlatformEnvelope
-	(*Ping)(nil),               // 10: agent.Ping
-	(*CmdReinstallVM)(nil),     // 11: agent.CmdReinstallVM
-	(*CmdCreateVM)(nil),        // 12: agent.CmdCreateVM
-	(*CmdStartVM)(nil),         // 13: agent.CmdStartVM
-	(*CmdStopVM)(nil),          // 14: agent.CmdStopVM
-	(*CmdRestartVM)(nil),       // 15: agent.CmdRestartVM
-	(*CmdDeleteVM)(nil),        // 16: agent.CmdDeleteVM
-	(*CmdResetPassword)(nil),   // 17: agent.CmdResetPassword
-	(*CmdSetPortForward)(nil),  // 18: agent.CmdSetPortForward
-	(*CmdDelPortForward)(nil),  // 19: agent.CmdDelPortForward
-	(*CmdGetPortForwards)(nil), // 20: agent.CmdGetPortForwards
+	(ConsoleEventType)(0),      // 2: agent.ConsoleEventType
+	(*AgentEnvelope)(nil),      // 3: agent.AgentEnvelope
+	(*ConsoleOutput)(nil),      // 4: agent.ConsoleOutput
+	(*ConsoleEvent)(nil),       // 5: agent.ConsoleEvent
+	(*Heartbeat)(nil),          // 6: agent.Heartbeat
+	(*OSImageInfo)(nil),        // 7: agent.OSImageInfo
+	(*VMSummary)(nil),          // 8: agent.VMSummary
+	(*PortForwardList)(nil),    // 9: agent.PortForwardList
+	(*PortForwardEntry)(nil),   // 10: agent.PortForwardEntry
+	(*CommandResult)(nil),      // 11: agent.CommandResult
+	(*PlatformEnvelope)(nil),   // 12: agent.PlatformEnvelope
+	(*CmdConsoleOpen)(nil),     // 13: agent.CmdConsoleOpen
+	(*CmdConsoleInput)(nil),    // 14: agent.CmdConsoleInput
+	(*CmdConsoleResize)(nil),   // 15: agent.CmdConsoleResize
+	(*CmdConsoleClose)(nil),    // 16: agent.CmdConsoleClose
+	(*Ping)(nil),               // 17: agent.Ping
+	(*CmdReinstallVM)(nil),     // 18: agent.CmdReinstallVM
+	(*CmdCreateVM)(nil),        // 19: agent.CmdCreateVM
+	(*CmdStartVM)(nil),         // 20: agent.CmdStartVM
+	(*CmdStopVM)(nil),          // 21: agent.CmdStopVM
+	(*CmdRestartVM)(nil),       // 22: agent.CmdRestartVM
+	(*CmdDeleteVM)(nil),        // 23: agent.CmdDeleteVM
+	(*CmdResetPassword)(nil),   // 24: agent.CmdResetPassword
+	(*CmdSetPortForward)(nil),  // 25: agent.CmdSetPortForward
+	(*CmdDelPortForward)(nil),  // 26: agent.CmdDelPortForward
+	(*CmdGetPortForwards)(nil), // 27: agent.CmdGetPortForwards
 }
 var file_proto_agent_agent_proto_depIdxs = []int32{
-	3,  // 0: agent.AgentEnvelope.heartbeat:type_name -> agent.Heartbeat
-	8,  // 1: agent.AgentEnvelope.cmd_result:type_name -> agent.CommandResult
-	6,  // 2: agent.AgentEnvelope.port_fwd_list:type_name -> agent.PortForwardList
-	5,  // 3: agent.Heartbeat.vms:type_name -> agent.VMSummary
-	4,  // 4: agent.Heartbeat.os_images:type_name -> agent.OSImageInfo
-	0,  // 5: agent.VMSummary.status:type_name -> agent.VMStatus
-	7,  // 6: agent.PortForwardList.entries:type_name -> agent.PortForwardEntry
-	1,  // 7: agent.PortForwardEntry.protocol:type_name -> agent.Protocol
-	12, // 8: agent.PlatformEnvelope.create_vm:type_name -> agent.CmdCreateVM
-	13, // 9: agent.PlatformEnvelope.start_vm:type_name -> agent.CmdStartVM
-	14, // 10: agent.PlatformEnvelope.stop_vm:type_name -> agent.CmdStopVM
-	15, // 11: agent.PlatformEnvelope.restart_vm:type_name -> agent.CmdRestartVM
-	16, // 12: agent.PlatformEnvelope.delete_vm:type_name -> agent.CmdDeleteVM
-	17, // 13: agent.PlatformEnvelope.reset_password:type_name -> agent.CmdResetPassword
-	18, // 14: agent.PlatformEnvelope.set_port_fwd:type_name -> agent.CmdSetPortForward
-	19, // 15: agent.PlatformEnvelope.del_port_fwd:type_name -> agent.CmdDelPortForward
-	11, // 16: agent.PlatformEnvelope.reinstall_vm:type_name -> agent.CmdReinstallVM
-	20, // 17: agent.PlatformEnvelope.get_port_fwds:type_name -> agent.CmdGetPortForwards
-	10, // 18: agent.PlatformEnvelope.ping:type_name -> agent.Ping
-	1,  // 19: agent.CmdSetPortForward.protocol:type_name -> agent.Protocol
-	1,  // 20: agent.CmdDelPortForward.protocol:type_name -> agent.Protocol
-	2,  // 21: agent.AgentGateway.Connect:input_type -> agent.AgentEnvelope
-	9,  // 22: agent.AgentGateway.Connect:output_type -> agent.PlatformEnvelope
-	22, // [22:23] is the sub-list for method output_type
-	21, // [21:22] is the sub-list for method input_type
-	21, // [21:21] is the sub-list for extension type_name
-	21, // [21:21] is the sub-list for extension extendee
-	0,  // [0:21] is the sub-list for field type_name
+	6,  // 0: agent.AgentEnvelope.heartbeat:type_name -> agent.Heartbeat
+	11, // 1: agent.AgentEnvelope.cmd_result:type_name -> agent.CommandResult
+	9,  // 2: agent.AgentEnvelope.port_fwd_list:type_name -> agent.PortForwardList
+	4,  // 3: agent.AgentEnvelope.console_output:type_name -> agent.ConsoleOutput
+	5,  // 4: agent.AgentEnvelope.console_event:type_name -> agent.ConsoleEvent
+	2,  // 5: agent.ConsoleEvent.type:type_name -> agent.ConsoleEventType
+	8,  // 6: agent.Heartbeat.vms:type_name -> agent.VMSummary
+	7,  // 7: agent.Heartbeat.os_images:type_name -> agent.OSImageInfo
+	0,  // 8: agent.VMSummary.status:type_name -> agent.VMStatus
+	10, // 9: agent.PortForwardList.entries:type_name -> agent.PortForwardEntry
+	1,  // 10: agent.PortForwardEntry.protocol:type_name -> agent.Protocol
+	19, // 11: agent.PlatformEnvelope.create_vm:type_name -> agent.CmdCreateVM
+	20, // 12: agent.PlatformEnvelope.start_vm:type_name -> agent.CmdStartVM
+	21, // 13: agent.PlatformEnvelope.stop_vm:type_name -> agent.CmdStopVM
+	22, // 14: agent.PlatformEnvelope.restart_vm:type_name -> agent.CmdRestartVM
+	23, // 15: agent.PlatformEnvelope.delete_vm:type_name -> agent.CmdDeleteVM
+	24, // 16: agent.PlatformEnvelope.reset_password:type_name -> agent.CmdResetPassword
+	25, // 17: agent.PlatformEnvelope.set_port_fwd:type_name -> agent.CmdSetPortForward
+	26, // 18: agent.PlatformEnvelope.del_port_fwd:type_name -> agent.CmdDelPortForward
+	18, // 19: agent.PlatformEnvelope.reinstall_vm:type_name -> agent.CmdReinstallVM
+	27, // 20: agent.PlatformEnvelope.get_port_fwds:type_name -> agent.CmdGetPortForwards
+	17, // 21: agent.PlatformEnvelope.ping:type_name -> agent.Ping
+	13, // 22: agent.PlatformEnvelope.console_open:type_name -> agent.CmdConsoleOpen
+	14, // 23: agent.PlatformEnvelope.console_input:type_name -> agent.CmdConsoleInput
+	15, // 24: agent.PlatformEnvelope.console_resize:type_name -> agent.CmdConsoleResize
+	16, // 25: agent.PlatformEnvelope.console_close:type_name -> agent.CmdConsoleClose
+	1,  // 26: agent.CmdSetPortForward.protocol:type_name -> agent.Protocol
+	1,  // 27: agent.CmdDelPortForward.protocol:type_name -> agent.Protocol
+	3,  // 28: agent.AgentGateway.Connect:input_type -> agent.AgentEnvelope
+	12, // 29: agent.AgentGateway.Connect:output_type -> agent.PlatformEnvelope
+	29, // [29:30] is the sub-list for method output_type
+	28, // [28:29] is the sub-list for method input_type
+	28, // [28:28] is the sub-list for extension type_name
+	28, // [28:28] is the sub-list for extension extendee
+	0,  // [0:28] is the sub-list for field type_name
 }
 
 func init() { file_proto_agent_agent_proto_init() }
@@ -1894,8 +2437,10 @@ func file_proto_agent_agent_proto_init() {
 		(*AgentEnvelope_Heartbeat)(nil),
 		(*AgentEnvelope_CmdResult)(nil),
 		(*AgentEnvelope_PortFwdList)(nil),
+		(*AgentEnvelope_ConsoleOutput)(nil),
+		(*AgentEnvelope_ConsoleEvent)(nil),
 	}
-	file_proto_agent_agent_proto_msgTypes[7].OneofWrappers = []any{
+	file_proto_agent_agent_proto_msgTypes[9].OneofWrappers = []any{
 		(*PlatformEnvelope_CreateVm)(nil),
 		(*PlatformEnvelope_StartVm)(nil),
 		(*PlatformEnvelope_StopVm)(nil),
@@ -1907,14 +2452,18 @@ func file_proto_agent_agent_proto_init() {
 		(*PlatformEnvelope_ReinstallVm)(nil),
 		(*PlatformEnvelope_GetPortFwds)(nil),
 		(*PlatformEnvelope_Ping)(nil),
+		(*PlatformEnvelope_ConsoleOpen)(nil),
+		(*PlatformEnvelope_ConsoleInput)(nil),
+		(*PlatformEnvelope_ConsoleResize)(nil),
+		(*PlatformEnvelope_ConsoleClose)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_agent_agent_proto_rawDesc), len(file_proto_agent_agent_proto_rawDesc)),
-			NumEnums:      2,
-			NumMessages:   19,
+			NumEnums:      3,
+			NumMessages:   25,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
