@@ -635,7 +635,6 @@ if [ "$VIRT_TYPE" = "podman" ]; then
 ACTION=="add|change", SUBSYSTEM=="block", KERNEL=="loop*", ATTR{loop/backing_file}=="/xfs_disk.img", ATTR{loop/direct_io}="1"
 EOF
         udevadm control --reload-rules && udevadm trigger
-        local _loop_dev
         _loop_dev=$(mount | grep "/data" | awk '{print $1}')
         if [[ "$_loop_dev" == /dev/loop* ]]; then
             echo 1 > "/sys/block/${_loop_dev#/dev/}/loop/direct_io" 2>/dev/null || true
@@ -792,9 +791,23 @@ else
     IPV6_PREFIX=$(echo "$IPV6_CONFIG" | cut -d'|' -f3)
     log "$(t "Public IPv6: $IPV6_ADDR/$IPV6_PREFIX on $IPV6_IFACE" "公网 IPv6: $IPV6_ADDR/$IPV6_PREFIX 网卡: $IPV6_IFACE")"
 
-    # 用 python3 计算容器子网（Debian 13 标配 python3）
-    # 策略：取宿主机前缀，在其内偏移固定量得到 /112 容器段，避免与 EUI-64/隐私地址冲突
-    read -r CONTAINER_BASE CONTAINER_GW <<< "$(python3 - <<PYEOF
+    if [ "$IPV6_PREFIX" = "128" ]; then
+        # /128 是单个地址，无法划分子网给容器，回退到 ULA + SNAT 模式
+        log "$(t "Public IPv6 is /128 (single address): cannot allocate public subnet, using ULA with SNAT." "公网 IPv6 为 /128（单个地址）：无法分配公网子网，使用 ULA + SNAT 模式。")"
+        podman network create \
+            --driver=bridge \
+            --subnet=10.91.0.0/20 \
+            --gateway=10.91.0.1 \
+            --ipv6 \
+            --subnet=fd91:cafe:cafe:10::/64 \
+            --gateway=fd91:cafe:cafe:10::1 \
+            "$PODMAN_NETWORK"
+        log "$(t "✓ Podman network created (ULA IPv6, SNAT via host /128)." "✓ Podman 网络创建完成（ULA IPv6，通过宿主机 /128 SNAT）。")"
+        # /128 SNAT 模式：不设 NDP，不注入 snat_ipv6=false
+    else
+        # 有公网前缀（<= /127），用 python3 计算容器子网
+        # 策略：取宿主机前缀，在其内偏移固定量得到 /112 容器段，避免与 EUI-64/隐私地址冲突
+        read -r CONTAINER_BASE CONTAINER_GW <<< "$(python3 - <<PYEOF
 import ipaddress
 net = ipaddress.IPv6Network('$IPV6_ADDR/$IPV6_PREFIX', strict=False)
 base_int = int(net.network_address)
@@ -807,36 +820,37 @@ gw = container_net.network_address + 1
 print(str(container_net.network_address), str(gw))
 PYEOF
 )"
-    log "$(t "Container subnet: ${CONTAINER_BASE}/112  gateway: ${CONTAINER_GW}" "容器子网: ${CONTAINER_BASE}/112  网关: ${CONTAINER_GW}")"
+        log "$(t "Container subnet: ${CONTAINER_BASE}/112  gateway: ${CONTAINER_GW}" "容器子网: ${CONTAINER_BASE}/112  网关: ${CONTAINER_GW}")"
 
-    configure_host_ipv6_routing "$IPV6_IFACE" "$IPV6_ADDR"
+        configure_host_ipv6_routing "$IPV6_IFACE" "$IPV6_ADDR"
 
-    # 先安装自定义 netavark（支持 snat_ipv6 选项），再操作网络
-    if download_with_retry "$NETAVARK_BASE/netavark-new-$ARCH" "/usr/libexec/podman/netavark"; then
-        chmod +x /usr/libexec/podman/netavark
-        log "$(t "✓ Custom netavark installed." "✓ 自定义 netavark 已安装。")"
-    else
-        log "$(t "Warning: netavark download failed, using system default." "警告: netavark 下载失败，使用系统默认版本。")"
+        # 先安装自定义 netavark（支持 snat_ipv6 选项），再操作网络
+        if download_with_retry "$NETAVARK_BASE/netavark-new-$ARCH" "/usr/libexec/podman/netavark"; then
+            chmod +x /usr/libexec/podman/netavark
+            log "$(t "✓ Custom netavark installed." "✓ 自定义 netavark 已安装。")"
+        else
+            log "$(t "Warning: netavark download failed, using system default." "警告: netavark 下载失败，使用系统默认版本。")"
+        fi
+
+        podman network create \
+            --driver=bridge \
+            --subnet=10.91.0.0/20 --gateway=10.91.0.1 \
+            --ipv6 \
+            --subnet="${CONTAINER_BASE}/112" --gateway="$CONTAINER_GW" \
+            "$PODMAN_NETWORK"
+        # snat_ipv6=false 不能通过 CLI 传入（Podman CLI 有白名单校验），直接注入 JSON。
+        NETWORK_JSON="/etc/containers/networks/${PODMAN_NETWORK}.json"
+        jq '.options["snat_ipv6"] = "false"' "$NETWORK_JSON" > "${NETWORK_JSON}.tmp" \
+            && mv "${NETWORK_JSON}.tmp" "$NETWORK_JSON" \
+            && log "$(t "✓ snat_ipv6=false injected into network config." "✓ snat_ipv6=false 已注入网络配置。")" \
+            || log "$(t "Warning: failed to inject snat_ipv6=false." "警告: 注入 snat_ipv6=false 失败。")"
+
+        # NDP responder will be handled by NarwhalCloud Agent
+        NDP_IFACE="$IPV6_IFACE"
+        NDP_SUBNETS="${CONTAINER_BASE}/112"
+        NDP_NETWORK="$PODMAN_NETWORK"
+        log "$(t "✓ NDP responder will be handled by NarwhalCloud Agent." "✓ NDP responder 将由 NarwhalCloud Agent 内置处理。")"
     fi
-
-    podman network create \
-        --driver=bridge \
-        --subnet=10.91.0.0/20 --gateway=10.91.0.1 \
-        --ipv6 \
-        --subnet="${CONTAINER_BASE}/112" --gateway="$CONTAINER_GW" \
-        "$PODMAN_NETWORK"
-    # snat_ipv6=false 不能通过 CLI 传入（Podman CLI 有白名单校验），直接注入 JSON。
-    NETWORK_JSON="/etc/containers/networks/${PODMAN_NETWORK}.json"
-    jq '.options["snat_ipv6"] = "false"' "$NETWORK_JSON" > "${NETWORK_JSON}.tmp" \
-        && mv "${NETWORK_JSON}.tmp" "$NETWORK_JSON" \
-        && log "$(t "✓ snat_ipv6=false injected into network config." "✓ snat_ipv6=false 已注入网络配置。")" \
-        || log "$(t "Warning: failed to inject snat_ipv6=false." "警告: 注入 snat_ipv6=false 失败。")"
-
-    # NDP responder will be handled by NarwhalCloud Agent
-    NDP_IFACE="$IPV6_IFACE"
-    NDP_SUBNETS="${CONTAINER_BASE}/112"
-    NDP_NETWORK="$PODMAN_NETWORK"
-    log "$(t "✓ NDP responder will be handled by NarwhalCloud Agent." "✓ NDP responder 将由 NarwhalCloud Agent 内置处理。")"
 fi
 
 # Podman auto-restart service
