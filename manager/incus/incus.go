@@ -228,6 +228,15 @@ write_files:
 `, networkConf)
 	}
 
+	// SSH 配置直接写入 sshd_config
+	userData += `  - path: /etc/ssh/sshd_config
+    content: |
+      PermitRootLogin yes
+      PasswordAuthentication yes
+      ListenAddress 0.0.0.0
+      ListenAddress ::
+`
+
 	// 3. 合并所有的 runcmd
 	userData += "runcmd:\n"
 
@@ -242,13 +251,8 @@ write_files:
 		userData += "  - systemctl restart systemd-networkd || true\n"
 	}
 
-	// SSH 及其他公共逻辑
-	userData += fmt.Sprintf(`  - [ sh, -c, "mkdir -p /etc/ssh/sshd_config.d && echo 'PermitRootLogin yes\nPasswordAuthentication yes\nListenAddress 0.0.0.0\nListenAddress ::' > /etc/ssh/sshd_config.d/99-runman.conf" ]
-  - sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
-  - sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-  - sed -i 's/^#\?ListenAddress 0.0.0.0/ListenAddress 0.0.0.0/' /etc/ssh/sshd_config
-  - sed -i 's/^#\?ListenAddress ::/ListenAddress ::/' /etc/ssh/sshd_config
-  - [ sh, -c, "systemctl enable ssh || systemctl enable sshd || rc-update add sshd default || true" ]
+	// SSH 及服务启动
+	userData += fmt.Sprintf(`  - [ sh, -c, "systemctl enable ssh || systemctl enable sshd || rc-update add sshd default || true" ]
   - [ sh, -c, "systemctl restart ssh || systemctl restart sshd || rc-service sshd restart || true" ]
   - [ sh, -c, "systemctl enable %s || rc-update add %s default || true" ]
   - [ sh, -c, "systemctl restart %s || rc-service %s restart || true" ]
