@@ -158,7 +158,10 @@ packages:
 `, req.RootPassword, pkgSSH, pkgCron)
 
 	// 2. 写入网络配置（IPv6 仅在有有效地址时写入）
-	netConf := fmt.Sprintf(`      auto lo
+	// Alpine: /etc/network/interfaces (ifupdown 原生)
+	// Debian: /etc/systemd/network/10-eth0.network (systemd-networkd 原生)
+	if req.OsImage == "alpine" {
+		netConf := fmt.Sprintf(`      auto lo
       iface lo inet loopback
 
       auto eth0
@@ -169,24 +172,61 @@ packages:
         dns-nameservers 1.1.1.1
 `, ipv4)
 
-	// 仅在有有效 IPv6 地址时追加 inet6 配置
-	if ipv6 != "" {
-		gw6 := m.ipv6Addr
-		if gw6 == "" {
-			gw6 = "fd91:cafe:cafe:10::1"
-		}
-		netConf += fmt.Sprintf(`
+		if ipv6 != "" {
+			gw6 := m.ipv6Addr
+			if gw6 == "" {
+				gw6 = "fd91:cafe:cafe:10::1"
+			}
+			netConf += fmt.Sprintf(`
       iface eth0 inet6 static
         address %s/%s
         gateway %s
 `, ipv6, ipv6Mask, gw6)
-	}
+		}
 
-	userData += fmt.Sprintf(`
+		userData += fmt.Sprintf(`
 write_files:
   - path: /etc/network/interfaces
     content: |
 %s`, netConf)
+	} else {
+		// Debian: systemd-networkd 配置
+		networkConf := fmt.Sprintf(`      [Match]
+      Name=eth0
+
+      [Network]
+      DNS=1.1.1.1
+
+      [Address]
+      Address=%s/20
+
+      [Route]
+      Gateway=10.91.0.1
+`, ipv4)
+
+		if ipv6 != "" {
+			gw6 := m.ipv6Addr
+			if gw6 == "" {
+				gw6 = "fd91:cafe:cafe:10::1"
+			}
+			networkConf += fmt.Sprintf(`
+      [Address]
+      Address=%s/%s
+
+      [Route]
+      Gateway=%s
+`, ipv6, ipv6Mask, gw6)
+		}
+
+		userData += fmt.Sprintf(`
+write_files:
+  - path: /etc/systemd/network/10-eth0.network
+    content: |
+%s  - path: /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
+    content: |
+      network: {config: disabled}
+`, networkConf)
+	}
 
 	// 3. 合并所有的 runcmd
 	userData += "runcmd:\n"
@@ -197,7 +237,9 @@ write_files:
 		userData += "  - ifdown eth0 || true\n"
 		userData += "  - ifup eth0 || true\n"
 	} else {
-		userData += "  - systemctl restart networking || true\n"
+		// Debian: 移除 cloud-init 生成的 networkd 配置，使用我们自己的
+		userData += "  - rm -f /etc/systemd/network/10-cloud-init-*.network /run/systemd/network/10-cloud-init-*.network || true\n"
+		userData += "  - systemctl restart systemd-networkd || true\n"
 	}
 
 	// SSH 及其他公共逻辑
