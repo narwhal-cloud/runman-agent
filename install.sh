@@ -48,11 +48,13 @@ cleanup_locks() {
 install_packages() {
     local virt_type="${1:-podman}"
     local max=3 attempt=1
-    local base_packages="curl wget python3 uuid-runtime systemd-zram-generator jq chrony iptables iproute2 fdisk"
+    local base_packages="curl wget python3 uuid-runtime systemd-zram-generator jq chrony iptables iproute2 fdisk bc dnsutils"
     local extra_packages
 
     if [ "$virt_type" = "cloudhv" ]; then
         extra_packages="qemu-utils cloud-image-utils"
+    elif [ "$virt_type" = "incus" ]; then
+        extra_packages="incus uidmap acl bridge-utils"
     else
         extra_packages="podman lxcfs xfsprogs"
     fi
@@ -581,7 +583,9 @@ update_vm_images() {
 
 printf "$(t "Select virtualization type:" "选择虚拟化类型：")\n"
 printf "  1) Podman container ($(t "recommended" "推荐"))\n"
-printf "  2) cloud-hypervisor VM ($(t "requires /dev/kvm" "需要 /dev/kvm"))\n"
+printf "  2) cloud-hypervisor VM ($(t "experimental, requires /dev/kvm" "实验性，需要 /dev/kvm"))\n"
+printf "  3) Incus (LXC) ($(t "experimental" "实验性"))\n"
+log "$(t "WARNING: Types 2 and 3 are currently experimental and may not be stable." "警告：选项 2 和 3 目前处于实验阶段，稳定性可能不足。")"
 read -rp "> " _virt_choice
 case "${_virt_choice}" in
     2)
@@ -594,6 +598,9 @@ case "${_virt_choice}" in
         fi
         log "$(t "✓ KVM support detected." "✓ 检测到 KVM 支持。")"
         ;;
+    3)
+        VIRT_TYPE="incus"
+        ;;
     *) VIRT_TYPE="podman" ;;
 esac
 log "$(t "Selected virtualization type: $VIRT_TYPE" "选择的虚拟化类型: $VIRT_TYPE")"
@@ -605,6 +612,16 @@ enable_bbr
 start_service chrony
 if [ "$VIRT_TYPE" = "podman" ]; then
     start_service lxcfs
+fi
+if [ "$VIRT_TYPE" = "incus" ]; then
+    # 0. 加载必要的内核模块 (security.ipv6_filtering 需要)
+    log "$(t "Loading br_netfilter kernel module..." "加载 br_netfilter 内核模块...")"
+    modprobe br_netfilter || true
+    echo "br_netfilter" > /etc/modules-load.d/runman-incus.conf
+
+    start_service incus
+    # 等待 Socket 就绪
+    sleep 2
 fi
 
 cat > /etc/systemd/zram-generator.conf <<'EOF'
@@ -700,10 +717,13 @@ fi
 
 # ── Network setup (conditional on virtualization type) ────────────────────────
 
-if [ "$VIRT_TYPE" = "cloudhv" ]; then
-    # Cloud-hypervisor: IPv6 detection and configuration
-    log "$(t "Setting up cloud-hypervisor network (Linux bridge)..." "配置 cloud-hypervisor 网络 (Linux bridge)...")"
-    mkdir -p /opt/vm-images/instances /run/cloud-hypervisor
+if [ "$VIRT_TYPE" = "cloudhv" ] || [ "$VIRT_TYPE" = "incus" ]; then
+    # Cloud-hypervisor / Incus: IPv6 detection and configuration
+    log "$(t "Setting up $VIRT_TYPE network..." "配置 $VIRT_TYPE 网络...")"
+    
+    if [ "$VIRT_TYPE" = "cloudhv" ]; then
+        mkdir -p /opt/vm-images/instances /run/cloud-hypervisor
+    fi
 
     # 检测 IPv6 可分配情况（支持任意前缀）
     # 如果用户通过环境变量指定了 IPv6_MODE，则直接使用；否则自动检测
@@ -762,13 +782,13 @@ PYEOF
     fi
 
     # Bridge creation will be handled by the agent's ensureBridge() on startup
-    log "$(t "✓ cloud-hypervisor directories created. Bridge will be created on agent startup." "✓ cloud-hypervisor 目录已创建。网桥将在 agent 启动时创建。")"
+    log "$(t "✓ $VIRT_TYPE directories and basic network logic configured." "✓ $VIRT_TYPE 目录及基础网络逻辑配置完成。")"
 
     # NDP responder 配置保存到 config.json，将在后面统一生成
     if [ "$IPV6_MODE" = "subnet" ] && [ -n "$IPV6_SUBNET" ] && [ -n "$IPV6_IFACE" ]; then
         log "$(t "✓ NDP responder will be enabled for IPv6 subnet mode." "✓ NDP 响应器将在 IPv6 子网模式下启用。")"
     fi
-else
+elif [ "$VIRT_TYPE" = "podman" ]; then
     # Podman: create Podman network
 
 if podman network exists "$PODMAN_NETWORK" 2>/dev/null; then
@@ -927,9 +947,11 @@ download_agent "$ARCH"
 NDP_IFACE="${NDP_IFACE:-}"
 NDP_SUBNETS="${NDP_SUBNETS:-}"
 NDP_NETWORK="${NDP_NETWORK:-}"
-if [ "$VIRT_TYPE" = "cloudhv" ] && [ "$IPV6_MODE" = "subnet" ]; then
-    NDP_IFACE="$IPV6_IFACE"
-    NDP_SUBNETS="$IPV6_SUBNET"
+if [ "$IPV6_MODE" = "subnet" ]; then
+    if [ "$VIRT_TYPE" = "cloudhv" ] || [ "$VIRT_TYPE" = "incus" ]; then
+        NDP_IFACE="$IPV6_IFACE"
+        NDP_SUBNETS="$IPV6_SUBNET"
+    fi
 fi
 
 # 生成配置文件（包含所有启动参数、IPv6配置和磁盘限制）
@@ -952,8 +974,8 @@ if [[ "${_rfw:-Y}" =~ ^[Yy]$ ]]; then
     fi
 
     if [ ! -f "/etc/systemd/system/rfw.service" ]; then
-        # 过滤掉 lo 和 narwhal-net（Podman 网络）
-        mapfile -t interfaces < <(ip -o link show | awk -F': ' '{print $2}' | grep -v "^lo$" | grep -v "^narwhal-net$")
+        # 过滤掉 lo, narwhal-net (Podman) 和 incusbr0 (Incus)
+        mapfile -t interfaces < <(ip -o link show | awk -F': ' '{print $2}' | grep -v "^lo$" | grep -v "^narwhal-net$" | grep -v "^incusbr0$")
 
         if [ ${#interfaces[@]} -eq 0 ]; then
             log "$(t "Error: no available WAN interfaces found." "错误: 未找到可用的 WAN 网卡。")"
@@ -1001,6 +1023,44 @@ else
 fi
 
 # ── Done ──────────────────────────────────────────────────────────────────────
+
+if [ "$VIRT_TYPE" = "incus" ]; then
+    # 1. 初始化默认存储池
+    if ! incus storage show default >/dev/null 2>&1; then
+        log "$(t "Initializing Incus default storage pool..." "初始化 Incus 默认存储池...")"
+        incus storage create default dir
+    fi
+
+    # 2. 初始化默认网桥 incusbr0 (遵循 10.91.0.1/20 标准)
+    if ! incus network show incusbr0 >/dev/null 2>&1; then
+        log "$(t "Initializing Incus network bridge incusbr0..." "初始化 Incus 网桥 incusbr0...")"
+        
+        INCUS_IPV4="10.91.0.1/20"
+        INCUS_IPV6="none"
+
+        if [ "$IPV6_MODE" = "snat" ] || [ "$IPV6_CONFIG" = "local" ]; then
+            INCUS_IPV6="fd91:cafe:cafe:10::1/64"
+        elif [ "$IPV6_MODE" = "subnet" ] && [ -n "$IPV6_SUBNET" ]; then
+            # 提取前缀并设置为 ::1/112 网关
+            _prefix=$(echo "$IPV6_SUBNET" | sed 's/::\/.*//')
+            INCUS_IPV6="${_prefix}::1/112"
+        fi
+
+        incus network create incusbr0 \
+            ipv4.address="$INCUS_IPV4" ipv4.nat=true \
+            ipv6.address="$INCUS_IPV6" ipv6.nat=$( [ "$IPV6_MODE" = "snat" ] && echo "true" || echo "false" ) \
+            ipv6.routing=true \
+            ipv6.dhcp=false \
+            dns.nameservers="1.1.1.1,2606:4700:4700::1111"
+    fi
+
+    # 3. 确保默认配置集 (profile) 使用基础磁盘
+    if incus profile show default >/dev/null 2>&1; then
+        incus profile device add default root disk path=/ pool=default >/dev/null 2>&1 || true
+        # 移除 profile 中的 eth0，由 Agent 在创建实例时动态注入，避免 IP 冲突
+        incus profile device remove default eth0 >/dev/null 2>&1 || true
+    fi
+fi
 
 IP=$(curl -4 -s --max-time 10 ip.sb 2>/dev/null || echo "N/A")
 echo ""

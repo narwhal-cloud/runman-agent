@@ -39,6 +39,16 @@ type CloudHVVMConfig struct {
 	IPv6 string // 静态 IPv6（ULA 或公网 /112），可能为空
 }
 
+// IncusVMConfig 存储 Incus 驱动特有的数据
+type IncusVMConfig struct {
+	VMID      string `gorm:"primaryKey"`
+	Idx       int    // IP 索引，用于计算静态 IP
+	Container string // 容器名
+	Image     string // 镜像名
+	IPv4      string // 静态 IPv4
+	IPv6      string // 静态 IPv6
+}
+
 // PortForward 持久化端口转发规则。(Protocol, HostPort) 联合主键保证宿主机端口唯一。
 type PortForward struct {
 	Protocol    string `gorm:"primaryKey"`
@@ -76,7 +86,7 @@ func Init(path string) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	_ = db.AutoMigrate(&Traffic{}, &VMConfig{}, &PodmanVMConfig{}, &CloudHVVMConfig{}, &PortForward{})
+	_ = db.AutoMigrate(&Traffic{}, &VMConfig{}, &PodmanVMConfig{}, &CloudHVVMConfig{}, &IncusVMConfig{}, &PortForward{})
 
 	return &DB{orm: db}, nil
 }
@@ -245,6 +255,51 @@ func (d *DB) ListCloudHVConfigs() ([]*CloudHVVMConfig, error) {
 	var list []*CloudHVVMConfig
 	err := d.orm.Find(&list).Error
 	return list, err
+}
+
+// Incus 数据结构
+
+func (d *DB) SaveIncusConfig(v *IncusVMConfig) error {
+	return d.orm.Save(v).Error
+}
+
+func (d *DB) GetIncusConfig(vmId string) (*IncusVMConfig, error) {
+	var conf IncusVMConfig
+	err := d.orm.First(&conf, "vm_id = ?", vmId).Error
+	if err != nil {
+		return nil, err
+	}
+	return &conf, nil
+}
+
+func (d *DB) DeleteIncusConfig(vmId string) error {
+	return d.orm.Delete(&IncusVMConfig{}, "vm_id = ?", vmId).Error
+}
+
+func (d *DB) ListIncusConfigs() ([]*IncusVMConfig, error) {
+	var list []*IncusVMConfig
+	err := d.orm.Find(&list).Error
+	return list, err
+}
+
+// NextIncusIdx 返回最小可用的 idx（范围 2-4094）
+func (d *DB) NextIncusIdx() (int, error) {
+	var configs []*IncusVMConfig
+	if err := d.orm.Find(&configs).Error; err != nil {
+		return 2, err
+	}
+
+	used := make(map[int]bool, len(configs))
+	for _, c := range configs {
+		used[c.Idx] = true
+	}
+
+	for idx := 2; idx <= 4094; idx++ {
+		if !used[idx] {
+			return idx, nil
+		}
+	}
+	return -1, gorm.ErrRecordNotFound
 }
 
 // NextCloudHVIdx 返回最小可用的 idx（范围 2-4094）

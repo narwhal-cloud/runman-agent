@@ -26,6 +26,7 @@ type Responder struct {
 	podmanNet  string
 	podmanSock string
 	cloudhvDB  interface{} // *db.DB (avoid circular import)
+	incusDB    interface{} // *db.DB
 }
 
 // New creates a Responder.
@@ -35,7 +36,8 @@ type Responder struct {
 //   - podmanNet:   Podman network name to watch for container IPs (may be empty)
 //   - podmanSock:  path to Podman API socket (e.g. "unix:///run/podman/podman.sock")
 //   - cloudhvDB:   database for cloud-hypervisor VMs (*db.DB, may be nil)
-func New(iface string, subnets string, podmanNet string, podmanSock string, cloudhvDB interface{}) (*Responder, error) {
+//   - incusDB:     database for incus instances (*db.DB, may be nil)
+func New(iface string, subnets string, podmanNet string, podmanSock string, cloudhvDB interface{}, incusDB interface{}) (*Responder, error) {
 	var b netipx.IPSetBuilder
 	for _, s := range strings.Split(subnets, ",") {
 		s = strings.TrimSpace(s)
@@ -58,6 +60,7 @@ func New(iface string, subnets string, podmanNet string, podmanSock string, clou
 		podmanNet:  podmanNet,
 		podmanSock: podmanSock,
 		cloudhvDB:  cloudhvDB,
+		incusDB:    incusDB,
 	}, nil
 }
 
@@ -93,6 +96,7 @@ func (r *Responder) Run(ctx context.Context) error {
 
 	var podmanTracker *podmanTracker
 	var cloudhvTracker *cloudhvTracker
+	var incusTracker *incusTracker
 
 	// Combine newIPs from all active trackers
 	newIPsCh := make(chan netip.Addr, 128)
@@ -119,7 +123,19 @@ func (r *Responder) Run(ctx context.Context) error {
 		}
 	}
 
-	log.Printf("NDP responder started on %s (podman: %v, cloudhv: %v)", r.iface, podmanTracker != nil, cloudhvTracker != nil)
+	if r.incusDB != nil {
+		incusTracker = newIncusTracker(r.incusDB)
+		if incusTracker != nil {
+			go incusTracker.run(ctx)
+			go func() {
+				for ip := range incusTracker.newIPs {
+					newIPsCh <- ip
+				}
+			}()
+		}
+	}
+
+	log.Printf("NDP responder started on %s (podman: %v, cloudhv: %v, incus: %v)", r.iface, podmanTracker != nil, cloudhvTracker != nil, incusTracker != nil)
 	sbuf := gopacket.NewSerializeBuffer()
 
 	for {
@@ -135,6 +151,8 @@ func (r *Responder) Run(ctx context.Context) error {
 			if podmanTracker != nil && podmanTracker.contains(ns.TargetIP) {
 				respond = true
 			} else if cloudhvTracker != nil && cloudhvTracker.contains(ns.TargetIP) {
+				respond = true
+			} else if incusTracker != nil && incusTracker.contains(ns.TargetIP) {
 				respond = true
 			} else if ns.DestIP.IsMulticast() && r.subnets.Contains(ns.TargetIP) {
 				respond = true

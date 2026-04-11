@@ -478,7 +478,10 @@ func (m *Manager) getUsage(_ context.Context, vmID string) (cpuPct float32, memU
 			continue
 		}
 		for _, s := range report.Stats {
-			for _, n := range s.Network {
+			for name, n := range s.Network {
+				if name == "lo" {
+					continue
+				}
 				netIn += int64(n.RxBytes)
 				netOut += int64(n.TxBytes)
 			}

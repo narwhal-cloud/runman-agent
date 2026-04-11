@@ -18,6 +18,7 @@ import (
 	"runman-agent/db"
 	"runman-agent/manager"
 	"runman-agent/manager/cloudhv"
+	"runman-agent/manager/incus"
 	"runman-agent/manager/podman"
 	"runman-agent/manager/portforward"
 	"runman-agent/monitor"
@@ -104,8 +105,10 @@ func main() {
 	case "cloudhv":
 		// cloud-hypervisor 初始化时传入 IPv6 配置（从配置文件读取）
 		rawMgr, err = cloudhv.New(database, conf.IPv6Mode, conf.IPv6Subnet, conf.IPv6Addr, conf.IPv6Iface)
+	case "incus":
+		rawMgr, err = incus.New(database, conf.IPv6Mode, conf.IPv6Subnet, conf.IPv6Addr, conf.IPv6Iface)
 	default:
-		log.Fatalf("unsupported virt type: %q (supported: podman, cloudhv)", conf.VirtType)
+		log.Fatalf("unsupported virt type: %q (supported: podman, cloudhv, incus)", conf.VirtType)
 	}
 	if err != nil {
 		log.Fatalf("init manager: %v", err)
@@ -114,8 +117,8 @@ func main() {
 	// VMService 作为服务层包装底层驱动，负责 ID 转换、托管 VM 过滤
 	svc := manager.NewVMService(rawMgr, database)
 
-	// cloud-hypervisor 自启动：agent 启动后延迟 5 秒让网络就绪，然后启动所有 running VM
-	if conf.VirtType == "cloudhv" {
+	// 虚拟化驱动自启动：agent 启动后延迟 5 秒让网络就绪，然后启动所有记录为 running 的 VM
+	if conf.VirtType == "cloudhv" || conf.VirtType == "incus" {
 		go func() {
 			time.Sleep(5 * time.Second)
 			svc.Autostart(context.Background())
@@ -172,11 +175,14 @@ func main() {
 
 	// 按需启动 NDP 应答器（公网 IPv6 场景）
 	if conf.NdpIface != "" {
-		var cloudhvDB interface{}
+		var cloudhvDB, incusDB interface{}
 		if conf.VirtType == "cloudhv" {
 			cloudhvDB = database
 		}
-		nr, err := ndp.New(conf.NdpIface, conf.NdpSubnets, conf.NdpNetwork, podman.SocketPath, cloudhvDB)
+		if conf.VirtType == "incus" {
+			incusDB = database
+		}
+		nr, err := ndp.New(conf.NdpIface, conf.NdpSubnets, conf.NdpNetwork, podman.SocketPath, cloudhvDB, incusDB)
 		if err != nil {
 			log.Printf("NDP responder init error: %v", err)
 		} else {
