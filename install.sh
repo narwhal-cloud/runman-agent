@@ -104,12 +104,12 @@ ipv6_plus_one() {
     python3 -c "import ipaddress; print(str(ipaddress.IPv6Address('$1') + 1))" 2>/dev/null
 }
 
-# Returns "local" or "IFACE|ADDR|PREFIX"
+# Returns "none" or "IFACE|ADDR|PREFIX"
 detect_and_configure_ipv6() {
     log "$(t "Detecting public IPv6..." "开始检测公网 IPv6...")" >&2
     if ! curl -6 -s --max-time 10 ip.sb >/dev/null 2>&1; then
         log "$(t "No public IPv6 detected." "未检测到公网 IPv6。")" >&2
-        echo "local"; return 0
+        echo "none"; return 0
     fi
     log "$(t "✓ Public IPv6 available." "✓ 公网 IPv6 可用。")" >&2
 
@@ -117,20 +117,46 @@ detect_and_configure_ipv6() {
     iface=$(ip -6 route show default 2>/dev/null | head -1 | awk '{print $5}')
     if [ -z "$iface" ]; then
         log "$(t "No default IPv6 route found." "未找到默认 IPv6 路由。")" >&2
-        echo "local"; return 0
+        echo "none"; return 0
     fi
     log "$(t "Default IPv6 interface: $iface" "默认 IPv6 网卡: $iface")" >&2
 
     local ipv6_full ipv6_addr prefix_len
-    # 优先选择子网（/64 或更小），其次选择单地址（/128）
-    # 这样可以最大化利用可用的 IPv6 地址空间
+    # 地址选择策略：
+    #   1. 优先选择静态（非 dynamic）的子网地址（排除 /128），按前缀降序排列
+    #      /64 优先于 /48，因为 /48 通常是 ISP 的整体分配，/64 才是用户实际可用的子网
+    #   2. 如果没有静态子网地址，回退到所有地址（含动态、含 /128）
 
-    # 先获取所有全局地址，按前缀长度排序（较小的前缀优先）
-    ipv6_full=$(ip -6 addr show dev "$iface" 2>/dev/null | grep "scope global" | grep -v "fe80" | awk '{print $2}' | sort -t'/' -k2 -n | head -1)
+    # 第一步：静态子网地址（不含 dynamic，不含 /128），按前缀降序——优先更具体的子网
+    ipv6_full=$(ip -6 addr show dev "$iface" 2>/dev/null \
+        | grep "scope global" | grep -v "dynamic" \
+        | awk '{print $2}' | grep -v '/128$' | sort -t'/' -k2 -rn | head -1)
+
+    # 第二步：如果无静态子网，尝试所有静态地址（含 /128）
+    if [ -z "$ipv6_full" ]; then
+        ipv6_full=$(ip -6 addr show dev "$iface" 2>/dev/null \
+            | grep "scope global" | grep -v "dynamic" \
+            | awk '{print $2}' | sort -t'/' -k2 -rn | head -1)
+    fi
+
+    # 第三步：如果无静态地址，回退到动态地址
+    if [ -z "$ipv6_full" ]; then
+        log "$(t "No static IPv6 found, trying dynamic addresses..." "未找到静态 IPv6，尝试动态地址...")" >&2
+        ipv6_full=$(ip -6 addr show dev "$iface" 2>/dev/null \
+            | grep "scope global" \
+            | awk '{print $2}' | grep -v '/128$' | sort -t'/' -k2 -rn | head -1)
+    fi
+
+    # 第四步：最终回退——任意全局地址
+    if [ -z "$ipv6_full" ]; then
+        ipv6_full=$(ip -6 addr show dev "$iface" 2>/dev/null \
+            | grep "scope global" \
+            | awk '{print $2}' | sort -t'/' -k2 -rn | head -1)
+    fi
 
     if [ -z "$ipv6_full" ]; then
         log "$(t "No global IPv6 address found." "未找到全局 IPv6 地址。")" >&2
-        echo "local"; return 0
+        echo "none"; return 0
     fi
 
     ipv6_addr=$(echo "$ipv6_full" | cut -d'/' -f1)
@@ -147,7 +173,10 @@ detect_and_configure_ipv6() {
         # 测试 /65-/127 的小子网
         local test_addr
         test_addr=$(ipv6_plus_one "$ipv6_addr")
-        ip addr add "$test_addr/$prefix_len" dev "$iface" 2>/dev/null || { echo "local"; return 0; }
+        ip addr add "$test_addr/$prefix_len" dev "$iface" 2>/dev/null || {
+            log "$(t "Cannot add test address, falling back to SNAT." "无法添加测试地址，回退到 SNAT 模式。")" >&2
+            echo "$iface|$ipv6_addr|128"; return 0
+        }
         sleep 3
         local ok=0
         curl -6 --interface "$test_addr" -s --max-time 10 ip.sb >/dev/null 2>&1 && ok=1
@@ -157,11 +186,12 @@ detect_and_configure_ipv6() {
             log "$(t "✓ Public IPv6 test passed." "✓ 公网 IPv6 测试成功。")" >&2
             echo "$iface|$ipv6_addr|$prefix_len"
         else
-            log "$(t "Public IPv6 test failed, using local subnet." "公网 IPv6 测试失败，使用本地网段。")" >&2
-            echo "local"
+            # 子网不可用，但宿主机 IPv6 连通（curl -6 已在函数开头通过），回退到 SNAT
+            log "$(t "Subnet not usable, falling back to SNAT via host address." "子网不可用，回退到宿主机地址 SNAT 模式。")" >&2
+            echo "$iface|$ipv6_addr|128"
         fi
     else
-        echo "local"; return 0
+        echo "none"; return 0
     fi
 }
 
@@ -704,13 +734,20 @@ configure_host_ipv6_routing() {
 
 # ── IPv6 detection ────────────────────────────────────────────────────────────
 
+# 初始化 IPv6 模式变量
+# IPV6_CONFIG: 检测原始结果，"none" 或 "iface|addr|prefix"
+# IPV6_MODE:   最终运行模式，"none" / "snat" / "subnet"（写入 config.json）
+# 保存用户通过环境变量显式指定的值（如 IPV6_MODE=subnet bash install.sh）
+_USER_IPV6_MODE="${IPV6_MODE:-}"
+IPV6_MODE="none"
+
 read -rp "$(t "Enable public IPv6 detection? [Y/n]: " "是否进行公网 IPv6 检测? [Y/n]: ")" _ipv6
-IPV6_CONFIG="local"
+IPV6_CONFIG="none"
 
 if [[ "${_ipv6:-Y}" =~ ^[Yy]$ ]]; then
     IPV6_CONFIG=$(detect_and_configure_ipv6)
-    if [ "$IPV6_CONFIG" = "local" ]; then
-        read -rp "$(t "IPv6 detection failed. Continue with local subnet? [Y/n]: " "公网 IPv6 检测失败，是否使用本地网段继续? [Y/n]: ")" _fb
+    if [ "$IPV6_CONFIG" = "none" ]; then
+        read -rp "$(t "No IPv6 connectivity detected. Continue without IPv6? [Y/n]: " "未检测到 IPv6 连通性，是否不配置 IPv6 继续? [Y/n]: ")" _fb
         [[ "${_fb:-Y}" =~ ^[Nn]$ ]] && { log "$(t "Aborted." "已退出。")"; exit 1; }
     fi
 fi
@@ -731,8 +768,13 @@ if [ "$VIRT_TYPE" = "cloudhv" ] || [ "$VIRT_TYPE" = "incus" ]; then
     IPV6_ADDR=""
     IPV6_IFACE=""
 
+    # 无公网 IPv6 时保持 IPV6_MODE="none"，不配置 IPv6
+    if [ "$IPV6_CONFIG" = "none" ]; then
+        log "$(t "No public IPv6, IPv6 will not be configured." "无公网 IPv6，将不配置 IPv6。")"
+    fi
+
     # 尝试获取可分配的 IPv6 子网或地址
-    if [ "$IPV6_CONFIG" != "local" ]; then
+    if [ "$IPV6_CONFIG" != "none" ]; then
         IPV6_IFACE=$(echo "$IPV6_CONFIG" | cut -d'|' -f1)
         IPV6_ADDR=$(echo "$IPV6_CONFIG" | cut -d'|' -f2)
         IPV6_PREFIX=$(echo "$IPV6_CONFIG" | cut -d'|' -f3)
@@ -744,8 +786,9 @@ if [ "$VIRT_TYPE" = "cloudhv" ] || [ "$VIRT_TYPE" = "incus" ]; then
         #   - 自动检测：
         #     - /128：使用 SNAT 模式
         #     - <= 127：使用 subnet 模式
-        if [ -n "${IPV6_MODE}" ]; then
-            # 用户显式指定了模式
+        if [ -n "${_USER_IPV6_MODE}" ]; then
+            # 用户通过环境变量显式指定了模式
+            IPV6_MODE="$_USER_IPV6_MODE"
             log "$(t "✓ IPv6 mode explicitly set to: $IPV6_MODE" "✓ IPv6 模式已指定为: $IPV6_MODE")"
         elif [ "$IPV6_PREFIX" = "128" ]; then
             IPV6_MODE="snat"
@@ -793,17 +836,15 @@ elif [ "$VIRT_TYPE" = "podman" ]; then
 
 if podman network exists "$PODMAN_NETWORK" 2>/dev/null; then
     log "$(t "Podman network $PODMAN_NETWORK already exists, skipping." "Podman 网络 $PODMAN_NETWORK 已存在，跳过创建。")"
-elif [ "$IPV6_CONFIG" = "local" ]; then
-    log "$(t "Creating Podman network with local IPv6..." "使用本地 IPv6 网段创建 Podman 网络...")"
+elif [ "$IPV6_CONFIG" = "none" ]; then
+    # IPV6_MODE 保持 "none"，不配置 IPv6
+    log "$(t "Creating Podman network (IPv4 only)..." "创建 Podman 网络（仅 IPv4）...")"
     podman network create \
         --driver=bridge \
         --subnet=10.91.0.0/20 \
         --gateway=10.91.0.1 \
-        --ipv6 \
-        --subnet=fd91:cafe:cafe:10::/64 \
-        --gateway=fd91:cafe:cafe:10::1 \
         "$PODMAN_NETWORK"
-    log "$(t "✓ Podman network created (local IPv6)." "✓ Podman 网络创建完成（本地 IPv6）。")"
+    log "$(t "✓ Podman network created (IPv4 only, no IPv6)." "✓ Podman 网络创建完成（仅 IPv4，无 IPv6）。")"
 
 else
     IPV6_IFACE=$(echo "$IPV6_CONFIG" | cut -d'|' -f1)
@@ -813,6 +854,7 @@ else
 
     if [ "$IPV6_PREFIX" = "128" ]; then
         # /128 是单个地址，无法划分子网给容器，回退到 ULA + SNAT 模式
+        IPV6_MODE="snat"
         log "$(t "Public IPv6 is /128 (single address): cannot allocate public subnet, using ULA with SNAT." "公网 IPv6 为 /128（单个地址）：无法分配公网子网，使用 ULA + SNAT 模式。")"
         podman network create \
             --driver=bridge \
@@ -826,6 +868,7 @@ else
         # /128 SNAT 模式：不设 NDP，不注入 snat_ipv6=false
     else
         # 有公网前缀（<= /127），用 python3 计算容器子网
+        IPV6_MODE="subnet"
         # 策略：取宿主机前缀，在其内偏移固定量得到 /112 容器段，避免与 EUI-64/隐私地址冲突
         read -r CONTAINER_BASE CONTAINER_GW <<< "$(python3 - <<PYEOF
 import ipaddress
@@ -1038,13 +1081,14 @@ if [ "$VIRT_TYPE" = "incus" ]; then
         INCUS_IPV4="10.91.0.1/20"
         INCUS_IPV6="none"
 
-        if [ "$IPV6_MODE" = "snat" ] || [ "$IPV6_CONFIG" = "local" ]; then
+        if [ "$IPV6_MODE" = "snat" ]; then
             INCUS_IPV6="fd91:cafe:cafe:10::1/64"
         elif [ "$IPV6_MODE" = "subnet" ] && [ -n "$IPV6_SUBNET" ]; then
             # 提取前缀并设置为 ::1/112 网关
             _prefix=$(echo "$IPV6_SUBNET" | sed 's/::\/.*//')
             INCUS_IPV6="${_prefix}::1/112"
         fi
+        # IPV6_MODE="none" 时 INCUS_IPV6 保持 "none"，Incus 不配置 IPv6
 
         incus network create incusbr0 \
             ipv4.address="$INCUS_IPV4" ipv4.nat=true \

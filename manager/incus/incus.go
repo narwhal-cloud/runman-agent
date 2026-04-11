@@ -157,13 +157,8 @@ packages:
   - dos2unix
 `, req.RootPassword, pkgSSH, pkgCron)
 
-	// 2. 写入网络配置
-	if req.OsImage == "alpine" {
-		userData += fmt.Sprintf(`
-write_files:
-  - path: /etc/network/interfaces
-    content: |
-      auto lo
+	// 2. 写入网络配置（IPv6 仅在有有效地址时写入）
+	netConf := fmt.Sprintf(`      auto lo
       iface lo inet loopback
 
       auto eth0
@@ -171,35 +166,27 @@ write_files:
         address %s
         netmask 255.255.240.0
         gateway 10.91.0.1
-        dns-nameservers 1.1.1.1 2606:4700:4700::1111
+        dns-nameservers 1.1.1.1
+`, ipv4)
 
+	// 仅在有有效 IPv6 地址时追加 inet6 配置
+	if ipv6 != "" {
+		gw6 := m.ipv6Addr
+		if gw6 == "" {
+			gw6 = "fd91:cafe:cafe:10::1"
+		}
+		netConf += fmt.Sprintf(`
       iface eth0 inet6 static
         address %s/%s
         gateway %s
-        dns-nameservers 1.1.1.1 2606:4700:4700::1111
-`, ipv4, ipv6, ipv6Mask, m.ipv6Addr)
-	} else {
-		// Debian (Using /etc/network/interfaces is also fine for Debian cloud image)
-		userData += fmt.Sprintf(`
-write_files:
-  - path: /etc/network/interfaces
-    content: |
-      auto lo
-      iface lo inet loopback
-
-      auto eth0
-      iface eth0 inet static
-        address %s
-        netmask 255.255.240.0
-        gateway 10.91.0.1
-        dns-nameservers 1.1.1.1 2606:4700:4700::1111
-
-      iface eth0 inet6 static
-        address %s/%s
-        gateway %s
-        dns-nameservers 1.1.1.1 2606:4700:4700::1111
-`, ipv4, ipv6, ipv6Mask, m.ipv6Addr)
+`, ipv6, ipv6Mask, gw6)
 	}
+
+	userData += fmt.Sprintf(`
+write_files:
+  - path: /etc/network/interfaces
+    content: |
+%s`, netConf)
 
 	// 3. 合并所有的 runcmd
 	userData += "runcmd:\n"
@@ -241,12 +228,9 @@ write_files:
 		"ipv4.address":            ipv4,
 		"security.ipv4_filtering": "true",
 	}
-	if ipv6 != "" {
-		nic["ipv6.address"] = ipv6
-		nic["security.ipv6_filtering"] = "true"
-	} else if m.ipv6Mode == "none" {
-		nic["ipv6.address"] = "none"
-	}
+	// 不在 NIC 设备上设置 ipv6.address：
+	// incusbr0 默认未开启 DHCPv6，设置任何 ipv6.address 值（包括 "none"）都会导致 Incus 报错。
+	// IPv6 地址由 cloud-init 在容器内静态配置，无需 Incus 层面干预。
 
 	devices := map[string]map[string]string{
 		"root": {
