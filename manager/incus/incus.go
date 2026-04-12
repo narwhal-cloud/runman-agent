@@ -33,6 +33,7 @@ type Manager struct {
 	ipv6Addr   string
 	ipv6Iface  string
 	buildMu    sync.Mutex
+	mu         sync.Mutex // 全局锁，确保同一时间只有一个 VM 操作
 }
 
 func New(database *db.DB, ipv6Mode, ipv6Subnet, ipv6Addr, ipv6Iface string) (*Manager, error) {
@@ -51,9 +52,58 @@ func New(database *db.DB, ipv6Mode, ipv6Subnet, ipv6Addr, ipv6Iface string) (*Ma
 	}, nil
 }
 
+// --- 导出方法（带全局锁） ---
+
 func (m *Manager) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.createVM(ctx, req)
+}
+
+func (m *Manager) DeleteVM(ctx context.Context, vmID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.deleteVM(ctx, vmID)
+}
+
+func (m *Manager) StartVM(ctx context.Context, vmID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.startVM(ctx, vmID)
+}
+
+func (m *Manager) StopVM(ctx context.Context, vmID string, force bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.stopVM(ctx, vmID, force)
+}
+
+func (m *Manager) RestartVM(ctx context.Context, vmID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.restartVM(ctx, vmID)
+}
+
+func (m *Manager) ReinstallVM(ctx context.Context, req *agent.CmdReinstallVM) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	_ = m.deleteVM(ctx, req.VmId)
+	return m.createVM(ctx, &agent.CmdCreateVM{
+		VmId:         req.VmId,
+		OsImage:      req.OsImage,
+		RootPassword: req.RootPassword,
+		Cpu:          req.Cpu,
+		RamMb:        req.RamMb,
+		DiskGb:       req.DiskGb,
+	})
+}
+
+// --- 内部方法（不带锁） ---
+
+func (m *Manager) createVM(ctx context.Context, req *agent.CmdCreateVM) error {
 	// 0. 清理同名旧实例（如果存在）
-	_ = m.DeleteVM(ctx, req.VmId)
+	_ = m.deleteVM(ctx, req.VmId)
 
 	// 1. 分配索引
 	idx, err := m.db.NextIncusIdx()
@@ -72,7 +122,7 @@ func (m *Manager) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error {
 		}
 	}
 
-	// 转换镜像别名 (e.g. debian -> debian/13/cloud, alpine -> alpine/3.23/cloud)
+	// 转换镜像别名
 	alias := req.OsImage
 	if alias == "debian" {
 		alias = "debian/13/cloud"
@@ -80,7 +130,6 @@ func (m *Manager) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error {
 		alias = "alpine/3.23/cloud"
 	}
 
-	// 自动补全架构
 	arch := runtime.GOARCH
 	if arch == "x86_64" || arch == "amd64" {
 		arch = "amd64"
@@ -92,7 +141,6 @@ func (m *Manager) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error {
 		alias = fmt.Sprintf("%s/%s", alias, arch)
 	}
 
-	// 3. 定义实例源：优先检查本地是否存在 ready 镜像
 	imageSource := api.InstanceSource{
 		Type:     "image",
 		Server:   "https://images.linuxcontainers.org",
@@ -103,9 +151,7 @@ func (m *Manager) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error {
 	readyAlias := alias + "/ready"
 	_, _, err = m.client.GetImageAlias(readyAlias)
 	if err != nil {
-		// 本地不存在 ready 镜像，开始自动构建（阻塞式）
 		m.buildMu.Lock()
-		// 再次检查防止并发冲突
 		_, _, err = m.client.GetImageAlias(readyAlias)
 		if err != nil {
 			log.Printf("[Incus] Building ready image for %s...", alias)
@@ -119,13 +165,11 @@ func (m *Manager) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error {
 		imageSource.Protocol = ""
 		imageSource.Alias = readyAlias
 	} else {
-		// 存在本地 ready 镜像，直接使用
 		imageSource.Server = ""
 		imageSource.Protocol = ""
 		imageSource.Alias = readyAlias
 	}
 
-	// 确定包名
 	pkgSSH := "openssh-server"
 	pkgCron := "cron"
 	if req.OsImage == "alpine" {
@@ -133,10 +177,6 @@ func (m *Manager) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error {
 		pkgCron = "cronie"
 	}
 
-	// 强化 Cloud-init 配置：安装软件包、配置网络、开启 SSH
-	// 在 /112 等小网段下，SLAAC 不起作用，必须通过 cloud-init 或 DHCPv6 强制静态配置
-
-	// 1. 基础公共配置
 	userData := fmt.Sprintf(`#cloud-config
 ssh_pwauth: true
 disable_root: false
@@ -157,9 +197,6 @@ packages:
   - dos2unix
 `, req.RootPassword, pkgSSH, pkgCron)
 
-	// 2. 写入网络配置（IPv6 仅在有有效地址时写入）
-	// Alpine: /etc/network/interfaces (ifupdown 原生)
-	// Debian: /etc/systemd/network/10-eth0.network (systemd-networkd 原生)
 	if req.OsImage == "alpine" {
 		netConf := fmt.Sprintf(`      auto lo
       iface lo inet loopback
@@ -190,7 +227,6 @@ write_files:
     content: |
 %s`, netConf)
 	} else {
-		// Debian: systemd-networkd 配置
 		networkConf := fmt.Sprintf(`      [Match]
       Name=eth0
 
@@ -228,7 +264,6 @@ write_files:
 `, networkConf)
 	}
 
-	// SSH 配置直接写入 sshd_config
 	userData += `  - path: /etc/ssh/sshd_config
     content: |
       PermitRootLogin yes
@@ -236,22 +271,16 @@ write_files:
       ListenAddress 0.0.0.0
       ListenAddress ::
 `
-
-	// 3. 合并所有的 runcmd
 	userData += "runcmd:\n"
-
-	// 网络重启逻辑
 	if req.OsImage == "alpine" {
 		userData += "  - rc-update add networking boot\n"
 		userData += "  - ifdown eth0 || true\n"
 		userData += "  - ifup eth0 || true\n"
 	} else {
-		// Debian: 移除 cloud-init 生成的 networkd 配置，使用我们自己的
 		userData += "  - rm -f /etc/systemd/network/10-cloud-init-*.network /run/systemd/network/10-cloud-init-*.network || true\n"
 		userData += "  - systemctl restart systemd-networkd || true\n"
 	}
 
-	// SSH 及服务启动
 	userData += fmt.Sprintf(`  - [ sh, -c, "systemctl enable ssh || systemctl enable sshd || rc-update add sshd default || true" ]
   - [ sh, -c, "systemctl restart ssh || systemctl restart sshd || rc-service sshd restart || true" ]
   - [ sh, -c, "systemctl enable %s || rc-update add %s default || true" ]
@@ -274,9 +303,6 @@ write_files:
 		"ipv4.address":            ipv4,
 		"security.ipv4_filtering": "true",
 	}
-	// 不在 NIC 设备上设置 ipv6.address：
-	// incusbr0 默认未开启 DHCPv6，设置任何 ipv6.address 值（包括 "none"）都会导致 Incus 报错。
-	// IPv6 地址由 cloud-init 在容器内静态配置，无需 Incus 层面干预。
 
 	devices := map[string]map[string]string{
 		"root": {
@@ -288,14 +314,14 @@ write_files:
 		"eth0": nic,
 	}
 
-	// 4. 创建实例
 	op, err := m.client.CreateInstance(api.InstancesPost{
 		Name:   req.VmId,
 		Type:   api.InstanceTypeContainer,
 		Source: imageSource,
 		InstancePut: api.InstancePut{
-			Config:  config,
-			Devices: devices,
+			Profiles: []string{}, // 禁用 default profile，避免配置冲突
+			Config:   config,
+			Devices:  devices,
 		},
 	})
 	if err != nil {
@@ -306,12 +332,10 @@ write_files:
 		return fmt.Errorf("wait for create: %w", err)
 	}
 
-	// 5. 启动实例
-	if err := m.StartVM(ctx, req.VmId); err != nil {
+	if err := m.startVM(ctx, req.VmId); err != nil {
 		return err
 	}
 
-	// 6. 保存配置
 	bizConf, _ := m.db.GetVMConfig(req.VmId)
 	if bizConf == nil {
 		bizConf = &db.VMConfig{VMID: req.VmId}
@@ -336,10 +360,52 @@ write_files:
 	return nil
 }
 
+func (m *Manager) deleteVM(ctx context.Context, vmID string) error {
+	// 强杀并删除
+	stopOp, _ := m.client.UpdateInstanceState(vmID, api.InstanceStatePut{Action: "stop", Timeout: -1, Force: true}, "")
+	if stopOp != nil {
+		_ = stopOp.Wait()
+	}
+
+	op, err := m.client.DeleteInstance(vmID)
+	if err != nil {
+		return err
+	}
+	if err := op.Wait(); err != nil {
+		return err
+	}
+	_ = m.db.DeleteVMConfig(vmID)
+	_ = m.db.DeleteIncusConfig(vmID)
+	return nil
+}
+
+func (m *Manager) startVM(ctx context.Context, vmID string) error {
+	op, err := m.client.UpdateInstanceState(vmID, api.InstanceStatePut{Action: "start", Timeout: -1}, "")
+	if err != nil {
+		return err
+	}
+	return op.Wait()
+}
+
+func (m *Manager) stopVM(ctx context.Context, vmID string, force bool) error {
+	op, err := m.client.UpdateInstanceState(vmID, api.InstanceStatePut{Action: "stop", Timeout: -1, Force: force}, "")
+	if err != nil {
+		return err
+	}
+	return op.Wait()
+}
+
+func (m *Manager) restartVM(ctx context.Context, vmID string) error {
+	op, err := m.client.UpdateInstanceState(vmID, api.InstanceStatePut{Action: "restart", Timeout: -1}, "")
+	if err != nil {
+		return err
+	}
+	return op.Wait()
+}
+
 func (m *Manager) ensureReadyImage(ctx context.Context, baseAlias, readyAlias, distro string) error {
 	builderName := fmt.Sprintf("builder-%d", time.Now().Unix())
 
-	// 确定包名
 	pkgSSH := "openssh-server"
 	pkgCron := "cron"
 	if distro == "alpine" {
@@ -347,8 +413,6 @@ func (m *Manager) ensureReadyImage(ctx context.Context, baseAlias, readyAlias, d
 		pkgCron = "cronie"
 	}
 
-	// 使用 cloud-init 为 builder 安装基础包，这是最可靠的方式
-	// 针对 Debian 13 (trixie) 强制使用 IPv4 解析
 	aptConfig := ""
 	if distro != "alpine" {
 		aptConfig = "- [ sh, -c, \"echo 'Acquire::ForceIPv4 \\\"true\\\";' > /etc/apt/apt.conf.d/99force-ipv4\" ]\n  - apt-get update"
@@ -379,7 +443,6 @@ runcmd:
   - [ sh, -c, "touch /root/build_done" ]
 `, pkgSSH, pkgCron, aptConfig)
 
-	// 1. 创建 builder 容器
 	op, err := m.client.CreateInstance(api.InstancesPost{
 		Name: builderName,
 		Type: api.InstanceTypeContainer,
@@ -401,22 +464,20 @@ runcmd:
 	_ = op.Wait()
 
 	defer func() {
-		_ = m.StopVM(ctx, builderName, true)
+		_ = m.stopVM(ctx, builderName, true)
 		op, _ := m.client.DeleteInstance(builderName)
 		if op != nil {
 			_ = op.Wait()
 		}
 	}()
 
-	// 2. 启动并等待任务完成
-	if err := m.StartVM(ctx, builderName); err != nil {
+	if err := m.startVM(ctx, builderName); err != nil {
 		return err
 	}
 
 	log.Printf("[Incus] Waiting for builder %s to complete installation...", builderName)
-	// 等待 cloud-init 完成（通过检查标记文件）
 	success := false
-	for i := 0; i < 120; i++ { // 最多等待 10 分钟
+	for i := 0; i < 120; i++ {
 		_, _, err := m.client.GetInstanceFile(builderName, "/root/build_done")
 		if err == nil {
 			success = true
@@ -429,8 +490,7 @@ runcmd:
 		return fmt.Errorf("builder timed out or failed to install packages")
 	}
 
-	// 3. 停止并发布
-	if err := m.StopVM(ctx, builderName, false); err != nil {
+	if err := m.stopVM(ctx, builderName, false); err != nil {
 		return err
 	}
 
@@ -448,12 +508,10 @@ runcmd:
 }
 
 func (m *Manager) computeIPs(idx int) (ipv4, ipv6 string) {
-	// IPv4: 10.91.x.y
 	host := idx & 0xff
 	subnet := (idx >> 8) & 0xf
 	ipv4 = fmt.Sprintf("10.91.%d.%d", subnet, host)
 
-	// IPv6
 	switch m.ipv6Mode {
 	case "subnet":
 		if m.ipv6Subnet != "" {
@@ -467,56 +525,6 @@ func (m *Manager) computeIPs(idx int) (ipv4, ipv6 string) {
 		ipv6 = fmt.Sprintf("fd91:cafe:cafe:10::%x", idx)
 	}
 	return
-}
-
-func (m *Manager) StartVM(_ context.Context, vmID string) error {
-	op, err := m.client.UpdateInstanceState(vmID, api.InstanceStatePut{Action: "start", Timeout: -1}, "")
-	if err != nil {
-		return err
-	}
-	return op.Wait()
-}
-
-func (m *Manager) StopVM(_ context.Context, vmID string, force bool) error {
-	op, err := m.client.UpdateInstanceState(vmID, api.InstanceStatePut{Action: "stop", Timeout: -1, Force: force}, "")
-	if err != nil {
-		return err
-	}
-	return op.Wait()
-}
-
-func (m *Manager) RestartVM(_ context.Context, vmID string) error {
-	op, err := m.client.UpdateInstanceState(vmID, api.InstanceStatePut{Action: "restart", Timeout: -1}, "")
-	if err != nil {
-		return err
-	}
-	return op.Wait()
-}
-
-func (m *Manager) DeleteVM(_ context.Context, vmID string) error {
-	_ = m.StopVM(nil, vmID, true)
-	op, err := m.client.DeleteInstance(vmID)
-	if err != nil {
-		return err
-	}
-	if err := op.Wait(); err != nil {
-		return err
-	}
-	_ = m.db.DeleteVMConfig(vmID)
-	_ = m.db.DeleteIncusConfig(vmID)
-	return nil
-}
-
-func (m *Manager) ReinstallVM(ctx context.Context, req *agent.CmdReinstallVM) error {
-	_ = m.DeleteVM(ctx, req.VmId)
-	return m.CreateVM(ctx, &agent.CmdCreateVM{
-		VmId:         req.VmId,
-		OsImage:      req.OsImage,
-		RootPassword: req.RootPassword,
-		Cpu:          req.Cpu,
-		RamMb:        req.RamMb,
-		DiskGb:       req.DiskGb,
-	})
 }
 
 func (m *Manager) ResetPassword(_ context.Context, vmID, password string) error {
@@ -570,7 +578,6 @@ func (m *Manager) GetVMLocalIP(_ context.Context, vmID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// 剥离掩码
 	parts := strings.SplitN(conf.IPv4, "/", 2)
 	return parts[0], nil
 }
@@ -580,7 +587,6 @@ func (m *Manager) GetVMLocalIPv6(_ context.Context, vmID string) (string, error)
 	if err != nil {
 		return "", err
 	}
-	// 剥离掩码
 	parts := strings.SplitN(conf.IPv6, "/", 2)
 	return parts[0], nil
 }
@@ -599,10 +605,8 @@ func (m *Manager) AttachTTY(ctx context.Context, vmID string, stdin io.Reader, s
 		Interactive: true,
 	}
 
-	// 处理 Resize 事件
 	go func() {
 		for rs := range resize {
-			// Incus API 的 resize 需要通过 control 控制通道，此处由于库限制暂做占位
 			_ = rs
 		}
 	}()
@@ -611,7 +615,7 @@ func (m *Manager) AttachTTY(ctx context.Context, vmID string, stdin io.Reader, s
 		Stdin:    stdin,
 		Stdout:   stdout,
 		Stderr:   stdout,
-		Control:  nil, // 暂不实现动态 resize 控制流
+		Control:  nil,
 		DataDone: make(chan bool),
 	}
 
@@ -620,15 +624,46 @@ func (m *Manager) AttachTTY(ctx context.Context, vmID string, stdin io.Reader, s
 		return err
 	}
 
-	// 监听 context 取消
 	go func() {
 		<-ctx.Done()
-		// op.Cancel() 在 incus 库中可能不可用，但可以通过断开数据连接来触发
 	}()
 
 	err = op.Wait()
 	<-args.DataDone
 	return err
+}
+
+func (m *Manager) Cleanup(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	instances, err := m.client.GetInstances(api.InstanceTypeAny)
+	if err != nil {
+		return err
+	}
+
+	// 获取数据库中登记的所有虚拟机
+	configs, _ := m.db.ListVMConfigs()
+	registered := make(map[string]bool, len(configs))
+	for _, c := range configs {
+		registered[c.VMID] = true
+	}
+
+	for _, inst := range instances {
+		// 跳过已登记的
+		if registered[inst.Name] {
+			continue
+		}
+		// 跳过镜像构建器
+		if strings.HasPrefix(inst.Name, "builder-") {
+			continue
+		}
+
+		// 判定为幽灵实例，直接删除
+		log.Printf("[Incus] Found ghost instance %s, deleting...", inst.Name)
+		_ = m.deleteVM(ctx, inst.Name)
+	}
+	return nil
 }
 
 func (m *Manager) GetVMNetStats(_ context.Context, vmID string) (*manager.VMNetStats, error) {

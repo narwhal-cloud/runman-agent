@@ -42,6 +42,7 @@ type Manager struct {
 	ctx   context.Context
 	db    *db.DB
 	alloc *cpualloc.Allocator
+	mu    sync.Mutex // 全局锁，序列化所有容器生命周期操作，防止 IP/Cpuset 分配冲突
 }
 
 func New(database *db.DB) (*Manager, error) {
@@ -120,7 +121,13 @@ func lxcfsMounts() []specs.Mount {
 	return mounts
 }
 
-func (m *Manager) CreateVM(_ context.Context, req *agent.CmdCreateVM) error {
+func (m *Manager) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.createVM(ctx, req)
+}
+
+func (m *Manager) createVM(_ context.Context, req *agent.CmdCreateVM) error {
 	// 限制最低配置：CPU 1核，内存 128MB，磁盘 1GB
 	if req.Cpu < 1 {
 		req.Cpu = 1
@@ -376,10 +383,22 @@ func (m *Manager) deleteByID(id string) error {
 }
 
 func (m *Manager) StartVM(_ context.Context, vmID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.startVM(vmID)
+}
+
+func (m *Manager) startVM(vmID string) error {
 	return containers.Start(m.timeoutCtx(), vmID, nil)
 }
 
 func (m *Manager) StopVM(_ context.Context, vmID string, force bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.stopVM(vmID, force)
+}
+
+func (m *Manager) stopVM(vmID string, force bool) error {
 	if force {
 		return containers.Kill(m.timeoutCtx(), vmID, &containers.KillOptions{Signal: ptr("SIGKILL")})
 	}
@@ -387,18 +406,29 @@ func (m *Manager) StopVM(_ context.Context, vmID string, force bool) error {
 }
 
 func (m *Manager) RestartVM(_ context.Context, vmID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return containers.Restart(m.timeoutCtx(), vmID, nil)
 }
 
-func (m *Manager) DeleteVM(_ context.Context, vmID string) error {
+func (m *Manager) DeleteVM(ctx context.Context, vmID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.deleteVM(ctx, vmID)
+}
+
+func (m *Manager) deleteVM(_ context.Context, vmID string) error {
 	_ = m.db.DeleteVMConfig(vmID)
 	return m.deleteByID(vmID)
 }
 
 func (m *Manager) ReinstallVM(ctx context.Context, req *agent.CmdReinstallVM) error {
-	_ = m.StopVM(ctx, req.VmId, true)
-	_ = m.DeleteVM(ctx, req.VmId)
-	return m.CreateVM(ctx, &agent.CmdCreateVM{
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	_ = m.stopVM(req.VmId, true)
+	_ = m.deleteVM(ctx, req.VmId)
+	return m.createVM(ctx, &agent.CmdCreateVM{
 		VmId:          req.VmId,
 		OsImage:       req.OsImage,
 		RootPassword:  req.RootPassword,
@@ -410,6 +440,7 @@ func (m *Manager) ReinstallVM(ctx context.Context, req *agent.CmdReinstallVM) er
 }
 
 func (m *Manager) ResetPassword(_ context.Context, vmID, password string) error {
+	// 密码重设通常涉及 exec，并不会导致并发资源冲突，但为了严谨也可以加锁或不加
 	return m.execInContainer(vmID, []string{"bash", "-c", fmt.Sprintf("echo 'root:%s' | chpasswd", password)})
 }
 
@@ -617,6 +648,44 @@ func (m *Manager) GetVMNetStats(ctx context.Context, vmID string) (*manager.VMNe
 		InBytes:  netIn,
 		OutBytes: netOut,
 	}, nil
+}
+
+func (m *Manager) Cleanup(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	list, err := containers.List(m.timeoutCtx(), &containers.ListOptions{All: ptr(true)})
+	if err != nil {
+		return err
+	}
+
+	// 获取数据库中登记的所有虚拟机
+	configs, _ := m.db.ListVMConfigs()
+	registered := make(map[string]bool, len(configs))
+	for _, c := range configs {
+		registered[c.VMID] = true
+	}
+
+	for _, c := range list {
+		if len(c.Names) == 0 {
+			continue
+		}
+		name := strings.TrimPrefix(c.Names[0], "/")
+
+		// 跳过已登记的
+		if registered[name] {
+			continue
+		}
+		// 跳过临时容器
+		if strings.HasPrefix(name, "tmp-") {
+			continue
+		}
+
+		// 判定为幽灵实例，直接删除
+		log.Printf("[Podman] Found ghost container %s, deleting...", name)
+		_ = m.deleteByID(c.ID)
+	}
+	return nil
 }
 
 func mapStatus(s string) agent.VMStatus {

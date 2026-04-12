@@ -166,6 +166,22 @@ func main() {
 	trafficSvc := traffic.NewService(svc, database)
 	go trafficSvc.Start(context.Background(), 30*time.Second)
 
+	// 启动定期清理幽灵实例服务 (每小时一次，启动时先运行一次)
+	go func() {
+		log.Println("[Main] Initial ghost VM cleanup at startup...")
+		_ = svc.Cleanup(context.Background())
+
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				log.Println("[Main] Running periodic ghost VM cleanup...")
+				_ = svc.Cleanup(context.Background())
+			}
+		}
+	}()
+
 	// 启动时异步测速，结果只保留内存，不写配置
 	go a.measureBandwidth()
 	// 启动时检测公网 IPv4，附带在心跳中上报

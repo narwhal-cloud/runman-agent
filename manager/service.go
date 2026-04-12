@@ -179,3 +179,8 @@ func (s *VMService) Autostart(ctx context.Context) {
 		}
 	}
 }
+
+// Cleanup 执行幽灵实例清理
+func (s *VMService) Cleanup(ctx context.Context) error {
+	return s.mgr.Cleanup(ctx)
+}

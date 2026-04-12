@@ -78,6 +78,9 @@ type VMManager interface {
 	// GetVMNetStats 获取 VM 的网络流量累计字节数（用于流量统计服务）
 	// 返回的是计数器值，而非速率，由调用方计算增量
 	GetVMNetStats(ctx context.Context, vmID string) (*VMNetStats, error)
+
+	// Cleanup 清理幽灵实例（存在于驱动中但不在数据库中的实例）
+	Cleanup(ctx context.Context) error
 }
 
 // VMNetStats 表示 VM 的网络流量统计

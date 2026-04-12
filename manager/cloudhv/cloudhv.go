@@ -56,6 +56,7 @@ type Manager struct {
 	ipv6Counter int                      // 子网模式下的地址计数器（用于分配 ::2, ::3 等）
 	vmStatus    map[string]*vmStatusInfo // 虚拟机上报的状态信息（CPU+内存）
 	vmStatusMu  sync.RWMutex
+	mu          sync.Mutex // 全局锁，序列化所有虚拟机生命周期操作，防止 IP/TAP 分配冲突
 }
 
 // --- REST API 请求/响应结构体 ---
@@ -536,7 +537,7 @@ func (m *Manager) genCloudInit(vmID, distro, password string, net *netConfig) er
       [Unit]
       Description=Report VM memory usage to agent
       After=network.target
-
+ 
       [Service]
       Type=simple
       ExecStart=/usr/local/bin/report-memory.sh
@@ -544,7 +545,7 @@ func (m *Manager) genCloudInit(vmID, distro, password string, net *netConfig) er
       RestartSec=10
       StandardOutput=journal
       StandardError=journal
-
+ 
       [Install]
       WantedBy=multi-user.target
     permissions: '0644'`
@@ -572,33 +573,33 @@ write_files:
     content: |
       #!/bin/sh
       VMID="%s"
-
+ 
       while true; do
         MEM_USED=$(free -m 2>/dev/null | awk 'NR==2 {print $3}' || echo 0)
         MEM_TOTAL=$(free -m 2>/dev/null | awk 'NR==2 {print $2}' || echo 0)
-
+ 
         stat1=$(cat /proc/stat 2>/dev/null | head -n1)
         sleep 1
         stat2=$(cat /proc/stat 2>/dev/null | head -n1)
-
+ 
         set -- $stat1
         u1=$2; n1=$3; s1=$4; i1=$5
         set -- $stat2
         u2=$2; n2=$3; s2=$4; i2=$5
-
+ 
         ud=$((u2 - u1))
         nd=$((n2 - n1))
         sd=$((s2 - s1))
         id=$((i2 - i1))
         total=$((ud + nd + sd + id))
-
+ 
         if [ "$total" -le 0 ]; then
           CPU_PERCENT=0
         else
           used=$((ud + nd + sd))
           CPU_PERCENT=$((used * 100 / total))
         fi
-
+ 
         if [ "$MEM_USED" -gt 0 ] && [ "$MEM_TOTAL" -gt 0 ]; then
           curl -s -X POST http://10.91.0.1:8792/api/vm-status \
             -H "Content-Type: application/json" \
@@ -1000,7 +1001,13 @@ func (m *Manager) buildVmConfig(vmID string, icfg *instanceConfig, net *netConfi
 	}, nil
 }
 
-func (m *Manager) CreateVM(_ context.Context, req *agent.CmdCreateVM) error {
+func (m *Manager) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.createVM(ctx, req)
+}
+
+func (m *Manager) createVM(_ context.Context, req *agent.CmdCreateVM) error {
 	log.Printf("[CreateVM] start: vmID=%s image=%s cpu=%d ramMb=%d diskGb=%d", req.VmId, req.OsImage, req.Cpu, req.RamMb, req.DiskGb)
 
 	// 限制最低配置：CPU 1核，内存 256MB，磁盘 3GB
@@ -1117,7 +1124,13 @@ func (m *Manager) CreateVM(_ context.Context, req *agent.CmdCreateVM) error {
 	return nil
 }
 
-func (m *Manager) StartVM(_ context.Context, vmID string) error {
+func (m *Manager) StartVM(ctx context.Context, vmID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.startVM(ctx, vmID)
+}
+
+func (m *Manager) startVM(_ context.Context, vmID string) error {
 	if !m.isRunning(vmID) {
 		icfg, err := m.loadInstanceConfig(vmID)
 		if err != nil {
@@ -1175,7 +1188,13 @@ func (m *Manager) StartVM(_ context.Context, vmID string) error {
 	}
 }
 
-func (m *Manager) StopVM(_ context.Context, vmID string, force bool) error {
+func (m *Manager) StopVM(ctx context.Context, vmID string, force bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.stopVM(ctx, vmID, force)
+}
+
+func (m *Manager) stopVM(_ context.Context, vmID string, force bool) error {
 	if !m.isRunning(vmID) {
 		return nil
 	}
@@ -1189,10 +1208,18 @@ func (m *Manager) StopVM(_ context.Context, vmID string, force bool) error {
 }
 
 func (m *Manager) RestartVM(_ context.Context, vmID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.apiPut(vmID, "vm.reboot", nil)
 }
 
-func (m *Manager) DeleteVM(_ context.Context, vmID string) error {
+func (m *Manager) DeleteVM(ctx context.Context, vmID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.deleteVM(ctx, vmID)
+}
+
+func (m *Manager) deleteVM(_ context.Context, vmID string) error {
 	log.Printf("[DeleteVM] vmID=%s", vmID)
 
 	if m.isRunning(vmID) {
@@ -1240,14 +1267,17 @@ func (m *Manager) DeleteVM(_ context.Context, vmID string) error {
 }
 
 func (m *Manager) ReinstallVM(ctx context.Context, req *agent.CmdReinstallVM) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	log.Printf("[ReinstallVM] start: vmID=%s image=%s", req.VmId, req.OsImage)
-	if err := m.DeleteVM(ctx, req.VmId); err != nil {
+	if err := m.deleteVM(ctx, req.VmId); err != nil {
 		log.Printf("[ReinstallVM] warning: DeleteVM returned error: %v", err)
 		// 继续重建，不因为删除失败而中止
 	}
 	log.Printf("[ReinstallVM] deleted old VM, now creating new one: vmID=%s", req.VmId)
 	// CreateVM 会先删除旧目录再重建，确保干净的重装
-	return m.CreateVM(ctx, &agent.CmdCreateVM{
+	return m.createVM(ctx, &agent.CmdCreateVM{
 		VmId:         req.VmId,
 		OsImage:      req.OsImage,
 		RootPassword: req.RootPassword,
@@ -1258,9 +1288,12 @@ func (m *Manager) ReinstallVM(ctx context.Context, req *agent.CmdReinstallVM) er
 }
 
 func (m *Manager) ResetPassword(ctx context.Context, vmID, password string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	wasRunning := m.isRunning(vmID)
 	if wasRunning {
-		_ = m.StopVM(ctx, vmID, true)
+		_ = m.stopVM(ctx, vmID, true)
 		time.Sleep(2 * time.Second)
 	}
 
@@ -1270,7 +1303,7 @@ func (m *Manager) ResetPassword(ctx context.Context, vmID, password string) erro
 	}
 
 	if wasRunning {
-		return m.StartVM(ctx, vmID)
+		return m.startVM(ctx, vmID)
 	}
 	return nil
 }
@@ -1591,7 +1624,7 @@ func runCmd(name string, args ...string) error {
 	return nil
 }
 
-// GetVMNetStats 获取 VM 的网络流量统计（用于流量统计服务）
+// GetVMNetStats 获取 VM 的 network 流量统计（用于流量统计服务）
 func (m *Manager) GetVMNetStats(_ context.Context, vmID string) (*manager.VMNetStats, error) {
 	nc, err := m.allocNetwork(vmID)
 	if err != nil {
@@ -1603,6 +1636,43 @@ func (m *Manager) GetVMNetStats(_ context.Context, vmID string) (*manager.VMNetS
 		InBytes:  in,
 		OutBytes: out,
 	}, nil
+}
+
+func (m *Manager) Cleanup(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	entries, err := os.ReadDir(m.instDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+
+	// 获取数据库中登记的所有虚拟机
+	configs, _ := m.db.ListVMConfigs()
+	registered := make(map[string]bool, len(configs))
+	for _, c := range configs {
+		registered[c.VMID] = true
+	}
+
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		vmID := e.Name()
+
+		// 跳过已登记的
+		if registered[vmID] {
+			continue
+		}
+
+		// 判定为幽灵实例，直接删除
+		log.Printf("[CloudHV] Found ghost instance %s, deleting...", vmID)
+		_ = m.deleteVM(ctx, vmID)
+	}
+	return nil
 }
 
 func cmdOutput(name string, args ...string) (string, error) {
