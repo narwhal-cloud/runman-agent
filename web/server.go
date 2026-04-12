@@ -284,9 +284,8 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			if req.MonitorDisk != "" {
 				cfg.MonitorDisk = req.MonitorDisk
 			}
-			if req.Host != "" {
-				cfg.Host = req.Host
-			}
+			// Host 允许清空（空字符串 = 恢复自动检测公网 IP），因此无论是否为空都写入。
+			cfg.Host = req.Host
 			if req.MaxPortForward > 0 {
 				cfg.MaxPortForward = req.MaxPortForward
 			}
