@@ -49,6 +49,9 @@ type Server struct {
 	agent        interface{}
 	vmSnapshots  map[string]*vmNetSnapshot
 	vmSnapshotMu sync.Mutex
+
+	monitorHst map[string][]vmListItem
+	monitorMu  sync.RWMutex
 }
 
 // NewServer 接收两个 manager：
@@ -69,6 +72,7 @@ func NewServer(database *db.DB, mgr manager.VMManager, hostMon *monitor.HostMoni
 		pf:          pf,
 		agent:       agent,
 		vmSnapshots: make(map[string]*vmNetSnapshot),
+		monitorHst:  make(map[string][]vmListItem),
 	}
 }
 
@@ -123,6 +127,7 @@ func (s *Server) ListenAndServe(addr string) error {
 	mux.HandleFunc("DELETE /api/vms/{id}", s.handleDeleteVM)
 	mux.HandleFunc("POST /api/vms/{id}/reinstall", s.handleReinstallVM)
 	mux.HandleFunc("POST /api/vms/{id}/reset-password", s.handleResetPassword)
+	mux.HandleFunc("POST /api/vms/{id}/reset-traffic", s.handleResetTraffic)
 
 	// 端口转发
 	mux.HandleFunc("GET /api/vms/{id}/portfwds", s.handleListPortFwds)
@@ -135,6 +140,13 @@ func (s *Server) ListenAndServe(addr string) error {
 
 	// 虚拟机状态上报
 	mux.HandleFunc("POST /api/vm-status", s.handleVMStatus)
+
+	// 大盘监控
+	mux.HandleFunc("GET /api/monitor/latest", s.handleMonitorLatest)
+	mux.HandleFunc("GET /api/monitor/history", s.handleMonitorHistory)
+
+	// 启动后台监控收集
+	go s.startMonitorLoop()
 
 	// 静态文件
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -176,6 +188,122 @@ func jsonOK(w http.ResponseWriter, v any) {
 
 func jsonErr(w http.ResponseWriter, err error, code int) {
 	http.Error(w, err.Error(), code)
+}
+
+// ─── 监控 TSDB ─────────────────────────────────────────────────────────────────
+
+func (s *Server) startMonitorLoop() {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		vms, err := s.mgr.ListVMs(ctx)
+		if err != nil {
+			cancel()
+			continue
+		}
+
+		s.vmSnapshotMu.Lock()
+		now := time.Now()
+		var items []vmListItem
+
+		for _, vm := range vms {
+			traffic, _ := s.db.GetTraffic(vm.VmId)
+
+			item := vmListItem{
+				VmId:      vm.VmId,
+				Status:    int32(vm.Status),
+				CpuPct:    vm.CpuPct,
+				RamUsedMb: vm.RamUsedMb,
+				Ips:       vm.Ips,
+				CreatedAt: now.UnixMilli(),
+			}
+
+			if traffic != nil {
+				item.MonthlyTrafficIn = traffic.MonthIn
+				item.MonthlyTrafficOut = traffic.MonthOut
+			}
+
+			if lastSnapshot, exists := s.vmSnapshots[vm.VmId]; exists {
+				elapsed := now.Sub(lastSnapshot.timestamp).Seconds()
+				if elapsed > 0.1 {
+					deltaIn := vm.TrafficInBytes - lastSnapshot.inBytes
+					deltaOut := vm.TrafficOutBytes - lastSnapshot.outBytes
+					if deltaIn < 0 {
+						deltaIn = 0
+					}
+					if deltaOut < 0 {
+						deltaOut = 0
+					}
+					item.NetInBps = int64(float64(deltaIn) / elapsed)
+					item.NetOutBps = int64(float64(deltaOut) / elapsed)
+				}
+			}
+
+			s.vmSnapshots[vm.VmId] = &vmNetSnapshot{
+				inBytes:   vm.TrafficInBytes,
+				outBytes:  vm.TrafficOutBytes,
+				timestamp: now,
+			}
+
+			if conf, _ := s.db.GetVMConfig(vm.VmId); conf != nil {
+				item.RamTotalMb = conf.MemoryMB
+			}
+			items = append(items, item)
+		}
+		s.vmSnapshotMu.Unlock()
+		cancel()
+
+		s.monitorMu.Lock()
+		// 获取最新存活的 VMID 以便清理僵尸数据
+		alive := make(map[string]bool)
+		for _, item := range items {
+			alive[item.VmId] = true
+			hst := s.monitorHst[item.VmId]
+			hst = append(hst, item)
+			if len(hst) > 80 {
+				hst = hst[len(hst)-80:] // 保留最近 80 个点
+			}
+			s.monitorHst[item.VmId] = hst
+		}
+		// 清理已删除的 VM 历史数据
+		for k := range s.monitorHst {
+			if !alive[k] {
+				delete(s.monitorHst, k)
+			}
+		}
+		s.monitorMu.Unlock()
+	}
+}
+
+func (s *Server) handleMonitorLatest(w http.ResponseWriter, r *http.Request) {
+	s.monitorMu.RLock()
+	defer s.monitorMu.RUnlock()
+
+	var latest []vmListItem
+	for _, history := range s.monitorHst {
+		if len(history) > 0 {
+			latest = append(latest, history[len(history)-1])
+		}
+	}
+	jsonOK(w, latest)
+}
+
+func (s *Server) handleMonitorHistory(w http.ResponseWriter, r *http.Request) {
+	vmID := r.URL.Query().Get("vm_id")
+	if vmID == "" {
+		http.Error(w, "vm_id required", 400)
+		return
+	}
+
+	s.monitorMu.RLock()
+	defer s.monitorMu.RUnlock()
+
+	history := s.monitorHst[vmID]
+	if history == nil {
+		history = []vmListItem{}
+	}
+	jsonOK(w, history)
 }
 
 // ─── 系统 ──────────────────────────────────────────────────────────────────────
@@ -230,23 +358,25 @@ func (s *Server) handleSystemInfo(w http.ResponseWriter, _ *http.Request) {
 }
 
 type configRequest struct {
-	Token          string `json:"token"`
-	MonitorNIC     string `json:"monitor_nic"`
-	MonitorDisk    string `json:"monitor_disk"`
-	WebUser        string `json:"web_user"`
-	WebPass        string `json:"web_pass"` // plaintext，服务端 bcrypt 后存储
-	Host           string `json:"host"`
-	MaxPortForward int32  `json:"max_port_forward"`
+	Token           string `json:"token"`
+	MonitorNIC      string `json:"monitor_nic"`
+	MonitorDisk     string `json:"monitor_disk"`
+	WebUser         string `json:"web_user"`
+	WebPass         string `json:"web_pass"` // plaintext，服务端 bcrypt 后存储
+	Host            string `json:"host"`
+	MaxPortForward  int32  `json:"max_port_forward"`
+	TrafficResetDay int    `json:"traffic_reset_day"`
 }
 
 type configResponse struct {
-	Token          string `json:"token"`
-	MonitorNIC     string `json:"monitor_nic"`
-	MonitorDisk    string `json:"monitor_disk"`
-	WebUser        string `json:"web_user"`
-	VirtType       string `json:"virt_type"`
-	Host           string `json:"host"`
-	MaxPortForward int32  `json:"max_port_forward"`
+	Token           string `json:"token"`
+	MonitorNIC      string `json:"monitor_nic"`
+	MonitorDisk     string `json:"monitor_disk"`
+	WebUser         string `json:"web_user"`
+	VirtType        string `json:"virt_type"`
+	Host            string `json:"host"`
+	MaxPortForward  int32  `json:"max_port_forward"`
+	TrafficResetDay int    `json:"traffic_reset_day"`
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
@@ -296,6 +426,9 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 				hash, _ := bcrypt.GenerateFromPassword([]byte(req.WebPass), bcrypt.DefaultCost)
 				cfg.WebPassHash = string(hash)
 			}
+			if req.TrafficResetDay > 0 && req.TrafficResetDay <= 28 {
+				cfg.TrafficResetDay = req.TrafficResetDay
+			}
 		})
 		if err != nil {
 			http.Error(w, "failed to save config: "+err.Error(), 500)
@@ -306,13 +439,14 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	conf := s.cfg.Get()
 	jsonOK(w, configResponse{
-		Token:          conf.Token,
-		MonitorNIC:     conf.MonitorNIC,
-		MonitorDisk:    conf.MonitorDisk,
-		WebUser:        conf.WebUser,
-		VirtType:       conf.VirtType,
-		Host:           conf.Host,
-		MaxPortForward: conf.MaxPortForward,
+		Token:           conf.Token,
+		MonitorNIC:      conf.MonitorNIC,
+		MonitorDisk:     conf.MonitorDisk,
+		WebUser:         conf.WebUser,
+		VirtType:        conf.VirtType,
+		Host:            conf.Host,
+		MaxPortForward:  conf.MaxPortForward,
+		TrafficResetDay: conf.TrafficResetDay,
 	})
 }
 
@@ -354,6 +488,7 @@ type vmListItem struct {
 	MonthlyTrafficIn  int64    `json:"monthly_traffic_in"`
 	MonthlyTrafficOut int64    `json:"monthly_traffic_out"`
 	Ips               []string `json:"ips"`
+	CreatedAt         int64    `json:"created_at"`
 }
 
 func (s *Server) handleListVMs(w http.ResponseWriter, r *http.Request) {
@@ -374,6 +509,7 @@ func (s *Server) handleListVMs(w http.ResponseWriter, r *http.Request) {
 			CpuPct:    vm.CpuPct,
 			RamUsedMb: vm.RamUsedMb,
 			Ips:       vm.Ips,
+			CreatedAt: now.UnixMilli(),
 		}
 
 		// 从 DB 读取累计流量和月度流量
@@ -559,19 +695,40 @@ func (s *Server) handleReinstallVM(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
-	vmID := r.PathValue("id")
+	id := r.PathValue("id")
 	var req struct {
 		Password string `json:"password"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Password == "" {
-		http.Error(w, "missing password", 400)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonErr(w, err, 400)
 		return
 	}
-	if err := s.mgr.ResetPassword(r.Context(), vmID, req.Password); err != nil {
+	v, err := s.db.GetVMConfig(id)
+	if err != nil || v == nil {
+		http.Error(w, "vm not found", 404)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if err := s.mgr.ResetPassword(ctx, id, req.Password); err != nil {
 		jsonErr(w, err, 500)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	w.WriteHeader(204)
+}
+
+func (s *Server) handleResetTraffic(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	v, err := s.db.GetVMConfig(id)
+	if err != nil || v == nil {
+		http.Error(w, "vm not found", 404)
+		return
+	}
+	if err := s.db.ResetTrafficMonth(id); err != nil {
+		jsonErr(w, err, 500)
+		return
+	}
+	w.WriteHeader(204)
 }
 
 // ─── 端口转发 ──────────────────────────────────────────────────────────────────

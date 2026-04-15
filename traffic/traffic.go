@@ -2,7 +2,9 @@ package traffic
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"runman-agent/config"
 	"runman-agent/db"
 	"runman-agent/manager"
 	"sync"
@@ -21,16 +23,18 @@ type VMNetStats struct {
 type Service struct {
 	mgr    manager.VMManager
 	db     *db.DB
+	cfg    *config.Manager
 	mu     sync.Mutex
 	ticker *time.Ticker
 	done   chan struct{}
 }
 
 // NewService 创建新的流量统计服务
-func NewService(mgr manager.VMManager, database *db.DB) *Service {
+func NewService(mgr manager.VMManager, database *db.DB, cfg *config.Manager) *Service {
 	return &Service{
 		mgr:  mgr,
 		db:   database,
+		cfg:  cfg,
 		done: make(chan struct{}),
 	}
 }
@@ -83,7 +87,23 @@ func (s *Service) syncOnce(ctx context.Context) {
 	}
 
 	now := time.Now()
-	currentMonth := now.Format("2006-01")
+
+	// 从配置获取重置日期
+	resetDay := s.cfg.Get().TrafficResetDay
+	if resetDay <= 0 || resetDay > 28 {
+		resetDay = 1
+	}
+
+	// 计算当前所处的计费周期键值 (例如 "2024-03-15")
+	y, m, d := now.Date()
+	if d < resetDay {
+		m -= 1
+		if m == 0 {
+			m = 12
+			y -= 1
+		}
+	}
+	currentCycle := fmt.Sprintf("%04d-%02d-%02d", y, m, resetDay)
 
 	for _, vm := range vms {
 		// 从驱动获取 VM 的当前流量值（累计字节数）
@@ -103,7 +123,7 @@ func (s *Service) syncOnce(ctx context.Context) {
 				RawOut:    netStats.OutBytes,
 				TotalIn:   0,
 				TotalOut:  0,
-				Month:     currentMonth,
+				Month:     currentCycle,
 				MonthIn:   0,
 				MonthOut:  0,
 				UpdatedAt: now,
@@ -125,10 +145,10 @@ func (s *Service) syncOnce(ctx context.Context) {
 			traffic.TotalIn += deltaIn
 			traffic.TotalOut += deltaOut
 
-			// 检查月份是否变化
-			if traffic.Month != currentMonth {
-				// 月份切换，重置月度数据
-				traffic.Month = currentMonth
+			// 检查周期是否变化
+			if traffic.Month != currentCycle {
+				// 周期切换，重置月度数据
+				traffic.Month = currentCycle
 				traffic.MonthIn = 0
 				traffic.MonthOut = 0
 			}

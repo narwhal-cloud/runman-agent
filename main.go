@@ -163,7 +163,7 @@ func main() {
 	}()
 
 	// 启动流量统计服务，定期从驱动获取流量数据并同步到数据库
-	trafficSvc := traffic.NewService(svc, database)
+	trafficSvc := traffic.NewService(svc, database, cfg)
 	go trafficSvc.Start(context.Background(), 30*time.Second)
 
 	// 启动定期清理幽灵实例服务 (每小时一次，启动时先运行一次)

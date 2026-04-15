@@ -208,6 +208,14 @@ func (d *DB) SaveTraffic(t *Traffic) error {
 	return d.orm.Save(t).Error
 }
 
+// ResetTrafficMonth 重置虚拟机的当月流量为0
+func (d *DB) ResetTrafficMonth(vmId string) error {
+	return d.orm.Model(&Traffic{}).Where("vm_id = ?", vmId).Updates(map[string]interface{}{
+		"month_in":  0,
+		"month_out": 0,
+	}).Error
+}
+
 // Podman数据结构
 
 func (d *DB) SavePodmanConfig(v *PodmanVMConfig) error {

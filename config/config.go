@@ -37,6 +37,9 @@ type Config struct {
 	// 每个 VM 最大端口转发数
 	MaxPortForward int32 `json:"max_port_forward"`
 
+	// 每月自动重置流量的日期（1-28）
+	TrafficResetDay int `json:"traffic_reset_day"`
+
 	// IPv6 配置（cloud-hypervisor 专用）
 	IPv6Mode   string `json:"ipv6_mode"`   // "none"/"subnet"/"snat"
 	IPv6Subnet string `json:"ipv6_subnet"` // 可用子网，如 "2001:db8:1234::/64"
@@ -105,6 +108,9 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.MaxPortForward <= 0 {
 		cfg.MaxPortForward = DefaultMaxPortForward
+	}
+	if cfg.TrafficResetDay <= 0 || cfg.TrafficResetDay > 28 {
+		cfg.TrafficResetDay = 1
 	}
 	if cfg.IPv6Mode == "" {
 		cfg.IPv6Mode = "none"
