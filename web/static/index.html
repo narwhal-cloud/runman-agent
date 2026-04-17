@@ -45,6 +45,9 @@
                 <span id="server-status">Not Configured</span>
             </span>
             <span id="virt-badge" class="bg-indigo-500 px-3 py-1 rounded text-xs font-bold uppercase tracking-widest">VIRT: -</span>
+            <button id="version-badge" onclick="openVersionModal()" class="bg-slate-600 hover:bg-slate-700 px-3 py-1 rounded text-xs font-bold uppercase tracking-widest cursor-pointer transition-colors" title="Click to check updates">
+                <span id="version-text">v-</span>
+            </button>
             <span class="w-2.5 h-2.5 bg-green-400 rounded-full pulse"></span>
         </div>
     </div>
@@ -122,8 +125,21 @@
                         <tr>
                             <th class="px-4 py-3">VM / IP</th>
                             <th class="px-4 py-3">Status</th>
-                            <th class="px-4 py-3">Resources</th>
-                            <th class="px-4 py-3">Traffic</th>
+                            <th class="px-4 py-3 space-y-1">
+                                <div>Resources</div>
+                                <div class="flex flex-wrap gap-2 text-xs font-normal normal-case">
+                                    <span class="sort-btn cursor-pointer px-2 py-0.5 rounded hover:bg-slate-200 transition-colors" data-field="cpu_pct" onclick="setSort('cpu_pct')">CPU <span class="sort-arrow">⇅</span></span>
+                                    <span class="sort-btn cursor-pointer px-2 py-0.5 rounded hover:bg-slate-200 transition-colors" data-field="ram_used_mb" onclick="setSort('ram_used_mb')">RAM <span class="sort-arrow">⇅</span></span>
+                                </div>
+                            </th>
+                            <th class="px-4 py-3 space-y-1">
+                                <div>Traffic</div>
+                                <div class="flex flex-wrap gap-2 text-xs font-normal normal-case">
+                                    <span class="sort-btn cursor-pointer px-2 py-0.5 rounded hover:bg-slate-200 transition-colors" data-field="monthly_traffic_in" onclick="setSort('monthly_traffic_in')">Month ↓ <span class="sort-arrow">⇅</span></span>
+                                    <span class="sort-btn cursor-pointer px-2 py-0.5 rounded hover:bg-slate-200 transition-colors" data-field="monthly_traffic_out" onclick="setSort('monthly_traffic_out')">Month ↑ <span class="sort-arrow">⇅</span></span>
+                                    <span class="sort-btn cursor-pointer px-2 py-0.5 rounded hover:bg-slate-200 transition-colors" data-field="net_in_bps" onclick="setSort('net_in_bps')">Speed <span class="sort-arrow">⇅</span></span>
+                                </div>
+                            </th>
                             <th class="px-4 py-3 text-right pr-8">Actions</th>
                         </tr>
                     </thead>
@@ -368,6 +384,53 @@
     </div>
 </div>
 
+<!-- ─── Version Management Modal ──────────────────────────────────────────────── -->
+<div id="modal-version" class="fixed inset-0 modal-bg z-50 hidden flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md">
+        <div class="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
+            <h3 class="font-bold text-slate-800">System Version</h3>
+            <button onclick="closeModal('modal-version')" class="text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button>
+        </div>
+        <div class="p-6 space-y-6">
+            <!-- Current Version -->
+            <div class="bg-slate-50 rounded-xl p-4">
+                <p class="text-xs font-bold text-slate-500 uppercase tracking-widest mb-2">Current Version</p>
+                <div class="flex items-center justify-between">
+                    <span id="current-version" class="text-2xl font-bold text-indigo-600">-</span>
+                    <span id="version-status" class="text-xs font-bold uppercase px-2 py-1 rounded bg-green-100 text-green-700">Latest</span>
+                </div>
+            </div>
+
+            <!-- Update Check Result -->
+            <div id="update-section" class="hidden">
+                <div class="border-t border-slate-100 pt-4">
+                    <p class="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3">Available Update</p>
+                    <div class="bg-amber-50 border border-amber-200 rounded-xl p-4 space-y-3">
+                        <div>
+                            <p class="text-[10px] text-slate-400 uppercase tracking-widest">Latest Version</p>
+                            <p id="latest-version" class="text-xl font-bold text-amber-600">-</p>
+                        </div>
+                        <button onclick="doUpgrade()" id="upgrade-btn" class="w-full py-2.5 bg-amber-500 hover:bg-amber-600 text-white font-bold rounded-lg text-sm transition-colors uppercase tracking-widest">
+                            Upgrade Now
+                        </button>
+                        <p id="upgrade-status" class="text-[10px] text-slate-400 text-center hidden"></p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Check Button -->
+            <div id="check-section">
+                <button onclick="checkForUpdates()" id="check-btn" class="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-lg text-sm transition-colors uppercase tracking-widest">
+                    Check for Updates
+                </button>
+            </div>
+
+            <!-- Error Message -->
+            <div id="version-err" class="hidden text-red-500 text-xs bg-red-50 p-3 rounded"></div>
+        </div>
+    </div>
+</div>
+
 <!-- ─── Monitor Dashboard Modal ─────────────────────────────────────────────── -->
 <div id="modal-monitor" class="fixed inset-0 modal-bg z-50 hidden flex items-center justify-center p-4">
     <div class="bg-white rounded-2xl shadow-2xl w-full max-w-4xl flex flex-col overflow-hidden relative" style="height: 75vh;">
@@ -522,6 +585,56 @@ async function refreshStatus() {
 }
 
 // ─── VMs ──────────────────────────────────────────────────────────────────────
+// Sort state
+let sortBy = '';      // 当前排序字段，空=不排序
+let sortOrder = 'desc'; // 'asc' 或 'desc'
+
+// Sort the VMs array based on current sortBy and sortOrder
+function sortVMs(vms) {
+    if (!sortBy) return vms;
+    const sorted = [...vms].sort((a, b) => {
+        const av = a[sortBy] ?? 0;
+        const bv = b[sortBy] ?? 0;
+        // For numeric fields, compare as numbers
+        const diff = Number(bv) - Number(av);
+        return sortOrder === 'desc' ? diff : -diff;
+    });
+    return sorted;
+}
+
+// Update UI to show current sort state
+function updateSortUI() {
+    document.querySelectorAll('.sort-btn').forEach(btn => {
+        const field = btn.dataset.field;
+        const arrow = btn.querySelector('.sort-arrow');
+        if (field === sortBy) {
+            // Active button: highlight and show direction
+            btn.classList.add('bg-indigo-100', 'text-indigo-600', 'font-bold');
+            btn.classList.remove('hover:bg-slate-200');
+            arrow.textContent = sortOrder === 'desc' ? '▼' : '▲';
+        } else {
+            // Inactive button: default style
+            btn.classList.remove('bg-indigo-100', 'text-indigo-600', 'font-bold');
+            btn.classList.add('hover:bg-slate-200');
+            arrow.textContent = '⇅';
+        }
+    });
+}
+
+// Set sort field and order
+function setSort(field) {
+    if (sortBy === field) {
+        // Toggle order if same field
+        sortOrder = sortOrder === 'desc' ? 'asc' : 'desc';
+    } else {
+        // Set new field with default desc order
+        sortBy = field;
+        sortOrder = 'desc';
+    }
+    updateSortUI();
+    refreshVMs();
+}
+
 async function refreshVMs() {
     try {
         const vms = (await api('GET','/api/vms')) || [];
@@ -537,7 +650,9 @@ async function refreshVMs() {
         }
         $('vm-empty').classList.add('hidden');
 
-        tbody.innerHTML = vms.map(vm => `
+        // Sort VMs before rendering
+        const sorted = sortVMs(vms);
+        tbody.innerHTML = sorted.map(vm => `
         <tr class="hover:bg-slate-50 transition-colors">
             <td class="px-4 py-3">
                 <div class="font-mono text-xs font-semibold text-slate-700 truncate max-w-[180px]" title="${vm.vm_id}">${vm.vm_id}</div>
@@ -1041,7 +1156,7 @@ function openConsole(vmId) {
 }
 
 // Close modal on background click (excluding console)
-['modal-create','modal-manage','modal-ports'].forEach(id => {
+['modal-create','modal-manage','modal-ports','modal-version','modal-monitor'].forEach(id => {
     $(id).addEventListener('click', e => { if(e.target===e.currentTarget) closeModal(id); });
 });
 // Disabled background click for console to prevent accidental closure
@@ -1115,18 +1230,116 @@ async function refreshConnectionStatus(conf) {
     }
 }
 
+// ─── Version Management ───────────────────────────────────────────────────────
+async function openVersionModal() {
+    openModal('modal-version');
+    // Load current version
+    try {
+        const versionData = await api('GET', '/api/version');
+        $('current-version').textContent = versionData.current || 'unknown';
+        $('version-text').textContent = versionData.current || 'v-';
+    } catch(e) {
+        showErr('version-err', 'Failed to load version: ' + e.message);
+    }
+}
+
+async function checkForUpdates() {
+    hideErr('version-err');
+    const btn = $('check-btn');
+    setButtonLoading(btn, true);
+
+    try {
+        const data = await api('GET', '/api/update-check');
+        $('current-version').textContent = data.current || 'unknown';
+
+        if (data.error) {
+            showErr('version-err', 'Check failed: ' + data.error);
+            return;
+        }
+
+        if (data.has_update) {
+            $('latest-version').textContent = data.latest;
+            $('update-section').classList.remove('hidden');
+            $('version-status').className = 'text-xs font-bold uppercase px-2 py-1 rounded bg-amber-100 text-amber-700';
+            $('version-status').textContent = 'Update Available';
+            // Store download URL for upgrade
+            window.updateDownloadURL = data.download_url;
+        } else {
+            $('update-section').classList.add('hidden');
+            $('version-status').className = 'text-xs font-bold uppercase px-2 py-1 rounded bg-green-100 text-green-700';
+            $('version-status').textContent = 'Latest';
+            alert('You are already running the latest version!');
+        }
+    } catch(e) {
+        showErr('version-err', 'Update check failed: ' + e.message);
+    } finally {
+        setButtonLoading(btn, false);
+    }
+}
+
+async function doUpgrade() {
+    if (!window.updateDownloadURL) {
+        showErr('version-err', 'No download URL available');
+        return;
+    }
+
+    if (!confirm('Upgrade the agent? The service will restart after upgrade.')) {
+        return;
+    }
+
+    hideErr('version-err');
+    const btn = $('upgrade-btn');
+    const statusEl = $('upgrade-status');
+
+    setButtonLoading(btn, true);
+    statusEl.classList.remove('hidden');
+    statusEl.textContent = 'Upgrading...';
+
+    try {
+        const result = await api('POST', '/api/upgrade', {
+            download_url: window.updateDownloadURL
+        });
+
+        if (result.success) {
+            statusEl.textContent = 'Upgrade successful! Service restarting...';
+            statusEl.className = 'text-[10px] text-green-600 text-center hidden';
+
+            // Wait a bit before closing
+            setTimeout(() => {
+                closeModal('modal-version');
+                alert('Agent upgraded successfully! Please wait for the service to restart.');
+                // Refresh page after a delay to connect to new version
+                setTimeout(() => location.reload(), 3000);
+            }, 1500);
+        } else {
+            showErr('version-err', 'Upgrade failed: ' + result.message);
+        }
+    } catch(e) {
+        showErr('version-err', 'Upgrade failed: ' + e.message);
+    } finally {
+        setButtonLoading(btn, false);
+    }
+}
+
 // ─── Init ─────────────────────────────────────────────────────────────────────
 let currentConf = null;
 
 async function init() {
-    const [sys, conf, imgs] = await Promise.all([
+    const [sys, conf, imgs, version] = await Promise.all([
         api('GET','/api/system/info'),
         api('GET','/api/config'),
         api('GET','/api/images').catch(()=>[]),
+        api('GET','/api/version').catch(()=>({current:'unknown'})),
     ]);
 
     images = imgs || [];
     currentConf = conf;
+
+    // Load version
+    if (version && version.current) {
+        $('version-text').textContent = version.current;
+        $('current-version').textContent = version.current;
+    }
 
     const nicSel = $('monitorNIC');
     nicSel.innerHTML = '<option value="">All Interfaces</option>' + sys.nics.map(n=>`<option value="${n}">${n}</option>`).join('');

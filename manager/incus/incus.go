@@ -90,12 +90,13 @@ func (m *Manager) ReinstallVM(ctx context.Context, req *agent.CmdReinstallVM) er
 
 	_ = m.deleteVM(ctx, req.VmId)
 	return m.createVM(ctx, &agent.CmdCreateVM{
-		VmId:         req.VmId,
-		OsImage:      req.OsImage,
-		RootPassword: req.RootPassword,
-		Cpu:          req.Cpu,
-		RamMb:        req.RamMb,
-		DiskGb:       req.DiskGb,
+		VmId:          req.VmId,
+		OsImage:       req.OsImage,
+		RootPassword:  req.RootPassword,
+		Cpu:           req.Cpu,
+		RamMb:         req.RamMb,
+		DiskGb:        req.DiskGb,
+		BandwidthMbps: req.BandwidthMbps,
 	})
 }
 
@@ -304,6 +305,13 @@ write_files:
 		"security.ipv4_filtering": "true",
 	}
 
+	// 应用带宽限速
+	if req.BandwidthMbps > 0 {
+		bandwidth := fmt.Sprintf("%dMbit", req.BandwidthMbps)
+		nic["limits.ingress"] = bandwidth
+		nic["limits.egress"] = bandwidth
+	}
+
 	devices := map[string]map[string]string{
 		"root": {
 			"type": "disk",
@@ -344,6 +352,7 @@ write_files:
 	bizConf.MemoryMB = req.RamMb
 	bizConf.DiskGB = req.DiskGb
 	bizConf.Image = req.OsImage
+	bizConf.BandwidthMbps = int(req.BandwidthMbps)
 	bizConf.Status = "running"
 	_ = m.db.SaveVMConfig(bizConf)
 

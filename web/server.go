@@ -4,9 +4,11 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"runman-agent/config"
 	"runman-agent/db"
 	"runman-agent/manager"
@@ -14,6 +16,7 @@ import (
 	"runman-agent/manager/portforward"
 	"runman-agent/monitor"
 	"runman-agent/proto/agent"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -49,6 +52,8 @@ type Server struct {
 	agent        interface{}
 	vmSnapshots  map[string]*vmNetSnapshot
 	vmSnapshotMu sync.Mutex
+	version      string
+	upgradeMgr   *UpgradeManager
 
 	monitorHst map[string][]vmListItem
 	monitorMu  sync.RWMutex
@@ -57,11 +62,14 @@ type Server struct {
 // NewServer 接收两个 manager：
 // - mgr (svc) 是 VMService 包装层
 // - rawMgr 是真正的驱动实现（CloudHV/Podman），用于内存上报等功能
-func NewServer(database *db.DB, mgr manager.VMManager, hostMon *monitor.HostMonitor, cfg *config.Manager, pf *portforward.Manager, agent interface{}, rawMgr manager.VMManager) *Server {
+func NewServer(database *db.DB, mgr manager.VMManager, hostMon *monitor.HostMonitor, cfg *config.Manager, pf *portforward.Manager, agent interface{}, rawMgr manager.VMManager, version string) *Server {
 	var cloudHVMgr *cloudhv.Manager
 	if ch, ok := rawMgr.(*cloudhv.Manager); ok {
 		cloudHVMgr = ch
 	}
+
+	binaryPath, _ := os.Executable()
+	upgradeMgr := NewUpgradeManager(binaryPath, version)
 
 	return &Server{
 		db:          database,
@@ -71,6 +79,8 @@ func NewServer(database *db.DB, mgr manager.VMManager, hostMon *monitor.HostMoni
 		hostMon:     hostMon,
 		pf:          pf,
 		agent:       agent,
+		version:     version,
+		upgradeMgr:  upgradeMgr,
 		vmSnapshots: make(map[string]*vmNetSnapshot),
 		monitorHst:  make(map[string][]vmListItem),
 	}
@@ -111,6 +121,9 @@ func (s *Server) ListenAndServe(addr string) error {
 	mux.HandleFunc("/api/config", s.handleConfig)
 	mux.HandleFunc("/api/system/info", s.handleSystemInfo)
 	mux.HandleFunc("/api/connection", s.handleConnection)
+	mux.HandleFunc("/api/version", s.handleVersion)
+	mux.HandleFunc("/api/update-check", s.handleUpdateCheck)
+	mux.HandleFunc("POST /api/upgrade", s.handleUpgrade)
 
 	// 镜像列表
 	mux.HandleFunc("GET /api/images", s.handleImages)
@@ -461,6 +474,152 @@ func (s *Server) handleConnection(w http.ResponseWriter, _ *http.Request) {
 	jsonOK(w, map[string]interface{}{
 		"connected": connected,
 		"error":     errMsg,
+	})
+}
+
+type versionResponse struct {
+	Current string `json:"current"`
+	BuildAt string `json:"build_at"`
+}
+
+func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
+	jsonOK(w, versionResponse{
+		Current: s.version,
+		BuildAt: time.Now().UTC().Format(time.RFC3339),
+	})
+}
+
+type updateCheckResponse struct {
+	Current     string `json:"current"`
+	Latest      string `json:"latest"`
+	HasUpdate   bool   `json:"has_update"`
+	DownloadURL string `json:"download_url,omitempty"`
+	Error       string `json:"error,omitempty"`
+}
+
+func (s *Server) handleUpdateCheck(w http.ResponseWriter, _ *http.Request) {
+	latest, downloadURL, err := s.checkLatestVersion()
+	resp := updateCheckResponse{
+		Current:     s.version,
+		Latest:      latest,
+		DownloadURL: downloadURL,
+	}
+
+	if err != nil {
+		resp.Error = err.Error()
+		jsonOK(w, resp)
+		return
+	}
+
+	resp.HasUpdate = latest != "" && latest != s.version
+	jsonOK(w, resp)
+}
+
+// checkLatestVersion 从 GitHub Releases 获取最新版本
+func (s *Server) checkLatestVersion() (version, downloadURL string, err error) {
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get("https://api.github.com/repos/narwhal-cloud/runman-agent/releases/latest")
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", "", fmt.Errorf("github api returned %d", resp.StatusCode)
+	}
+
+	var release struct {
+		TagName string `json:"tag_name"`
+		Assets  []struct {
+			Name        string `json:"name"`
+			DownloadURL string `json:"browser_download_url"`
+		} `json:"assets"`
+	}
+
+	if err = json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		return "", "", err
+	}
+
+	if release.TagName == "" {
+		return "", "", fmt.Errorf("no releases found")
+	}
+
+	// 找到适配当前架构的下载地址
+	arch := "amd64"
+	if isARM64() {
+		arch = "arm64"
+	}
+	for _, asset := range release.Assets {
+		if strings.Contains(asset.Name, arch) && strings.HasSuffix(asset.Name, "runman-agent-linux-"+arch) {
+			return release.TagName, asset.DownloadURL, nil
+		}
+	}
+
+	return release.TagName, "", nil
+}
+
+// isARM64 检测当前系统架构是否为 ARM64
+func isARM64() bool {
+	return runtime.GOARCH == "arm64"
+}
+
+type upgradeRequest struct {
+	DownloadURL string `json:"download_url"`
+}
+
+type upgradeResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+	Backup  string `json:"backup,omitempty"`
+}
+
+func (s *Server) handleUpgrade(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req upgradeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonErr(w, fmt.Errorf("invalid request: %v", err), 400)
+		return
+	}
+
+	if req.DownloadURL == "" {
+		jsonErr(w, fmt.Errorf("download_url is required"), 400)
+		return
+	}
+
+	// 创建上下文，设置超时
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
+	defer cancel()
+
+	// 下载新的二进制
+	tmpBinary, err := s.upgradeMgr.DownloadBinary(ctx, req.DownloadURL)
+	if err != nil {
+		jsonErr(w, fmt.Errorf("download failed: %v", err), 500)
+		return
+	}
+	defer os.Remove(tmpBinary)
+
+	// 验证二进制
+	if err = s.upgradeMgr.VerifyBinary(tmpBinary); err != nil {
+		jsonErr(w, fmt.Errorf("binary verification failed: %v", err), 400)
+		return
+	}
+
+	// 应用升级
+	if err = s.upgradeMgr.Apply(tmpBinary); err != nil {
+		jsonErr(w, fmt.Errorf("upgrade failed: %v", err), 500)
+		return
+	}
+
+	// 清理备份
+	_ = s.upgradeMgr.CleanupBackups()
+
+	jsonOK(w, upgradeResponse{
+		Success: true,
+		Message: "upgrade completed, please restart the service",
 	})
 }
 

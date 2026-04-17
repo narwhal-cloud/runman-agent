@@ -156,7 +156,7 @@ func main() {
 
 	// 启动本地 Web 状态页，供运维人员直接查看节点信息
 	// 同时传入 rawMgr 以便 Web 服务能访问具体的 Manager 实现（如 CloudHV 的内存报告）
-	ws := web.NewServer(database, svc, hostMon, cfg, a.pf, a, rawMgr)
+	ws := web.NewServer(database, svc, hostMon, cfg, a.pf, a, rawMgr, version)
 	go func() {
 		log.Printf("Starting web server on %s", conf.Web)
 		_ = ws.ListenAndServe(conf.Web)
