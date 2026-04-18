@@ -467,8 +467,10 @@ func (a *Agent) sendHeartbeat(stream agent.AgentGateway_ConnectClient) {
 	hb.Timestamp = time.Now().Unix()
 	hb.VirtType = a.config.VirtType
 	a.mu.RLock()
-	hb.EntryHost = a.config.Host
-	if hb.EntryHost == "" {
+	liveHost := a.cfg.Get().Host // 每次心跳读取最新配置，确保面板修改立即生效
+	if liveHost != "" {
+		hb.EntryHost = liveHost
+	} else {
 		hb.EntryHost = a.entryIPv4 // 未手动配置时使用自动检测的公网 IPv4
 	}
 	hb.EntryIpv6 = a.entryIPv6
