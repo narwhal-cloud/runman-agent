@@ -2,8 +2,10 @@ package web
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -151,6 +153,98 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	return os.Chmod(dst, srcInfo.Mode())
+}
+
+// UpgradeRfw 如果 rfw 二进制存在，从同一 GitHub release 下载对应架构的新版本并替换。
+// 失败时只记录日志，不影响 agent 升级结果。
+func (um *UpgradeManager) UpgradeRfw(ctx context.Context) {
+	rfwPath := rfwBinaryPath()
+	if _, err := os.Stat(rfwPath); err != nil {
+		return // rfw 未安装，跳过
+	}
+
+	arch := "amd64"
+	if isARM64() {
+		arch = "arm64"
+	}
+
+	_, downloadURL, err := fetchRfwLatestRelease(arch)
+	if err != nil || downloadURL == "" {
+		log.Printf("[rfw] update check failed: %v", err)
+		return
+	}
+
+	tmpPath := rfwPath + ".tmp"
+	client := &http.Client{Timeout: 5 * time.Minute}
+	req, err := http.NewRequestWithContext(ctx, "GET", downloadURL, nil)
+	if err != nil {
+		log.Printf("[rfw] build request: %v", err)
+		return
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("[rfw] download failed: %v", err)
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("[rfw] download failed: HTTP %d", resp.StatusCode)
+		return
+	}
+
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		log.Printf("[rfw] create temp file: %v", err)
+		return
+	}
+	if _, err = io.Copy(f, resp.Body); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		log.Printf("[rfw] write failed: %v", err)
+		return
+	}
+	_ = f.Close()
+
+	if err = os.Chmod(tmpPath, 0755); err != nil {
+		_ = os.Remove(tmpPath)
+		log.Printf("[rfw] chmod: %v", err)
+		return
+	}
+	if err = os.Rename(tmpPath, rfwPath); err != nil {
+		_ = os.Remove(tmpPath)
+		log.Printf("[rfw] rename: %v", err)
+		return
+	}
+	log.Printf("[rfw] updated to latest release")
+}
+
+// fetchRfwLatestRelease 从 GitHub releases（与 agent 同仓库）查找 rfw-amd64 / rfw-arm64 资产。
+func fetchRfwLatestRelease(arch string) (version, downloadURL string, err error) {
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get("https://api.github.com/repos/narwhal-cloud/runman-agent/releases/latest")
+	if err != nil {
+		return "", "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return "", "", fmt.Errorf("github api returned %d", resp.StatusCode)
+	}
+	var release struct {
+		TagName string `json:"tag_name"`
+		Assets  []struct {
+			Name        string `json:"name"`
+			DownloadURL string `json:"browser_download_url"`
+		} `json:"assets"`
+	}
+	if err = json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		return "", "", err
+	}
+	for _, asset := range release.Assets {
+		if asset.Name == "rfw-"+arch {
+			return release.TagName, asset.DownloadURL, nil
+		}
+	}
+	return release.TagName, "", nil
 }
 
 // CleanupBackups 清理过期的备份（保留最近5个）

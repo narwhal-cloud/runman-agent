@@ -50,6 +50,9 @@ type Config struct {
 	NdpIface   string `json:"ndp_iface"`   // 上行网卡
 	NdpSubnets string `json:"ndp_subnets"` // 响应的 IPv6 CIDR，逗号分隔
 	NdpNetwork string `json:"ndp_network"` // Podman 网络名（Podman NDP 场景）
+
+	// rfw 防火墙 API 本地监听地址（agent 反代用）
+	RfwAddr string `json:"rfw_addr"`
 }
 
 // Manager 持有配置文件路径和内存副本，提供并发安全的读写。
@@ -114,5 +117,8 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.IPv6Mode == "" {
 		cfg.IPv6Mode = "none"
+	}
+	if cfg.RfwAddr == "" {
+		cfg.RfwAddr = "127.0.0.1:7734"
 	}
 }

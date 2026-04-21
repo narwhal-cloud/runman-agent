@@ -13,13 +13,15 @@ AGENT_CONFIG_DIR="/opt/narwhal-agent"
 AGENT_CONFIG_FILE="$AGENT_CONFIG_DIR/config.json"
 AGENT_DB="$AGENT_CONFIG_DIR/agent.db"
 AGENT_WEB_PORT="8792"
-RFW_BIN_DIR="/opt/rfw"
+RFW_BIN_DIR="$AGENT_BIN_DIR"   # rfw 与 agent 放在同一目录，匹配面板 rfwBinaryPath()
+RFW_API_ADDR="127.0.0.1:7734"  # rfw 仅监听本地，由 agent 面板反代
 PODMAN_NETWORK="narwhal-net"
 
 DOWNLOAD_BASE="https://github.com/narwhal-cloud/runman-agent/releases/latest/download"
 CLOUD_HYPERVISOR_BASE="https://github.com/cloud-hypervisor/cloud-hypervisor/releases/latest/download"
 NETAVARK_BASE="https://github.com/narwhal-cloud/netavark/releases/latest/download"
-RFW_BASE="https://github.com/narwhal-cloud/rfw/releases/latest/download"
+# rfw v2 随 agent 同仓库发布，资产名为 rfw-amd64 / rfw-arm64
+RFW_BASE="$DOWNLOAD_BASE"
 
 # ── Language selection ────────────────────────────────────────────────────────
 
@@ -337,7 +339,8 @@ write_config_file() {
     "ipv6_iface": "$ipv6_iface",
     "ndp_iface": "$ndp_iface",
     "ndp_subnets": "$ndp_subnets",
-    "ndp_network": "$ndp_network"
+    "ndp_network": "$ndp_network",
+    "rfw_addr": "$RFW_API_ADDR"
 }
 EOF
     chmod 600 "$AGENT_CONFIG_FILE"
@@ -364,21 +367,16 @@ if systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null || [ -f "$AGENT_BINA
     systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null && systemctl restart "$AGENT_SERVICE"
     log "$(t "✓ NarwhalCloud Agent updated." "✓ NarwhalCloud Agent 已更新。")"
 
-    # Update rfw if installed
-    if [ -f "$RFW_BIN_DIR/rfw" ] && [ -f "/etc/systemd/system/rfw.service" ]; then
+    # Update rfw if binary exists
+    if [ -f "$RFW_BIN_DIR/rfw" ]; then
         log "$(t "rfw detected, updating..." "检测到 rfw，开始更新...")"
-        EXISTING_IFACE=$(grep "ExecStart=" /etc/systemd/system/rfw.service | grep -oP '(?<=--iface )[^ ]+' || true)
-        if [ -n "$EXISTING_IFACE" ]; then
-            RFW_ARCH=$(uname -m)
-            if download_with_retry "$RFW_BASE/rfw-$RFW_ARCH-unknown-linux-musl" "$RFW_BIN_DIR/rfw.new"; then
-                chmod +x "$RFW_BIN_DIR/rfw.new"
-                systemctl is-active --quiet rfw && systemctl stop rfw
-                mv "$RFW_BIN_DIR/rfw.new" "$RFW_BIN_DIR/rfw"
-                sed -i "s|^ExecStart=.*|ExecStart=$RFW_BIN_DIR/rfw --iface $EXISTING_IFACE --block-email --block-http --block-socks5 --block-fet-strict --block-wireguard --countries CN|" \
-                    /etc/systemd/system/rfw.service
-                systemctl daemon-reload && systemctl start rfw
-                log "$(t "✓ rfw updated." "✓ rfw 已更新。")"
-            fi
+        if download_with_retry "$RFW_BASE/rfw-$ARCH" "$RFW_BIN_DIR/rfw.new"; then
+            chmod +x "$RFW_BIN_DIR/rfw.new"
+            systemctl is-active --quiet rfw && systemctl stop rfw
+            mv "$RFW_BIN_DIR/rfw.new" "$RFW_BIN_DIR/rfw"
+            systemctl is-active --quiet rfw || systemctl is-enabled --quiet rfw 2>/dev/null \
+                && { systemctl daemon-reload; systemctl start rfw; }
+            log "$(t "✓ rfw updated." "✓ rfw 已更新。")"
         fi
     fi
 
@@ -1008,27 +1006,32 @@ start_service "$AGENT_SERVICE"
 read -rp "$(t "Install rfw firewall? [Y/n]: " "是否安装 rfw 防火墙? [Y/n]: ")" _rfw
 if [[ "${_rfw:-Y}" =~ ^[Yy]$ ]]; then
     mkdir -p "$RFW_BIN_DIR"
-    RFW_ARCH=$(uname -m)
-    if [ ! -f "$RFW_BIN_DIR/rfw" ]; then
-        download_with_retry "$RFW_BASE/rfw-$RFW_ARCH-unknown-linux-musl" "$RFW_BIN_DIR/rfw"
+    RFW_ARCH=$(detect_arch)
+
+    # 调试模式：检查本地文件
+    if [ -f "./rfw-$RFW_ARCH" ]; then
+        log "$(t "Found local rfw binary: ./rfw-$RFW_ARCH (debug mode)" "找到本地 rfw 二进制: ./rfw-$RFW_ARCH (调试模式)")"
+        cp "./rfw-$RFW_ARCH" "$RFW_BIN_DIR/rfw"
+        chmod +x "$RFW_BIN_DIR/rfw"
+    elif [ ! -f "$RFW_BIN_DIR/rfw" ]; then
+        download_with_retry "$RFW_BASE/rfw-$RFW_ARCH" "$RFW_BIN_DIR/rfw"
         chmod +x "$RFW_BIN_DIR/rfw"
     else
         log "$(t "rfw already exists, skipping download." "rfw 已存在，跳过下载。")"
     fi
 
     if [ ! -f "/etc/systemd/system/rfw.service" ]; then
-        # 过滤掉 lo, narwhal-net (Podman) 和 incusbr0 (Incus)
-        mapfile -t interfaces < <(ip -o link show | awk -F': ' '{print $2}' | grep -v "^lo$" | grep -v "^narwhal-net$" | grep -v "^incusbr0$")
+        # 过滤掉 lo 及虚拟网桥
+        mapfile -t interfaces < <(ip -o link show | awk -F': ' '{print $2}' \
+            | grep -v "^lo$" | grep -v "^narwhal-net$" | grep -v "^incusbr0$" \
+            | grep -v "^podman" | grep -v "@")
 
         if [ ${#interfaces[@]} -eq 0 ]; then
             log "$(t "Error: no available WAN interfaces found." "错误: 未找到可用的 WAN 网卡。")"
-            return 1
         elif [ ${#interfaces[@]} -eq 1 ]; then
-            # 只有1个网卡，直接使用
             SEL_IFACE="${interfaces[0]}"
             log "$(t "Only one WAN interface found, using: $SEL_IFACE" "只找到一个 WAN 网卡，使用: $SEL_IFACE")"
         else
-            # 多个网卡，让用户选择
             echo "$(t "Available WAN interfaces:" "可用 WAN 网卡：")"
             for i in "${!interfaces[@]}"; do echo "  $((i+1)). ${interfaces[$i]}"; done
             while true; do
@@ -1042,14 +1045,14 @@ if [[ "${_rfw:-Y}" =~ ^[Yy]$ ]]; then
 
         cat > /etc/systemd/system/rfw.service <<EOF
 [Unit]
-Description=RFW Firewall
+Description=RFW eBPF Firewall
 After=network.target
 
 [Service]
 Type=simple
 User=root
 Environment=RUST_LOG=info
-ExecStart=$RFW_BIN_DIR/rfw --iface $SEL_IFACE --block-email --block-http --block-socks5 --block-fet-strict --block-wireguard --countries CN
+ExecStart=$RFW_BIN_DIR/rfw --iface $SEL_IFACE --api-addr $RFW_API_ADDR
 Restart=always
 RestartSec=5
 
@@ -1057,10 +1060,12 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
         systemctl daemon-reload
+        log "$(t "✓ rfw service file written. API listens on $RFW_API_ADDR (local only)." "✓ rfw 服务文件已写入，API 监听 $RFW_API_ADDR（仅本地）。")"
     else
         log "$(t "rfw service already exists, skipping." "rfw 服务已存在，跳过。")"
     fi
     start_service rfw
+    log "$(t "✓ rfw firewall installed. Manage rules via the agent web panel → Firewall tab." "✓ rfw 防火墙已安装。通过 agent 面板 → Firewall 标签管理规则。")"
 else
     log "$(t "Skipping rfw installation." "跳过 rfw 安装。")"
 fi

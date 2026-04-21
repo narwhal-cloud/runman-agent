@@ -149,6 +149,138 @@
             </div>
         </div>
 
+        <!-- Firewall (RFW) Panel -->
+        <div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+            <div class="px-6 py-4 border-b border-slate-100 bg-slate-50 flex justify-between items-center">
+                <div class="flex items-center gap-3">
+                    <svg class="w-4 h-4 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+                    <h2 class="font-bold text-slate-700 uppercase tracking-tight text-sm">Firewall (RFW)</h2>
+                    <span id="rfw-status-badge" class="text-xs px-2 py-0.5 rounded-full font-bold bg-slate-100 text-slate-500">Checking…</span>
+                </div>
+                <div class="flex items-center gap-2">
+                    <button onclick="rfwRefreshRules()" class="text-xs border border-slate-200 hover:border-indigo-400 text-slate-500 hover:text-indigo-600 px-3 py-1.5 rounded-lg transition-colors">↺ Refresh</button>
+                </div>
+            </div>
+
+            <!-- rfw offline -->
+            <div id="rfw-offline-panel" class="hidden">
+                <div class="text-center py-8 text-slate-400 text-sm">RFW is not running.</div>
+            </div>
+
+            <!-- rfw online: stats + rules -->
+            <div id="rfw-online-panel" class="hidden">
+                <div class="grid grid-cols-3 border-b border-slate-100">
+                    <div class="px-6 py-3 border-r border-slate-100">
+                        <p class="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Interface</p>
+                        <p id="rfw-iface" class="text-sm font-bold text-slate-700 mt-0.5">—</p>
+                    </div>
+                    <div class="px-6 py-3 border-r border-slate-100">
+                        <p class="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Rules</p>
+                        <p id="rfw-rule-count" class="text-sm font-bold text-emerald-600 mt-0.5">0</p>
+                    </div>
+                    <div class="px-6 py-3">
+                        <p class="text-[10px] font-bold text-slate-400 uppercase tracking-widest">API Version</p>
+                        <p id="rfw-api-version" class="text-sm font-bold text-slate-700 mt-0.5">—</p>
+                    </div>
+                </div>
+
+                <!-- Rules table -->
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left min-w-[700px]">
+                        <thead class="bg-slate-50 text-[10px] text-slate-500 uppercase font-bold tracking-widest">
+                            <tr>
+                                <th class="px-4 py-3">ID</th>
+                                <th class="px-4 py-3">Priority</th>
+                                <th class="px-4 py-3">State</th>
+                                <th class="px-4 py-3">Direction</th>
+                                <th class="px-4 py-3">Protocol</th>
+                                <th class="px-4 py-3">Port</th>
+                                <th class="px-4 py-3">IP Range</th>
+                                <th class="px-4 py-3">Action</th>
+                                <th class="px-4 py-3 text-right pr-6"></th>
+                            </tr>
+                        </thead>
+                        <tbody id="rfw-rules-body" class="divide-y divide-slate-100 text-sm"></tbody>
+                    </table>
+                    <div id="rfw-rules-empty" class="hidden text-center py-8 text-slate-400 text-sm">No firewall rules.</div>
+                </div>
+
+                <!-- Create rule form -->
+                <div class="border-t border-slate-100 px-6 py-5">
+                    <h3 class="text-xs font-bold text-slate-600 uppercase tracking-widest mb-4 flex items-center gap-2">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 4v16m8-8H4"/></svg>
+                        Add Rule
+                    </h3>
+                    <form id="rfw-create-form" onsubmit="rfwCreateRule(event)" class="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-5 gap-3">
+                        <div>
+                            <label class="label">Priority</label>
+                            <input type="number" name="priority" value="100" min="0" class="input" required>
+                        </div>
+                        <div>
+                            <label class="label">Direction</label>
+                            <select name="direction" class="input" onchange="rfwOnDirectionChange(this.value)">
+                                <option value="in">in — Inbound</option>
+                                <option value="out">out — Outbound</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="label">Protocol</label>
+                            <select name="protocol" id="rfw-protocol" class="input">
+                                <option value="all">all</option>
+                                <option value="tcp">tcp</option>
+                                <option value="udp">udp</option>
+                                <option value="http">http</option>
+                                <option value="socks5">socks5</option>
+                                <option value="fet">fet (encrypted)</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="label">Action</label>
+                            <select name="action" class="input">
+                                <option value="block">block</option>
+                                <option value="pass">pass</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="label">Enabled</label>
+                            <select name="enabled" class="input">
+                                <option value="true">Yes</option>
+                                <option value="false">No</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="label">Port Start</label>
+                            <input type="number" name="port_start" value="0" min="0" max="65535" class="input" required>
+                        </div>
+                        <div>
+                            <label class="label">Port End (opt.)</label>
+                            <input type="number" name="port_end" min="0" max="65535" class="input" placeholder="= start">
+                        </div>
+                        <div>
+                            <label class="label">IP Type</label>
+                            <select name="ip_type" class="input" onchange="rfwOnIpType(this.value)">
+                                <option value="any">any</option>
+                                <option value="cidr">cidr</option>
+                                <option value="geoip">geoip</option>
+                            </select>
+                        </div>
+                        <div id="rfw-cidr-field" class="hidden">
+                            <label class="label">CIDR</label>
+                            <input type="text" name="ip" class="input" placeholder="1.2.3.4/32">
+                        </div>
+                        <div id="rfw-geoip-field" class="hidden">
+                            <label class="label">Countries (comma-sep)</label>
+                            <input type="text" name="countries" class="input" placeholder="CN,US">
+                        </div>
+                        <div class="col-span-2 md:col-span-4 xl:col-span-5 flex items-center gap-3">
+                            <button type="submit" id="rfw-submit-btn" class="bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold px-4 py-2 rounded-lg transition-colors">+ Add Rule</button>
+                            <span id="rfw-form-msg" class="text-xs"></span>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+
         <!-- Agent Config row -->
         <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
             <h2 class="font-bold text-slate-700 mb-5 uppercase text-xs tracking-widest flex items-center gap-2">
@@ -1321,6 +1453,169 @@ async function doUpgrade() {
     }
 }
 
+// ─── RFW 防火墙 ───────────────────────────────────────────────────────────────
+
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+
+function rfwTag(cls, text) {
+    return `<span class="inline-block px-2 py-0.5 rounded text-[11px] font-semibold ${cls}">${esc(text)}</span>`;
+}
+
+function rfwIpCell(rule) {
+    if (rule.ip_type === 'any') return '<span class="text-slate-400 text-xs">any</span>';
+    if (rule.ip_type === 'cidr') return `<code class="text-xs bg-slate-100 px-1 rounded">${esc(rule.ip)}</code>`;
+    if (rule.ip_type === 'geoip') {
+        return (rule.countries || []).map(c => rfwTag('bg-indigo-100 text-indigo-700', c)).join(' ');
+    }
+    return '—';
+}
+
+async function rfwCheckStatus() {
+    try {
+        const d = await api('GET', '/api/rfw/online');
+        const badge = $('rfw-status-badge');
+        if (d.online) {
+            badge.className = 'text-xs px-2 py-0.5 rounded-full font-bold bg-emerald-100 text-emerald-700';
+            badge.textContent = 'Online';
+            $('rfw-offline-panel').classList.add('hidden');
+            $('rfw-online-panel').classList.remove('hidden');
+            if (d.status) {
+                $('rfw-iface').textContent = d.status.iface || '—';
+                $('rfw-rule-count').textContent = d.status.rule_count ?? '—';
+                $('rfw-api-version').textContent = d.status.api_version || '—';
+            }
+        } else {
+            badge.className = 'text-xs px-2 py-0.5 rounded-full font-bold bg-red-100 text-red-600';
+            badge.textContent = 'Offline';
+            $('rfw-online-panel').classList.add('hidden');
+            $('rfw-offline-panel').classList.remove('hidden');
+        }
+    } catch(_) {}
+}
+
+async function rfwRefreshRules() {
+    const tbody = $('rfw-rules-body');
+    const empty = $('rfw-rules-empty');
+    try {
+        const rules = await api('GET', '/rfw/api/rules');
+        if (!rules || !rules.length) {
+            tbody.innerHTML = '';
+            empty.classList.remove('hidden');
+            return;
+        }
+        empty.classList.add('hidden');
+        tbody.innerHTML = rules.map(r => {
+            const dirCls = r.direction === 'in' ? 'bg-blue-100 text-blue-700' : 'bg-amber-100 text-amber-700';
+            const actCls = r.action === 'block' ? 'bg-red-100 text-red-700' : 'bg-emerald-100 text-emerald-700';
+            const port = r.port_start === r.port_end ? r.port_start : `${r.port_start}–${r.port_end}`;
+            return `<tr class="hover:bg-slate-50">
+                <td class="px-4 py-2.5 font-mono text-xs text-slate-500">#${r.id}</td>
+                <td class="px-4 py-2.5 text-xs">${r.priority}</td>
+                <td class="px-4 py-2.5">${rfwTag(r.enabled ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500', r.enabled ? 'on' : 'off')}</td>
+                <td class="px-4 py-2.5">${rfwTag(dirCls, r.direction)}</td>
+                <td class="px-4 py-2.5">${rfwTag('bg-indigo-100 text-indigo-700', r.protocol)}</td>
+                <td class="px-4 py-2.5 text-xs font-mono">${port}</td>
+                <td class="px-4 py-2.5">${rfwIpCell(r)}</td>
+                <td class="px-4 py-2.5">${rfwTag(actCls, r.action)}</td>
+                <td class="px-4 py-2.5 text-right pr-6">
+                    <button onclick="rfwDeleteRule(${r.id}, this)" class="text-xs text-red-500 hover:text-red-700 border border-red-200 hover:border-red-400 px-2 py-1 rounded transition-colors">Delete</button>
+                </td>
+            </tr>`;
+        }).join('');
+    } catch(e) {
+        tbody.innerHTML = `<tr><td colspan="9" class="text-center py-6 text-red-400 text-xs">Failed to load rules: ${esc(e.message)}</td></tr>`;
+    }
+    rfwCheckStatus();
+}
+
+async function rfwDeleteRule(id, btn) {
+    if (!confirm(`Delete firewall rule #${id}?`)) return;
+    btn.disabled = true;
+    try {
+        await fetch(`/rfw/api/rules/${id}`, { method: 'DELETE' });
+        rfwRefreshRules();
+    } catch(_) { btn.disabled = false; }
+}
+
+async function rfwCreateRule(e) {
+    e.preventDefault();
+    const form = e.target;
+    const fd = new FormData(form);
+    const msg = $('rfw-form-msg');
+    const btn = $('rfw-submit-btn');
+    const portEnd = fd.get('port_end');
+
+    const body = {
+        priority:   parseInt(fd.get('priority')),
+        direction:  fd.get('direction'),
+        protocol:   fd.get('protocol'),
+        action:     fd.get('action'),
+        port_start: parseInt(fd.get('port_start')),
+        enabled:    fd.get('enabled') === 'true',
+        ip_type:    fd.get('ip_type'),
+    };
+    if (portEnd !== '') body.port_end = parseInt(portEnd);
+    if (body.ip_type === 'cidr')  body.ip = fd.get('ip');
+    if (body.ip_type === 'geoip') body.countries = fd.get('countries').split(',').map(s => s.trim()).filter(Boolean);
+
+    btn.disabled = true;
+    msg.textContent = '';
+    msg.className = 'text-xs';
+    try {
+        const r = await fetch('/rfw/api/rules', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const d = await r.json();
+        if (r.ok) {
+            msg.textContent = `Rule #${d.id} created`;
+            msg.className = 'text-xs text-emerald-600';
+            form.reset();
+            rfwOnIpType('any');
+            rfwOnDirectionChange('in');
+            rfwRefreshRules();
+        } else {
+            msg.textContent = 'Error: ' + (d.error || JSON.stringify(d));
+            msg.className = 'text-xs text-red-500';
+        }
+    } catch(ex) {
+        msg.textContent = 'Network error: ' + ex.message;
+        msg.className = 'text-xs text-red-500';
+    }
+    btn.disabled = false;
+}
+
+function rfwOnIpType(val) {
+    $('rfw-cidr-field').classList.toggle('hidden', val !== 'cidr');
+    $('rfw-geoip-field').classList.toggle('hidden', val !== 'geoip');
+}
+
+function rfwOnDirectionChange(val) {
+    const protoSel = $('rfw-protocol');
+    const options = protoSel.options;
+    const allowedOut = ['tcp', 'udp'];
+    
+    for (let i = 0; i < options.length; i++) {
+        const opt = options[i];
+        if (val === 'out') {
+            const isAllowed = allowedOut.includes(opt.value);
+            opt.hidden = !isAllowed;
+            opt.disabled = !isAllowed;
+        } else {
+            opt.hidden = false;
+            opt.disabled = false;
+        }
+    }
+    
+    // Default to 'tcp' if currently selected option becomes disabled
+    if (protoSel.selectedOptions.length > 0 && protoSel.selectedOptions[0].disabled) {
+        protoSel.value = 'tcp';
+    }
+}
+
+
 // ─── Init ─────────────────────────────────────────────────────────────────────
 let currentConf = null;
 
@@ -1364,6 +1659,10 @@ init().then(() => {
     setInterval(refreshStatus, 2000);
     setInterval(refreshVMs, 5000);
     setInterval(() => refreshConnectionStatus(currentConf), 3000);
+
+    // rfw 防火墙初始化
+    rfwCheckStatus();
+    setInterval(rfwCheckStatus, 10000);
 });
 </script>
 </body>

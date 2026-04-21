@@ -8,7 +8,10 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
+	"path/filepath"
 	"runman-agent/config"
 	"runman-agent/db"
 	"runman-agent/manager"
@@ -153,6 +156,12 @@ func (s *Server) ListenAndServe(addr string) error {
 
 	// 虚拟机状态上报
 	mux.HandleFunc("POST /api/vm-status", s.handleVMStatus)
+
+	// rfw 在线状态检测
+	mux.HandleFunc("GET /api/rfw/online", s.handleRfwOnline)
+
+	// rfw 反向代理：/rfw/* → http://rfw_addr/*（去掉 /rfw 前缀）
+	mux.Handle("/rfw/", s.rfwReverseProxy())
 
 	// 大盘监控
 	mux.HandleFunc("GET /api/monitor/latest", s.handleMonitorLatest)
@@ -617,6 +626,9 @@ func (s *Server) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 	// 清理备份
 	_ = s.upgradeMgr.CleanupBackups()
 
+	// 同步升级 rfw（如已安装），后台执行不阻塞响应
+	go s.upgradeMgr.UpgradeRfw(context.Background())
+
 	jsonOK(w, upgradeResponse{
 		Success: true,
 		Message: "upgrade completed, please restart the service",
@@ -1036,6 +1048,65 @@ func (s *Server) handleVMStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.Error(w, "Not supported", http.StatusNotImplemented)
+}
+
+// ─── rfw 防火墙 ────────────────────────────────────────────────────────────────
+
+// rfwReverseProxy 返回将 /rfw/* 请求转发到本地 rfw API 的反向代理 handler。
+func (s *Server) rfwReverseProxy() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conf := s.cfg.Get()
+		target, err := url.Parse("http://" + conf.RfwAddr)
+		if err != nil {
+			http.Error(w, "invalid rfw_addr configuration", http.StatusInternalServerError)
+			return
+		}
+		proxy := &httputil.ReverseProxy{
+			Director: func(req *http.Request) {
+				req.URL.Scheme = target.Scheme
+				req.URL.Host = target.Host
+				req.URL.Path = strings.TrimPrefix(req.URL.Path, "/rfw")
+				if req.URL.Path == "" {
+					req.URL.Path = "/"
+				}
+				req.Host = target.Host
+			},
+			ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+				http.Error(w, "rfw unreachable: "+err.Error(), http.StatusBadGateway)
+			},
+		}
+		proxy.ServeHTTP(w, r)
+	})
+}
+
+// handleRfwOnline 检测本地 rfw 是否在线，并返回其 /api/status。
+func (s *Server) handleRfwOnline(w http.ResponseWriter, r *http.Request) {
+	conf := s.cfg.Get()
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get("http://" + conf.RfwAddr + "/api/status")
+	if err != nil {
+		jsonOK(w, map[string]interface{}{"online": false})
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var status map[string]interface{}
+	_ = json.NewDecoder(resp.Body).Decode(&status)
+	jsonOK(w, map[string]interface{}{"online": resp.StatusCode == 200, "status": status})
+}
+
+// rfwBinaryPath 返回 rfw 二进制的安装路径（与 agent 同目录）。
+func rfwBinaryPath() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return "/opt/narwhal-agent/rfw"
+	}
+	return filepath.Join(filepath.Dir(exe), "rfw")
+}
+
+// rfwBinaryExists 检查 rfw 二进制是否已安装。
+func rfwBinaryExists() bool {
+	_, err := os.Stat(rfwBinaryPath())
+	return err == nil
 }
 
 // handleVMTTY 升级 HTTP 连接为 WebSocket，并将其与 VM 控制台双向绑定。
