@@ -1662,6 +1662,7 @@ init().then(() => {
 
     // rfw 防火墙初始化
     rfwCheckStatus();
+    rfwRefreshRules();
     setInterval(rfwCheckStatus, 10000);
 });
 </script>

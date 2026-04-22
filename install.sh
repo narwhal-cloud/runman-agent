@@ -296,6 +296,7 @@ Type=simple
 User=root
 OOMScoreAdjust=-999
 KillMode=process
+WorkingDirectory=$AGENT_BIN_DIR
 ExecStart=$AGENT_BINARY --config $AGENT_CONFIG_FILE
 Restart=always
 RestartSec=5
@@ -1052,6 +1053,7 @@ After=network.target
 Type=simple
 User=root
 Environment=RUST_LOG=info
+WorkingDirectory=$RFW_BIN_DIR
 ExecStart=$RFW_BIN_DIR/rfw --iface $SEL_IFACE --api-addr $RFW_API_ADDR
 Restart=always
 RestartSec=5
@@ -1065,6 +1067,39 @@ EOF
         log "$(t "rfw service already exists, skipping." "rfw 服务已存在，跳过。")"
     fi
     start_service rfw
+
+    # Wait for rfw API to become ready (up to 10s)
+    _rfw_ready=0
+    for _i in 1 2 3 4 5 6 7 8 9 10; do
+        curl -sf "http://$RFW_API_ADDR/api/rules" >/dev/null 2>&1 && { _rfw_ready=1; break; }
+        sleep 1
+    done
+
+    if [ "$_rfw_ready" = "1" ]; then
+        log "$(t "Installing default rfw rules..." "安装默认 rfw 规则...")"
+        _geoip_countries='["CN","RU","IR","TM","TR","BY","VN"]'
+
+        # Block inbound http/socks5/fet from high-risk regions
+        for _proto in http socks5 fet; do
+            curl -sf -X POST "http://$RFW_API_ADDR/api/rules" \
+                -H "Content-Type: application/json" \
+                -d "{\"priority\":100,\"direction\":\"in\",\"protocol\":\"$_proto\",\"action\":\"block\",\"port_start\":0,\"enabled\":true,\"ip_type\":\"geoip\",\"countries\":$_geoip_countries}" \
+                >/dev/null && log "$(t "✓ Default rule added: block inbound $_proto from geoip." "✓ 已添加默认规则：阻断来自 GeoIP 的入站 $_proto。")"
+        done
+
+        # Block outbound SMTP ports (anti-spam)
+        for _port in 25 465 587; do
+            curl -sf -X POST "http://$RFW_API_ADDR/api/rules" \
+                -H "Content-Type: application/json" \
+                -d "{\"priority\":100,\"direction\":\"out\",\"protocol\":\"tcp\",\"action\":\"block\",\"port_start\":$_port,\"enabled\":true,\"ip_type\":\"any\"}" \
+                >/dev/null && log "$(t "✓ Default rule added: block outbound tcp/$_port." "✓ 已添加默认规则：阻断出站 tcp/$_port。")"
+        done
+
+        log "$(t "✓ Default rfw rules installed." "✓ 默认 rfw 规则已安装。")"
+    else
+        log "$(t "Warning: rfw API not ready, skipping default rules." "警告：rfw API 未就绪，跳过默认规则安装。")"
+    fi
+
     log "$(t "✓ rfw firewall installed. Manage rules via the agent web panel → Firewall tab." "✓ rfw 防火墙已安装。通过 agent 面板 → Firewall 标签管理规则。")"
 else
     log "$(t "Skipping rfw installation." "跳过 rfw 安装。")"
