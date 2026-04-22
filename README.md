@@ -32,13 +32,13 @@ To ensure a clean, consistent environment, reinstall the server to Debian 13 usi
 
 **Outside China:**
 ```bash
-curl -O https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh || wget -O reinstall.sh reinstall.sh
+curl -O https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh || wget -O reinstall.sh https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh
 bash reinstall.sh debian 13
 ```
 
 **Inside China:**
 ```bash
-curl -O https://cnb.cool/bin456789/reinstall/-/git/raw/main/reinstall.sh || wget -O reinstall.sh reinstall.sh
+curl -O https://cnb.cool/bin456789/reinstall/-/git/raw/main/reinstall.sh || wget -O reinstall.sh https://cnb.cool/bin456789/reinstall/-/git/raw/main/reinstall.sh
 bash reinstall.sh debian 13
 ```
 
@@ -200,13 +200,13 @@ NarwhalCloud Agent（`narwhal-agent`）是运行在母鸡上的后台服务，�
 
 **境外服务器：**
 ```bash
-curl -O https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh || wget -O reinstall.sh reinstall.sh
+curl -O https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh || wget -O reinstall.sh https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh
 bash reinstall.sh debian 13
 ```
 
 **境内服务器：**
 ```bash
-curl -O https://cnb.cool/bin456789/reinstall/-/git/raw/main/reinstall.sh || wget -O reinstall.sh reinstall.sh
+curl -O https://cnb.cool/bin456789/reinstall/-/git/raw/main/reinstall.sh || wget -O reinstall.sh https://cnb.cool/bin456789/reinstall/-/git/raw/main/reinstall.sh
 bash reinstall.sh debian 13
 ```
 
