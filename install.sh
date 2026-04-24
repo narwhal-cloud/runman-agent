@@ -319,6 +319,8 @@ write_config_file() {
     local ndp_iface="${6:-}"
     local ndp_subnets="${7:-}"
     local ndp_network="${8:-}"
+    local web_user="${9:-admin}"
+    local web_pass="${10:-}"
 
     mkdir -p "$AGENT_CONFIG_DIR"
 
@@ -330,8 +332,8 @@ write_config_file() {
     "token": "",
     "monitor_nic": "",
     "monitor_disk": "/",
-    "web_user": "",
-    "web_pass_hash": "",
+    "web_user": "$web_user",
+    "web_pass_hash": "$web_pass",
     "host": "",
     "max_port_forward": 20,
     "ipv6_mode": "$ipv6_mode",
@@ -996,8 +998,12 @@ if [ "$IPV6_MODE" = "subnet" ]; then
     fi
 fi
 
+# 生成默认 Web 面板用户名和随机密码
+DEFAULT_USER="admin"
+DEFAULT_PASS=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 12 2>/dev/null || openssl rand -base64 9 | tr -dc A-Za-z0-9 | head -c 12)
+
 # 生成配置文件（包含所有启动参数、IPv6配置和磁盘限制）
-write_config_file "$VIRT_TYPE" "$IPV6_MODE" "$IPV6_SUBNET" "$IPV6_ADDR" "$IPV6_IFACE" "$NDP_IFACE" "$NDP_SUBNETS" "$NDP_NETWORK"
+write_config_file "$VIRT_TYPE" "$IPV6_MODE" "$IPV6_SUBNET" "$IPV6_ADDR" "$IPV6_IFACE" "$NDP_IFACE" "$NDP_SUBNETS" "$NDP_NETWORK" "$DEFAULT_USER" "$DEFAULT_PASS"
 
 write_service_file "$VIRT_TYPE"
 start_service "$AGENT_SERVICE"
@@ -1152,6 +1158,8 @@ log "========================================"
 log "$(t "✓ NarwhalCloud Agent installation complete!" "✓ NarwhalCloud Agent 安装完成！")"
 log "$(t "IP:           $IP" "IP:           $IP")"
 log "$(t "Web panel:    http://$IP:$AGENT_WEB_PORT" "面板地址:     http://$IP:$AGENT_WEB_PORT")"
+log "$(t "Username:     $DEFAULT_USER" "用户名:       $DEFAULT_USER")"
+log "$(t "Password:     $DEFAULT_PASS" "密码:         $DEFAULT_PASS")"
 echo ""
 log "$(t "Next step: log in to the web panel and enter your Token" "下一步：登录面板并在设置中填入您的 Token")"
 log "========================================"

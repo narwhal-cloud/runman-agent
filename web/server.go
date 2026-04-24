@@ -410,23 +410,6 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		// 原子更新配置文件
 		err := s.cfg.Update(func(cfg *config.Config) {
-			// 如果设置 Token，必须确保已有或正在设置用户名和密码
-			if req.Token != "" {
-				user := cfg.WebUser
-				if req.WebUser != "" {
-					user = req.WebUser
-				}
-				hasPass := cfg.WebPassHash != ""
-				if req.WebPass != "" {
-					hasPass = true
-				}
-
-				if user == "" || !hasPass {
-					// 验证失败，稍后返回错误；这里无法返回，先保留状态
-					return
-				}
-			}
-
 			if req.Token != "" {
 				cfg.Token = req.Token
 			}

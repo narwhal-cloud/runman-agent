@@ -3,13 +3,17 @@ package config
 import (
 	"encoding/json"
 	"os"
+	"strings"
 	"sync"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 const (
 	DefaultDB             = "/opt/narwhal-agent/agent.db"
 	DefaultWeb            = ":8792"
 	DefaultMaxPortForward = 20
+	DefaultWebUser        = "admin"
 )
 
 // Config 是 agent 的全局配置，从 JSON 配置文件读取，通过 Web API 可修改。
@@ -73,7 +77,21 @@ func Load(path string) (*Manager, error) {
 		return nil, err
 	}
 	applyDefaults(&cfg)
-	return &Manager{path: path, cfg: cfg}, nil
+
+	m := &Manager{path: path, cfg: cfg}
+
+	// 如果密码不是加密的（即首次安装由安装脚本写入的明文），自动进行 bcrypt 加密并写回
+	if cfg.WebPassHash != "" && !strings.HasPrefix(cfg.WebPassHash, "$2") {
+		err = m.Update(func(c *Config) {
+			hash, _ := bcrypt.GenerateFromPassword([]byte(c.WebPassHash), bcrypt.DefaultCost)
+			c.WebPassHash = string(hash)
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return m, nil
 }
 
 // Get 返回当前配置的快照副本（并发安全）。
@@ -108,6 +126,9 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Web == "" {
 		cfg.Web = DefaultWeb
+	}
+	if cfg.WebUser == "" {
+		cfg.WebUser = DefaultWebUser
 	}
 	if cfg.MaxPortForward <= 0 {
 		cfg.MaxPortForward = DefaultMaxPortForward
