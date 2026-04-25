@@ -717,20 +717,21 @@ configure_host_ipv6_routing() {
     local _gw6
     _gw6=$(ip -6 route show default dev "$iface" | awk '{print $3}')
 
-    # 删除该网卡上所有 global scope 的 /64 地址（含隐私地址 mngtmpaddr），消除对应的 /64 内核连接路由。
-    while IFS= read -r _addr64; do
-        ip addr del "$_addr64" dev "$iface" 2>/dev/null || true
-    done < <(ip -6 addr show dev "$iface" scope global | awk '/inet6.*\/64/{print $2}')
-    
+    # 删除该网卡上所有 global scope 的非 /128 地址（包含 /56、/64 等子网地址），
+    # 消除内核连接路由，防止容器子网与宿主机路由冲突。
+    while IFS= read -r _addr_sub; do
+        ip addr del "$_addr_sub" dev "$iface" 2>/dev/null || true
+    done < <(ip -6 addr show dev "$iface" scope global | awk '{print $2}' | grep -v '/128$')
+
     # 以 /128 重新添加宿主机公网地址，不产生连接路由
     ip addr add "$addr/128" dev "$iface" 2>/dev/null || true
-    
+
     # 恢复默认路由
     if [ -n "$_gw6" ]; then
         ip -6 route add default via "$_gw6" dev "$iface" 2>/dev/null || true
     fi
-    
-    log "$(t "✓ All /64 addresses removed, host IPv6 re-added as /128, SLAAC disabled." "✓ 已删除所有 /64 地址，宿主机 IPv6 已改为 /128，SLAAC 已禁用。")"
+
+    log "$(t "✓ All subnet addresses removed, host IPv6 re-added as /128, SLAAC disabled." "✓ 已删除所有子网地址，宿主机 IPv6 已改为 /128，SLAAC 已禁用。")"
 }
 
 # ── IPv6 detection ────────────────────────────────────────────────────────────
