@@ -103,6 +103,17 @@ func (m *Manager) ReinstallVM(ctx context.Context, req *agent.CmdReinstallVM) er
 // --- 内部方法（不带锁） ---
 
 func (m *Manager) createVM(ctx context.Context, req *agent.CmdCreateVM) error {
+	// 限制最低配置：CPU 1核，内存 128MB，磁盘 1GB
+	if req.Cpu < 1 {
+		req.Cpu = 1
+	}
+	if req.RamMb < 128 {
+		req.RamMb = 128
+	}
+	if req.DiskGb < 1 {
+		req.DiskGb = 1
+	}
+
 	// 0. 清理同名旧实例（如果存在）
 	_ = m.deleteVM(ctx, req.VmId)
 

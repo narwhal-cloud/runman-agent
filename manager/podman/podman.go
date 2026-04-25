@@ -128,12 +128,12 @@ func (m *Manager) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error {
 }
 
 func (m *Manager) createVM(_ context.Context, req *agent.CmdCreateVM) error {
-	// 限制最低配置：CPU 1核，内存 128MB，磁盘 1GB
+	// 限制最低配置：CPU 1核，内存 64MB，磁盘 1GB
 	if req.Cpu < 1 {
 		req.Cpu = 1
 	}
-	if req.RamMb < 128 {
-		req.RamMb = 128
+	if req.RamMb < 64 {
+		req.RamMb = 64
 	}
 	if req.DiskGb < 1 {
 		req.DiskGb = 1
