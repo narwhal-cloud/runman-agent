@@ -216,7 +216,7 @@ func main() {
 // measureBandwidth 通过下载 Cloudflare 测速文件估算出口带宽，
 // 结果保存到数据库并更新 HostMonitor 缓存。
 func (a *Agent) measureBandwidth() {
-	const testURL = "https://speed.cloudflare.com/__down?bytes=40960000"
+	const testURL = "https://speed.cloudflare.com/__down?bytes=92160000"
 	log.Printf("Starting bandwidth test...")
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
