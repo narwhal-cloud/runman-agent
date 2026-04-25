@@ -218,7 +218,7 @@ func main() {
 func (a *Agent) measureBandwidth() {
 	const testURL = "https://speed.cloudflare.com/__down?bytes=92160000"
 	log.Printf("Starting bandwidth test...")
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, "GET", testURL, nil)
