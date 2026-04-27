@@ -23,6 +23,11 @@ NETAVARK_BASE="https://github.com/narwhal-cloud/netavark/releases/latest/downloa
 # rfw v2 随 agent 同仓库发布，资产名为 rfw-amd64 / rfw-arm64
 RFW_BASE="$DOWNLOAD_BASE"
 
+# t EN ZH — returns the string for current language
+t() { [ "$LANG_CODE" = "zh" ] && echo "$2" || echo "$1"; }
+
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"; }
+
 # ── Language selection ────────────────────────────────────────────────────────
 
 # Support non-interactive mode via environment variable or command line argument
@@ -42,16 +47,11 @@ if [ -z "$LANG_CODE" ]; then
     esac
 fi
 
-# t EN ZH — returns the string for current language
-t() { [ "$LANG_CODE" = "zh" ] && echo "$2" || echo "$1"; }
-
 log "$(t "Recommended OS: Debian 13 (Trixie) for best compatibility." "推荐操作系统：使用 Debian 13 (Trixie) 以获得最佳兼容性。")"
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ────────────────────────────────────────────────────────────────────────────────
-
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"; }
 
 cleanup_locks() {
     killall apt apt-get dpkg 2>/dev/null || true
