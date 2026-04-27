@@ -35,6 +35,8 @@ esac
 # t EN ZH — returns the string for current language
 t() { [ "$LANG_CODE" = "zh" ] && echo "$2" || echo "$1"; }
 
+log "$(t "Recommended OS: Debian 13 (Trixie) for best compatibility." "推荐操作系统：使用 Debian 13 (Trixie) 以获得最佳兼容性。")"
+
 # ────────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ────────────────────────────────────────────────────────────────────────────────
@@ -80,6 +82,31 @@ start_service() {
     systemctl is-active --quiet "$svc" || systemctl start "$svc"
     systemctl is-enabled --quiet "$svc" || systemctl enable "$svc"
     log "$(t "Service $svc started." "服务 $svc 已启动。")"
+}
+
+check_podman_version() {
+    if ! command -v podman &>/dev/null; then
+        log "$(t "Podman not found." "未找到 Podman。")"
+        exit 1
+    fi
+    local version_str
+    version_str=$(podman -v | awk '{print $3}')
+    log "$(t "Detected Podman version: $version_str" "检测到 Podman 版本: $version_str")"
+
+    # Compare version $version_str with 5.4.2
+    local IFS=.
+    local cur=($version_str)
+    local min=(5 4 2)
+    for i in 0 1 2; do
+        if [[ ${cur[i]:-0} -lt ${min[i]} ]]; then
+            log "$(t "Error: Podman version must be >= 5.4.2. Current version is $version_str" "错误: Podman 版本必须 >= 5.4.2。当前版本为 $version_str")"
+            log "$(t "It is highly recommended to use Debian 13 (Trixie) to get the latest Podman." "强烈建议使用 Debian 13 (Trixie) 以获取最新版本的 Podman。")"
+            exit 1
+        elif [[ ${cur[i]:-0} -gt ${min[i]} ]]; then
+            return 0
+        fi
+    done
+    return 0
 }
 
 download_with_retry() {
@@ -356,6 +383,9 @@ if systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null || [ -f "$AGENT_BINA
     log "$(t "Existing NarwhalCloud Agent detected, updating..." "检测到已安装的 NarwhalCloud Agent，执行更新流程...")"
 
     ARCH=$(detect_arch)
+    if [ -f "/usr/bin/podman" ]; then
+        check_podman_version
+    fi
     download_agent "$ARCH"
 
     # Update netavark
@@ -639,6 +669,9 @@ log "$(t "Selected virtualization type: $VIRT_TYPE" "选择的虚拟化类型: $
 # ── Installation ───────────────────────────────────────────────────────────────
 
 install_packages "$VIRT_TYPE"
+if [ "$VIRT_TYPE" = "podman" ]; then
+    check_podman_version
+fi
 enable_bbr
 start_service chrony
 if [ "$VIRT_TYPE" = "podman" ]; then
