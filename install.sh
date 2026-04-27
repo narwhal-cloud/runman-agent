@@ -25,12 +25,22 @@ RFW_BASE="$DOWNLOAD_BASE"
 
 # ── Language selection ────────────────────────────────────────────────────────
 
-printf "Select language / 选择语言:\n  1) English (default)\n  2) 中文\n"
-read -rp "> " _lang_choice
-case "${_lang_choice}" in
-    2) LANG_CODE="zh" ;;
-    *) LANG_CODE="en" ;;
-esac
+# Support non-interactive mode via environment variable or command line argument
+if [ -n "$1" ]; then
+    case "$1" in
+        zh) LANG_CODE="zh" ;;
+        en) LANG_CODE="en" ;;
+    esac
+fi
+
+if [ -z "$LANG_CODE" ]; then
+    printf "Select language / 选择语言:\n  1) English (default)\n  2) 中文\n"
+    read -t 5 -rp "> " _lang_choice || _lang_choice=1
+    case "${_lang_choice}" in
+        2) LANG_CODE="zh" ;;
+        *) LANG_CODE="en" ;;
+    esac
+fi
 
 # t EN ZH — returns the string for current language
 t() { [ "$LANG_CODE" = "zh" ] && echo "$2" || echo "$1"; }
@@ -386,6 +396,7 @@ if systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null || [ -f "$AGENT_BINA
     if [ -f "/usr/bin/podman" ]; then
         check_podman_version
     fi
+
     download_agent "$ARCH"
 
     # Update netavark

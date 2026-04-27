@@ -70,6 +70,13 @@ type Traffic struct {
 	UpdatedAt time.Time // 最后同步时间
 }
 
+// System 存储 Agent 系统级别的元数据，如检测到新版本的时间
+type System struct {
+	Key       string `gorm:"primaryKey"`
+	Value     string
+	UpdatedAt time.Time
+}
+
 type DB struct {
 	orm *gorm.DB
 }
@@ -86,9 +93,33 @@ func Init(path string) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	_ = db.AutoMigrate(&Traffic{}, &VMConfig{}, &PodmanVMConfig{}, &CloudHVVMConfig{}, &IncusVMConfig{}, &PortForward{})
+	_ = db.AutoMigrate(&Traffic{}, &VMConfig{}, &PodmanVMConfig{}, &CloudHVVMConfig{}, &IncusVMConfig{}, &PortForward{}, &System{})
 
 	return &DB{orm: db}, nil
+}
+
+// System 元数据
+
+func (d *DB) GetSystem(key string) (string, error) {
+	var s System
+	err := d.orm.First(&s, "key = ?", key).Error
+	if err != nil {
+		return "", err
+	}
+	return s.Value, nil
+}
+
+func (d *DB) SetSystem(key, value string) error {
+	return d.orm.Save(&System{Key: key, Value: value, UpdatedAt: time.Now()}).Error
+}
+
+func (d *DB) GetSystemTime(key string) (time.Time, error) {
+	var s System
+	err := d.orm.First(&s, "key = ?", key).Error
+	if err != nil {
+		return time.Time{}, err
+	}
+	return s.UpdatedAt, nil
 }
 
 // VM 核心业务配置

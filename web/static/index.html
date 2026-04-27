@@ -1394,8 +1394,6 @@ async function checkForUpdates() {
             $('update-section').classList.remove('hidden');
             $('version-status').className = 'text-xs font-bold uppercase px-2 py-1 rounded bg-amber-100 text-amber-700';
             $('version-status').textContent = 'Update Available';
-            // Store download URL for upgrade
-            window.updateDownloadURL = data.download_url;
         } else {
             $('update-section').classList.add('hidden');
             $('version-status').className = 'text-xs font-bold uppercase px-2 py-1 rounded bg-green-100 text-green-700';
@@ -1410,13 +1408,8 @@ async function checkForUpdates() {
 }
 
 async function doUpgrade() {
-    if (!window.updateDownloadURL) {
-        showErr('version-err', 'No download URL available');
-        return;
-    }
-
     if (!confirm('Upgrade the agent? The service will restart after upgrade.')) {
-        return;
+        return
     }
 
     hideErr('version-err');
@@ -1425,24 +1418,22 @@ async function doUpgrade() {
 
     setButtonLoading(btn, true);
     statusEl.classList.remove('hidden');
-    statusEl.textContent = 'Upgrading...';
+    statusEl.textContent = 'Executing upgrade script...';
 
     try {
-        const result = await api('POST', '/api/upgrade', {
-            download_url: window.updateDownloadURL
-        });
+        const result = await api('POST', '/api/upgrade', {});
 
         if (result.success) {
-            statusEl.textContent = 'Upgrade successful! Service restarting...';
-            statusEl.className = 'text-[10px] text-green-600 text-center hidden';
+            statusEl.textContent = 'Upgrade script started! Service will restart in 10s...';
+            statusEl.className = 'text-[10px] text-green-600 text-center';
 
             // Wait a bit before closing
             setTimeout(() => {
                 closeModal('modal-version');
-                alert('Agent upgraded successfully! Please wait for the service to restart.');
-                // Refresh page after a delay to connect to new version
-                setTimeout(() => location.reload(), 3000);
-            }, 1500);
+                alert('Agent upgrade process started! The web panel will be available again once the service restarts.');
+                // Refresh page after a longer delay to connect to new version
+                setTimeout(() => location.reload(), 12000);
+            }, 2000);
         } else {
             showErr('version-err', 'Upgrade failed: ' + result.message);
         }

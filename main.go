@@ -25,6 +25,7 @@ import (
 	"runman-agent/ndp"
 	"runman-agent/proto/agent"
 	"runman-agent/traffic"
+	"runman-agent/updater"
 	"runman-agent/web"
 	"runtime/debug"
 	"strings"
@@ -154,9 +155,13 @@ func main() {
 		config:  conf,
 	}
 
+	// 启动自动更新服务（如果检测到新版本，将在 24-72 小时内强制更新）
+	upd := updater.NewService(database, version)
+	go upd.Start(context.Background())
+
 	// 启动本地 Web 状态页，供运维人员直接查看节点信息
 	// 同时传入 rawMgr 以便 Web 服务能访问具体的 Manager 实现（如 CloudHV 的内存报告）
-	ws := web.NewServer(database, svc, hostMon, cfg, a.pf, a, rawMgr, version)
+	ws := web.NewServer(database, svc, hostMon, cfg, a.pf, a, rawMgr, version, upd)
 	go func() {
 		log.Printf("Starting web server on %s", conf.Web)
 		_ = ws.ListenAndServe(conf.Web)

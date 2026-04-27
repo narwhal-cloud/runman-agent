@@ -19,7 +19,7 @@ import (
 	"runman-agent/manager/portforward"
 	"runman-agent/monitor"
 	"runman-agent/proto/agent"
-	"runtime"
+	"runman-agent/updater"
 	"strconv"
 	"strings"
 	"sync"
@@ -56,7 +56,7 @@ type Server struct {
 	vmSnapshots  map[string]*vmNetSnapshot
 	vmSnapshotMu sync.Mutex
 	version      string
-	upgradeMgr   *UpgradeManager
+	updater      *updater.Service
 
 	monitorHst map[string][]vmListItem
 	monitorMu  sync.RWMutex
@@ -65,14 +65,11 @@ type Server struct {
 // NewServer 接收两个 manager：
 // - mgr (svc) 是 VMService 包装层
 // - rawMgr 是真正的驱动实现（CloudHV/Podman），用于内存上报等功能
-func NewServer(database *db.DB, mgr manager.VMManager, hostMon *monitor.HostMonitor, cfg *config.Manager, pf *portforward.Manager, agent interface{}, rawMgr manager.VMManager, version string) *Server {
+func NewServer(database *db.DB, mgr manager.VMManager, hostMon *monitor.HostMonitor, cfg *config.Manager, pf *portforward.Manager, agent interface{}, rawMgr manager.VMManager, version string, upd *updater.Service) *Server {
 	var cloudHVMgr *cloudhv.Manager
 	if ch, ok := rawMgr.(*cloudhv.Manager); ok {
 		cloudHVMgr = ch
 	}
-
-	binaryPath, _ := os.Executable()
-	upgradeMgr := NewUpgradeManager(binaryPath, version)
 
 	return &Server{
 		db:          database,
@@ -83,7 +80,7 @@ func NewServer(database *db.DB, mgr manager.VMManager, hostMon *monitor.HostMoni
 		pf:          pf,
 		agent:       agent,
 		version:     version,
-		upgradeMgr:  upgradeMgr,
+		updater:     upd,
 		vmSnapshots: make(map[string]*vmNetSnapshot),
 		monitorHst:  make(map[string][]vmListItem),
 	}
@@ -482,19 +479,17 @@ func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
 }
 
 type updateCheckResponse struct {
-	Current     string `json:"current"`
-	Latest      string `json:"latest"`
-	HasUpdate   bool   `json:"has_update"`
-	DownloadURL string `json:"download_url,omitempty"`
-	Error       string `json:"error,omitempty"`
+	Current   string `json:"current"`
+	Latest    string `json:"latest"`
+	HasUpdate bool   `json:"has_update"`
+	Error     string `json:"error,omitempty"`
 }
 
 func (s *Server) handleUpdateCheck(w http.ResponseWriter, _ *http.Request) {
-	latest, downloadURL, err := s.checkLatestVersion()
+	latest, err := s.checkLatestVersion()
 	resp := updateCheckResponse{
-		Current:     s.version,
-		Latest:      latest,
-		DownloadURL: downloadURL,
+		Current: s.version,
+		Latest:  latest,
 	}
 
 	if err != nil {
@@ -507,56 +502,32 @@ func (s *Server) handleUpdateCheck(w http.ResponseWriter, _ *http.Request) {
 	jsonOK(w, resp)
 }
 
-// checkLatestVersion 从 GitHub Releases 获取最新版本
-func (s *Server) checkLatestVersion() (version, downloadURL string, err error) {
+// checkLatestVersion 从 GitHub Releases 获取最新版本号
+func (s *Server) checkLatestVersion() (version string, err error) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Get("https://api.github.com/repos/narwhal-cloud/runman-agent/releases/latest")
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("github api returned %d", resp.StatusCode)
+		return "", fmt.Errorf("github api returned %d", resp.StatusCode)
 	}
 
 	var release struct {
 		TagName string `json:"tag_name"`
-		Assets  []struct {
-			Name        string `json:"name"`
-			DownloadURL string `json:"browser_download_url"`
-		} `json:"assets"`
 	}
 
 	if err = json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return "", "", err
+		return "", err
 	}
 
 	if release.TagName == "" {
-		return "", "", fmt.Errorf("no releases found")
+		return "", fmt.Errorf("no releases found")
 	}
 
-	// 找到适配当前架构的下载地址
-	arch := "amd64"
-	if isARM64() {
-		arch = "arm64"
-	}
-	for _, asset := range release.Assets {
-		if strings.Contains(asset.Name, arch) && strings.HasSuffix(asset.Name, "runman-agent-linux-"+arch) {
-			return release.TagName, asset.DownloadURL, nil
-		}
-	}
-
-	return release.TagName, "", nil
-}
-
-// isARM64 检测当前系统架构是否为 ARM64
-func isARM64() bool {
-	return runtime.GOARCH == "arm64"
-}
-
-type upgradeRequest struct {
-	DownloadURL string `json:"download_url"`
+	return release.TagName, nil
 }
 
 type upgradeResponse struct {
@@ -571,50 +542,15 @@ func (s *Server) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req upgradeRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonErr(w, fmt.Errorf("invalid request: %v", err), 400)
+	// 启动升级流程
+	if err := s.updater.ManualUpdate(); err != nil {
+		jsonErr(w, fmt.Errorf("failed to start upgrade script: %v", err), 500)
 		return
 	}
-
-	if req.DownloadURL == "" {
-		jsonErr(w, fmt.Errorf("download_url is required"), 400)
-		return
-	}
-
-	// 创建上下文，设置超时
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
-	defer cancel()
-
-	// 下载新的二进制
-	tmpBinary, err := s.upgradeMgr.DownloadBinary(ctx, req.DownloadURL)
-	if err != nil {
-		jsonErr(w, fmt.Errorf("download failed: %v", err), 500)
-		return
-	}
-	defer os.Remove(tmpBinary)
-
-	// 验证二进制
-	if err = s.upgradeMgr.VerifyBinary(tmpBinary); err != nil {
-		jsonErr(w, fmt.Errorf("binary verification failed: %v", err), 400)
-		return
-	}
-
-	// 应用升级
-	if err = s.upgradeMgr.Apply(tmpBinary); err != nil {
-		jsonErr(w, fmt.Errorf("upgrade failed: %v", err), 500)
-		return
-	}
-
-	// 清理备份
-	_ = s.upgradeMgr.CleanupBackups()
-
-	// 同步升级 rfw（如已安装），后台执行不阻塞响应
-	go s.upgradeMgr.UpgradeRfw(context.Background())
 
 	jsonOK(w, upgradeResponse{
 		Success: true,
-		Message: "upgrade completed, please restart the service",
+		Message: "upgrade script started, agent will restart in 10s",
 	})
 }
 
