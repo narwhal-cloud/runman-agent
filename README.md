@@ -80,10 +80,14 @@ The installer auto-detects your server's IPv6 configuration and selects the appr
 | `snat`   | Single `/128` address | Containers/VMs share host IPv6 via SNAT/masquerade        |
 | `subnet` | Prefix ≤ `/127`       | Each container/VM gets an independent public IPv6 address |
 
-You can override the mode by setting the environment variable before running the script:
+You can override the mode and network parameters by setting environment variables before running the script:
 
 ```bash
+# Force SNAT mode
 IPV6_MODE=snat bash <(curl -fsSL https://github.com/narwhal-cloud/runman-agent/releases/latest/download/install.sh)
+
+# Force subnet mode with specific IP and subnet
+IPV6_MODE=subnet IPV6_ADDR=2001:db8::1 IPV6_SUBNET=2001:db8::/64 bash <(curl -fsSL https://github.com/narwhal-cloud/runman-agent/releases/latest/download/install.sh)
 ```
 
 ### What Gets Installed
@@ -139,6 +143,9 @@ systemctl restart narwhal-agent
 
 # Check rfw firewall status
 systemctl status rfw
+
+# Reset web panel password
+/opt/narwhal-agent/narwhal-agent -reset-password NEW_PASSWORD
 ```
 
 ### Key Configuration Fields
@@ -248,10 +255,14 @@ bash <(curl -fsSL https://github.com/narwhal-cloud/runman-agent/releases/latest/
 | `snat`   | 单个 `/128` 地址 | 容器/VM 通过 SNAT/MASQUERADE 共享宿主机 IPv6 |
 | `subnet` | 前缀 ≤ `/127`  | 每个容器/VM 获得独立的公网 IPv6 地址             |
 
-也可通过环境变量强制指定模式：
+也可通过环境变量强制指定模式及网络参数：
 
 ```bash
+# 强制使用 SNAT 模式
 IPV6_MODE=snat bash <(curl -fsSL https://github.com/narwhal-cloud/runman-agent/releases/latest/download/install.sh)
+
+# 强制使用子网模式并指定 IP 和子网
+IPV6_MODE=subnet IPV6_ADDR=2001:db8::1 IPV6_SUBNET=2001:db8::/64 bash <(curl -fsSL https://github.com/narwhal-cloud/runman-agent/releases/latest/download/install.sh)
 ```
 
 ### 安装内容
@@ -307,6 +318,9 @@ systemctl restart narwhal-agent
 
 # 查看 rfw 防火墙状态
 systemctl status rfw
+
+# 重置面板密码
+/opt/narwhal-agent/narwhal-agent -reset-password 新密码
 ```
 
 ### 关键配置字段
