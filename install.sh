@@ -31,12 +31,15 @@ log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"; }
 # ── Language selection ────────────────────────────────────────────────────────
 
 # Support non-interactive mode via environment variable or command line argument
-if [ -n "$1" ]; then
+INSTALL_RFW_FORCE=0
+while [[ $# -gt 0 ]]; do
     case "$1" in
-        zh) LANG_CODE="zh" ;;
-        en) LANG_CODE="en" ;;
+        zh) LANG_CODE="zh"; shift ;;
+        en) LANG_CODE="en"; shift ;;
+        --install-rfw) INSTALL_RFW_FORCE=1; shift ;;
+        *) shift ;;
     esac
-fi
+done
 
 if [ -z "$LANG_CODE" ]; then
     printf "Select language / 选择语言:\n  1) English (default)\n  2) 中文\n"
@@ -387,6 +390,125 @@ EOF
     log "$(t "✓ Configuration file written to $AGENT_CONFIG_FILE" "✓ 配置文件已写入 $AGENT_CONFIG_FILE")"
 }
 
+install_rfw() {
+    local mode="${1:-0}" # 0: normal (prompt), 1: force (no prompt), 2: update-only (no prompt, only if exists)
+    local ARCH
+    ARCH=$(detect_arch)
+
+    if [ "$mode" = "0" ]; then
+        read -rp "$(t "Install rfw firewall? [Y/n]: " "是否安装 rfw 防火墙? [Y/n]: ")" _rfw
+        [[ ! "${_rfw:-Y}" =~ ^[Yy]$ ]] && { log "$(t "Skipping rfw installation." "跳过 rfw 安装。")"; return 0; }
+    elif [ "$mode" = "2" ]; then
+        [ -f "$RFW_BIN_DIR/rfw" ] || return 0
+    fi
+
+    log "$(t "Installing/Updating rfw..." "正在安装/更新 rfw...")"
+    mkdir -p "$RFW_BIN_DIR"
+
+    # 调试模式：检查本地文件
+    if [ -f "./rfw-$ARCH" ]; then
+        log "$(t "Found local rfw binary: ./rfw-$ARCH (debug mode)" "找到本地 rfw 二进制: ./rfw-$ARCH (调试模式)")"
+        cp "./rfw-$ARCH" "$RFW_BIN_DIR/rfw"
+        chmod +x "$RFW_BIN_DIR/rfw"
+    else
+        # 生产模式：从远程下载 (即使已存在也更新)
+        if download_with_retry "$RFW_BASE/rfw-$ARCH" "$RFW_BIN_DIR/rfw.new"; then
+            chmod +x "$RFW_BIN_DIR/rfw.new"
+            systemctl is-active --quiet rfw && systemctl stop rfw
+            mv "$RFW_BIN_DIR/rfw.new" "$RFW_BIN_DIR/rfw"
+        else
+             log "$(t "Warning: rfw download failed." "警告: rfw 下载失败。")"
+             [ -f "$RFW_BIN_DIR/rfw" ] || return 0
+        fi
+    fi
+
+    if [ ! -f "/etc/systemd/system/rfw.service" ]; then
+        # 过滤掉 lo 及虚拟网桥
+        mapfile -t interfaces < <(ip -o link show | awk -F': ' '{print $2}' \
+            | grep -v "^lo$" | grep -v "^narwhal-net$" | grep -v "^incusbr0$" \
+            | grep -v "^podman" | grep -v "@")
+
+        if [ ${#interfaces[@]} -eq 0 ]; then
+            log "$(t "Error: no available WAN interfaces found." "错误: 未找到可用的 WAN 网卡。")"
+            return 1
+        elif [ ${#interfaces[@]} -eq 1 ]; then
+            SEL_IFACE="${interfaces[0]}"
+            log "$(t "Only one WAN interface found, using: $SEL_IFACE" "只找到一个 WAN 网卡，使用: $SEL_IFACE")"
+        else
+            echo "$(t "Available WAN interfaces:" "可用 WAN 网卡：")"
+            for i in "${!interfaces[@]}"; do echo "  $((i+1)). ${interfaces[$i]}"; done
+            while true; do
+                read -rp "$(t "Select interface number (1-${#interfaces[@]}): " "请选择网卡编号 (1-${#interfaces[@]}): ")" choice
+                [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#interfaces[@]}" ] && break
+                echo "$(t "Invalid choice, please try again." "无效选择，请重新输入。")"
+            done
+            SEL_IFACE="${interfaces[$((choice-1))]}"
+            log "$(t "Selected interface: $SEL_IFACE" "选择网卡: $SEL_IFACE")"
+        fi
+
+        cat > /etc/systemd/system/rfw.service <<EOF
+[Unit]
+Description=RFW eBPF Firewall
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Environment=RUST_LOG=info
+WorkingDirectory=$RFW_BIN_DIR
+ExecStart=$RFW_BIN_DIR/rfw --iface $SEL_IFACE --api-addr $RFW_API_ADDR
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload
+        log "$(t "✓ rfw service file written. API listens on $RFW_API_ADDR (local only)." "✓ rfw 服务文件已写入，API 监听 $RFW_API_ADDR（仅本地）。")"
+    fi
+    
+    start_service rfw
+
+    # Wait for rfw API to become ready (up to 10s)
+    _rfw_ready=0
+    for _i in 1 2 3 4 5 6 7 8 9 10; do
+        curl -sf "http://$RFW_API_ADDR/api/rules" >/dev/null 2>&1 && { _rfw_ready=1; break; }
+        sleep 1
+    done
+
+    if [ "$_rfw_ready" = "1" ]; then
+        # Check if rules already exist
+        _current_rules=$(curl -sf "http://$RFW_API_ADDR/api/rules")
+        if [ "$_current_rules" != "[]" ] && [ -n "$_current_rules" ]; then
+            log "$(t "rfw rules already exist, skipping default rules." "rfw 规则已存在，跳过默认规则安装。")"
+        else
+            log "$(t "Installing default rfw rules..." "安装默认 rfw 规则...")"
+            _geoip_countries='["CN","RU","IR","TM","TR","BY","VN"]'
+
+            # Block inbound http/socks5/fet from high-risk regions
+            for _proto in http socks5 fet; do
+                curl -sf -X POST "http://$RFW_API_ADDR/api/rules" \
+                    -H "Content-Type: application/json" \
+                    -d "{\"priority\":100,\"direction\":\"in\",\"protocol\":\"$_proto\",\"action\":\"block\",\"port_start\":0,\"enabled\":true,\"ip_type\":\"geoip\",\"countries\":$_geoip_countries}" \
+                    >/dev/null
+            done
+
+            # Block outbound SMTP ports (anti-spam)
+            for _port in 25 465 587; do
+                curl -sf -X POST "http://$RFW_API_ADDR/api/rules" \
+                    -H "Content-Type: application/json" \
+                    -d "{\"priority\":100,\"direction\":\"out\",\"protocol\":\"tcp\",\"action\":\"block\",\"port_start\":$_port,\"enabled\":true,\"ip_type\":\"any\"}" \
+                    >/dev/null
+            done
+            log "$(t "✓ Default rfw rules installed/verified." "✓ 默认 rfw 规则已安装/确认。")"
+        fi
+    else
+        log "$(t "Warning: rfw API not ready, skipping default rules." "警告：rfw API 未就绪，跳过默认规则安装。")"
+    fi
+
+    log "$(t "✓ rfw firewall installed/updated." "✓ rfw 防火墙已安装/更新。")"
+}
+
 # ── Update flow ───────────────────────────────────────────────────────────────
 
 if systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null || [ -f "$AGENT_BINARY" ]; then
@@ -411,17 +533,11 @@ if systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null || [ -f "$AGENT_BINA
     systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null && systemctl restart "$AGENT_SERVICE"
     log "$(t "✓ NarwhalCloud Agent updated." "✓ NarwhalCloud Agent 已更新。")"
 
-    # Update rfw if binary exists
-    if [ -f "$RFW_BIN_DIR/rfw" ]; then
-        log "$(t "rfw detected, updating..." "检测到 rfw，开始更新...")"
-        if download_with_retry "$RFW_BASE/rfw-$ARCH" "$RFW_BIN_DIR/rfw.new"; then
-            chmod +x "$RFW_BIN_DIR/rfw.new"
-            systemctl is-active --quiet rfw && systemctl stop rfw
-            mv "$RFW_BIN_DIR/rfw.new" "$RFW_BIN_DIR/rfw"
-            systemctl is-active --quiet rfw || systemctl is-enabled --quiet rfw 2>/dev/null \
-                && { systemctl daemon-reload; systemctl start rfw; }
-            log "$(t "✓ rfw updated." "✓ rfw 已更新。")"
-        fi
+    # Update rfw if binary exists or force install requested
+    if [ "$INSTALL_RFW_FORCE" = "1" ]; then
+        install_rfw 1
+    else
+        install_rfw 2
     fi
 
     IP=$(curl -4 -s --max-time 10 ip.sb 2>/dev/null || echo "N/A")
@@ -809,21 +925,28 @@ if [ "$VIRT_TYPE" = "cloudhv" ] || [ "$VIRT_TYPE" = "incus" ]; then
     fi
 
     # 检测 IPv6 可分配情况（支持任意前缀）
-    # 如果用户通过环境变量指定了 IPv6_MODE，则直接使用；否则自动检测
-    IPV6_SUBNET=""
-    IPV6_ADDR=""
-    IPV6_IFACE=""
+    # 如果用户通过环境变量指定了配置，则优先使用
+    IPV6_SUBNET="${IPV6_SUBNET:-}"
+    IPV6_ADDR="${IPV6_ADDR:-}"
+    IPV6_IFACE="${IPV6_IFACE:-}"
 
     # 无公网 IPv6 时保持 IPV6_MODE="none"，不配置 IPv6
-    if [ "$IPV6_CONFIG" = "none" ]; then
+    if [ "$IPV6_CONFIG" = "none" ] && [ -z "$IPV6_ADDR" ]; then
         log "$(t "No public IPv6, IPv6 will not be configured." "无公网 IPv6，将不配置 IPv6。")"
     fi
 
     # 尝试获取可分配的 IPv6 子网或地址
-    if [ "$IPV6_CONFIG" != "none" ]; then
-        IPV6_IFACE=$(echo "$IPV6_CONFIG" | cut -d'|' -f1)
-        IPV6_ADDR=$(echo "$IPV6_CONFIG" | cut -d'|' -f2)
-        IPV6_PREFIX=$(echo "$IPV6_CONFIG" | cut -d'|' -f3)
+    if [ "$IPV6_CONFIG" != "none" ] || [ -n "$IPV6_ADDR" ]; then
+        if [ "$IPV6_CONFIG" != "none" ]; then
+            _DET_IFACE=$(echo "$IPV6_CONFIG" | cut -d'|' -f1)
+            _DET_ADDR=$(echo "$IPV6_CONFIG" | cut -d'|' -f2)
+            _DET_PREFIX=$(echo "$IPV6_CONFIG" | cut -d'|' -f3)
+
+            [ -z "$IPV6_IFACE" ] && IPV6_IFACE="$_DET_IFACE"
+            [ -z "$IPV6_ADDR" ] && IPV6_ADDR="$_DET_ADDR"
+        else
+            _DET_PREFIX="128" # 默认 fallback
+        fi
 
         # 支持的前缀范围：/127 或更小（即使是 /64 也支持）
         # 分配策略：
@@ -836,10 +959,13 @@ if [ "$VIRT_TYPE" = "cloudhv" ] || [ "$VIRT_TYPE" = "incus" ]; then
             # 用户通过环境变量显式指定了模式
             IPV6_MODE="$_USER_IPV6_MODE"
             log "$(t "✓ IPv6 mode explicitly set to: $IPV6_MODE" "✓ IPv6 模式已指定为: $IPV6_MODE")"
-        elif [ "$IPV6_PREFIX" = "128" ]; then
+        elif [ -n "$IPV6_SUBNET" ]; then
+            IPV6_MODE="subnet"
+            log "$(t "✓ IPv6 subnet explicitly set to: $IPV6_SUBNET" "✓ IPv6 子网已指定为: $IPV6_SUBNET")"
+        elif [ "$_DET_PREFIX" = "128" ]; then
             IPV6_MODE="snat"
-            log "$(t "✓ IPv6 single address detected (/$IPV6_PREFIX): $IPV6_ADDR, using SNAT mode." "✓ 检测到 IPv6 单地址 (/$IPV6_PREFIX): $IPV6_ADDR，使用 SNAT 模式。")"
-        elif [ "$IPV6_PREFIX" -le 127 ]; then
+            log "$(t "✓ IPv6 single address detected (/$_DET_PREFIX): $IPV6_ADDR, using SNAT mode." "✓ 检测到 IPv6 单地址 (/$_DET_PREFIX): $IPV6_ADDR，使用 SNAT 模式。")"
+        elif [ "$_DET_PREFIX" -le 127 ]; then
             IPV6_MODE="subnet"
             # 计算可分配子网：使用宿主机地址作为基准
             # 例如：如果宿主机是 2001:db8::/64，则 VM 从 2001:db8::/64 中的 ::2, ::3... 分配
@@ -848,7 +974,7 @@ if [ "$VIRT_TYPE" = "cloudhv" ] || [ "$VIRT_TYPE" = "incus" ]; then
             # Python3 计算可分配子网（Debian 13 标配）
             read -r IPV6_SUBNET <<< "$(python3 - <<PYEOF
 import ipaddress
-host_prefix = int('$IPV6_PREFIX')
+host_prefix = int('$_DET_PREFIX')
 # 可分配的最小单位是 /128（单个地址）
 # 为了支持多 VM，我们分配 /127 或 /128 级别的地址
 # 简化：直接用主地址段作为子网前缀
@@ -858,10 +984,10 @@ net = ipaddress.IPv6Network(f'{addr}/{host_prefix}', strict=False)
 print(str(net))
 PYEOF
 )"
-            log "$(t "✓ IPv6 subnet detected (/$IPV6_PREFIX): $IPV6_SUBNET, VMs will get independent addresses." "✓ 检测到 IPv6 子网 (/$IPV6_PREFIX): $IPV6_SUBNET，VM 将获得独立地址。")"
+            log "$(t "✓ IPv6 subnet detected (/$_DET_PREFIX): $IPV6_SUBNET, VMs will get independent addresses." "✓ 检测到 IPv6 子网 (/$_DET_PREFIX): $IPV6_SUBNET，VM 将获得独立地址。")"
         else
             # 前缀 > 127，不支持（理论不存在）
-            log "$(t "✗ Invalid IPv6 prefix: /$IPV6_PREFIX (must be <= 127)" "✗ 无效的 IPv6 前缀: /$IPV6_PREFIX（必须 <= 127）")"
+            log "$(t "✗ Invalid IPv6 prefix: /$_DET_PREFIX (must be <= 127)" "✗ 无效的 IPv6 前缀: /$_DET_PREFIX（必须 <= 127）")"
             IPV6_MODE="none"
         fi
         
@@ -1055,105 +1181,10 @@ start_service "$AGENT_SERVICE"
 
 # ── Optional rfw ─────────────────────────────────────────────────────────────
 
-read -rp "$(t "Install rfw firewall? [Y/n]: " "是否安装 rfw 防火墙? [Y/n]: ")" _rfw
-if [[ "${_rfw:-Y}" =~ ^[Yy]$ ]]; then
-    mkdir -p "$RFW_BIN_DIR"
-    RFW_ARCH=$(detect_arch)
-
-    # 调试模式：检查本地文件
-    if [ -f "./rfw-$RFW_ARCH" ]; then
-        log "$(t "Found local rfw binary: ./rfw-$RFW_ARCH (debug mode)" "找到本地 rfw 二进制: ./rfw-$RFW_ARCH (调试模式)")"
-        cp "./rfw-$RFW_ARCH" "$RFW_BIN_DIR/rfw"
-        chmod +x "$RFW_BIN_DIR/rfw"
-    elif [ ! -f "$RFW_BIN_DIR/rfw" ]; then
-        download_with_retry "$RFW_BASE/rfw-$RFW_ARCH" "$RFW_BIN_DIR/rfw"
-        chmod +x "$RFW_BIN_DIR/rfw"
-    else
-        log "$(t "rfw already exists, skipping download." "rfw 已存在，跳过下载。")"
-    fi
-
-    if [ ! -f "/etc/systemd/system/rfw.service" ]; then
-        # 过滤掉 lo 及虚拟网桥
-        mapfile -t interfaces < <(ip -o link show | awk -F': ' '{print $2}' \
-            | grep -v "^lo$" | grep -v "^narwhal-net$" | grep -v "^incusbr0$" \
-            | grep -v "^podman" | grep -v "@")
-
-        if [ ${#interfaces[@]} -eq 0 ]; then
-            log "$(t "Error: no available WAN interfaces found." "错误: 未找到可用的 WAN 网卡。")"
-        elif [ ${#interfaces[@]} -eq 1 ]; then
-            SEL_IFACE="${interfaces[0]}"
-            log "$(t "Only one WAN interface found, using: $SEL_IFACE" "只找到一个 WAN 网卡，使用: $SEL_IFACE")"
-        else
-            echo "$(t "Available WAN interfaces:" "可用 WAN 网卡：")"
-            for i in "${!interfaces[@]}"; do echo "  $((i+1)). ${interfaces[$i]}"; done
-            while true; do
-                read -rp "$(t "Select interface number (1-${#interfaces[@]}): " "请选择网卡编号 (1-${#interfaces[@]}): ")" choice
-                [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#interfaces[@]}" ] && break
-                echo "$(t "Invalid choice, please try again." "无效选择，请重新输入。")"
-            done
-            SEL_IFACE="${interfaces[$((choice-1))]}"
-            log "$(t "Selected interface: $SEL_IFACE" "选择网卡: $SEL_IFACE")"
-        fi
-
-        cat > /etc/systemd/system/rfw.service <<EOF
-[Unit]
-Description=RFW eBPF Firewall
-After=network.target
-
-[Service]
-Type=simple
-User=root
-Environment=RUST_LOG=info
-WorkingDirectory=$RFW_BIN_DIR
-ExecStart=$RFW_BIN_DIR/rfw --iface $SEL_IFACE --api-addr $RFW_API_ADDR
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-        systemctl daemon-reload
-        log "$(t "✓ rfw service file written. API listens on $RFW_API_ADDR (local only)." "✓ rfw 服务文件已写入，API 监听 $RFW_API_ADDR（仅本地）。")"
-    else
-        log "$(t "rfw service already exists, skipping." "rfw 服务已存在，跳过。")"
-    fi
-    start_service rfw
-
-    # Wait for rfw API to become ready (up to 10s)
-    _rfw_ready=0
-    for _i in 1 2 3 4 5 6 7 8 9 10; do
-        curl -sf "http://$RFW_API_ADDR/api/rules" >/dev/null 2>&1 && { _rfw_ready=1; break; }
-        sleep 1
-    done
-
-    if [ "$_rfw_ready" = "1" ]; then
-        log "$(t "Installing default rfw rules..." "安装默认 rfw 规则...")"
-        _geoip_countries='["CN","RU","IR","TM","TR","BY","VN"]'
-
-        # Block inbound http/socks5/fet from high-risk regions
-        for _proto in http socks5 fet; do
-            curl -sf -X POST "http://$RFW_API_ADDR/api/rules" \
-                -H "Content-Type: application/json" \
-                -d "{\"priority\":100,\"direction\":\"in\",\"protocol\":\"$_proto\",\"action\":\"block\",\"port_start\":0,\"enabled\":true,\"ip_type\":\"geoip\",\"countries\":$_geoip_countries}" \
-                >/dev/null && log "$(t "✓ Default rule added: block inbound $_proto from geoip." "✓ 已添加默认规则：阻断来自 GeoIP 的入站 $_proto。")"
-        done
-
-        # Block outbound SMTP ports (anti-spam)
-        for _port in 25 465 587; do
-            curl -sf -X POST "http://$RFW_API_ADDR/api/rules" \
-                -H "Content-Type: application/json" \
-                -d "{\"priority\":100,\"direction\":\"out\",\"protocol\":\"tcp\",\"action\":\"block\",\"port_start\":$_port,\"enabled\":true,\"ip_type\":\"any\"}" \
-                >/dev/null && log "$(t "✓ Default rule added: block outbound tcp/$_port." "✓ 已添加默认规则：阻断出站 tcp/$_port。")"
-        done
-
-        log "$(t "✓ Default rfw rules installed." "✓ 默认 rfw 规则已安装。")"
-    else
-        log "$(t "Warning: rfw API not ready, skipping default rules." "警告：rfw API 未就绪，跳过默认规则安装。")"
-    fi
-
-    log "$(t "✓ rfw firewall installed. Manage rules via the agent web panel → Firewall tab." "✓ rfw 防火墙已安装。通过 agent 面板 → Firewall 标签管理规则。")"
+if [ "$INSTALL_RFW_FORCE" = "1" ]; then
+    install_rfw 1
 else
-    log "$(t "Skipping rfw installation." "跳过 rfw 安装。")"
+    install_rfw 0
 fi
 
 # ── Done ──────────────────────────────────────────────────────────────────────

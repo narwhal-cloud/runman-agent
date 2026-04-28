@@ -81,9 +81,28 @@ type Agent struct {
 
 func main() {
 	configPath := flag.String("config", "/opt/narwhal-agent/config.json", "path to config file")
+	resetPwd := flag.String("reset-password", "", "reset web panel password")
 	flag.Parse()
 	log.SetOutput(os.Stdout)
 	log.Printf("narwhal cloud-agent %s", version)
+
+	// 如果指定了重置密码，更新配置并退出
+	if *resetPwd != "" {
+		cfg, err := config.Load(*configPath)
+		if err != nil {
+			log.Fatalf("load config: %v", err)
+		}
+		err = cfg.Update(func(c *config.Config) {
+			c.WebPassHash = *resetPwd // config.Load 会在下次启动或本次保存时处理加密（或者我们直接在此处理）
+		})
+		if err != nil {
+			log.Fatalf("update password: %v", err)
+		}
+		// 再次 Load 以触发 config.go 中的自动加密逻辑并写回
+		_, _ = config.Load(*configPath)
+		fmt.Println("Password updated successfully.")
+		return
+	}
 
 	// 从配置文件加载所有配置
 	cfg, err := config.Load(*configPath)
