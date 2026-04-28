@@ -144,8 +144,9 @@ systemctl restart narwhal-agent
 # Check rfw firewall status
 systemctl status rfw
 
-# Reset web panel password
+# Reset web panel password (requires restart)
 /opt/narwhal-agent/narwhal-agent -reset-password NEW_PASSWORD
+systemctl restart narwhal-agent
 ```
 
 ### Key Configuration Fields
@@ -319,8 +320,9 @@ systemctl restart narwhal-agent
 # 查看 rfw 防火墙状态
 systemctl status rfw
 
-# 重置面板密码
+# 重置面板密码（需重启生效）
 /opt/narwhal-agent/narwhal-agent -reset-password 新密码
+systemctl restart narwhal-agent
 ```
 
 ### 关键配置字段
