@@ -575,36 +575,34 @@ write_files:
       VMID="%s"
  
       while true; do
-        MEM_USED=$(free -m 2>/dev/null | awk 'NR==2 {print $3}' || echo 0)
-        MEM_TOTAL=$(free -m 2>/dev/null | awk 'NR==2 {print $2}' || echo 0)
- 
-        stat1=$(cat /proc/stat 2>/dev/null | head -n1)
+        MEM_USED=$(free -m | awk 'NR==2 {print $3}')
+        MEM_TOTAL=$(free -m | awk 'NR==2 {print $2}')
+
+        read -r cpu user nice system idle iowait irq softirq steal guest guest_nice < /proc/stat
+        t1=$((user+nice+system+idle+iowait+irq+softirq+steal))
+        i1=$((idle+iowait))
+
         sleep 1
-        stat2=$(cat /proc/stat 2>/dev/null | head -n1)
- 
-        set -- $stat1
-        u1=$2; n1=$3; s1=$4; i1=$5
-        set -- $stat2
-        u2=$2; n2=$3; s2=$4; i2=$5
- 
-        ud=$((u2 - u1))
-        nd=$((n2 - n1))
-        sd=$((s2 - s1))
-        id=$((i2 - i1))
-        total=$((ud + nd + sd + id))
- 
-        if [ "$total" -le 0 ]; then
+
+        read -r cpu user nice system idle iowait irq softirq steal guest guest_nice < /proc/stat
+        t2=$((user+nice+system+idle+iowait+irq+softirq+steal))
+        i2=$((idle+iowait))
+
+        diff_t=$((t2-t1))
+        diff_i=$((i2-i1))
+
+        if [ "$diff_t" -le 0 ]; then
           CPU_PERCENT=0
         else
-          used=$((ud + nd + sd))
-          CPU_PERCENT=$((used * 100 / total))
+          CPU_PERCENT=$(((diff_t - diff_i) * 100 / diff_t))
         fi
- 
-        if [ "$MEM_USED" -gt 0 ] && [ "$MEM_TOTAL" -gt 0 ]; then
-          curl -s -X POST http://10.91.0.1:8792/api/vm-status \
-            -H "Content-Type: application/json" \
-            -d "{\"vm_id\":\"$VMID\",\"cpu_percent\":$CPU_PERCENT,\"ram_used_mb\":$MEM_USED,\"ram_total_mb\":$MEM_TOTAL}" > /dev/null 2>&1
-        fi
+
+        PAYLOAD="{\"vm_id\":\"$VMID\",\"cpu_percent\":$CPU_PERCENT,\"ram_used_mb\":$MEM_USED,\"ram_total_mb\":$MEM_TOTAL}"
+        echo "Sending: $PAYLOAD"
+
+        curl -s -o /dev/null -X POST http://10.91.0.1:8792/api/vm-status \
+          -H "Content-Type: application/json" -d "$PAYLOAD"
+
         sleep 30
       done
     permissions: '0755'
