@@ -249,6 +249,7 @@ kernel.pid_max=4194304
 fs.file-max=2097152
 fs.nr_open=2097152
 vm.swappiness=100
+net.ipv6.conf.all.use_tempaddr=0
 EOF
     sysctl -p /etc/sysctl.d/99-narwhalcloud.conf >/dev/null 2>&1 \
         && log "$(t "✓ BBR configured." "✓ BBR 已配置。")" \
