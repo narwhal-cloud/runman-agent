@@ -74,11 +74,13 @@ The installer is interactive. It will ask you:
 
 The installer auto-detects your server's IPv6 configuration and selects the appropriate mode:
 
-| Mode     | Condition             | Behavior                                                  |
-|----------|-----------------------|-----------------------------------------------------------|
-| `none`   | No public IPv6        | IPv4 only                                                 |
-| `snat`   | Single `/128` address | Containers/VMs share host IPv6 via SNAT/masquerade        |
-| `subnet` | Prefix ≤ `/127`       | Each container/VM gets an independent public IPv6 address |
+| Mode     | Condition                        | Behavior                                                  |
+|----------|----------------------------------|-----------------------------------------------------------|
+| `none`   | No public IPv6                   | IPv4 only                                                 |
+| `snat`   | Single `/128`, or prefix `/65`–`/127` | Containers/VMs share host IPv6 via SNAT/masquerade   |
+| `subnet` | Prefix ≤ `/64` (at least a `/64`) | Each container/VM gets an independent public IPv6 address |
+
+> **Subnet mode requires at least a `/64` block.** Prefixes `/65`–`/127` do not provide enough address space to allocate individual addresses to containers/VMs and automatically fall back to SNAT mode.
 
 You can override the mode and network parameters by setting environment variables before running the script:
 
@@ -250,11 +252,13 @@ bash <(curl -fsSL https://github.com/narwhal-cloud/runman-agent/releases/latest/
 
 安装脚本会自动检测服务器的 IPv6 配置并选择合适的模式：
 
-| 模式       | 触发条件         | 行为                                  |
-|----------|--------------|-------------------------------------|
-| `none`   | 无公网 IPv6     | 仅 IPv4                              |
-| `snat`   | 单个 `/128` 地址 | 容器/VM 通过 SNAT/MASQUERADE 共享宿主机 IPv6 |
-| `subnet` | 前缀 ≤ `/127`  | 每个容器/VM 获得独立的公网 IPv6 地址             |
+| 模式       | 触发条件                          | 行为                                  |
+|----------|-------------------------------|-------------------------------------|
+| `none`   | 无公网 IPv6                      | 仅 IPv4                              |
+| `snat`   | 单个 `/128` 地址，或前缀 `/65`–`/127` | 容器/VM 通过 SNAT/MASQUERADE 共享宿主机 IPv6 |
+| `subnet` | 前缀 ≤ `/64`（至少 `/64` 子网）       | 每个容器/VM 获得独立的公网 IPv6 地址             |
+
+> **子网模式要求至少分配到 `/64` 段。** 前缀 `/65`–`/127` 地址空间不足以为每个容器/VM 分配独立地址，会自动回退到 SNAT 模式。
 
 也可通过环境变量强制指定模式及网络参数：
 

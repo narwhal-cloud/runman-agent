@@ -1,5 +1,6 @@
 #!/bin/bash
 set -e
+export DEBIAN_FRONTEND=noninteractive
 
 # ────────────────────────────────────────────────────────────────────────────────
 # NarwhalCloud Agent install / update script
@@ -27,6 +28,7 @@ RFW_BASE="$DOWNLOAD_BASE"
 t() { [ "$LANG_CODE" = "zh" ] && echo "$2" || echo "$1"; }
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"; }
+die() { log "$1" >&2; exit 1; }
 
 # ── Language selection ────────────────────────────────────────────────────────
 
@@ -149,11 +151,24 @@ ipv6_plus_one() {
 # Returns "none" or "IFACE|ADDR|PREFIX"
 detect_and_configure_ipv6() {
     log "$(t "Detecting public IPv6..." "开始检测公网 IPv6...")" >&2
-    if ! curl -6 -s --max-time 10 ip.sb >/dev/null 2>&1; then
-        log "$(t "No public IPv6 detected." "未检测到公网 IPv6。")" >&2
-        echo "none"; return 0
+    # 多厂商：ip.sb 在境内或某些时段不可达，依次尝试多个公共端点；
+    # 全部失败但默认路由存在时，仍按"内部 IPv6 可用"继续，避免误判。
+    local connected=0 endpoint
+    for endpoint in ip.sb ipv6.icanhazip.com www.cloudflare.com www.google.com; do
+        if curl -6 -s --max-time 5 "$endpoint" >/dev/null 2>&1; then
+            connected=1; break
+        fi
+    done
+    if [ "$connected" = "0" ]; then
+        if ip -6 route show default 2>/dev/null | grep -q .; then
+            log "$(t "External IPv6 probe failed but default route exists, continuing." "公网 IPv6 探测失败但存在默认路由，继续配置。")" >&2
+        else
+            log "$(t "No public IPv6 detected." "未检测到公网 IPv6。")" >&2
+            echo "none"; return 0
+        fi
+    else
+        log "$(t "✓ Public IPv6 available." "✓ 公网 IPv6 可用。")" >&2
     fi
-    log "$(t "✓ Public IPv6 available." "✓ 公网 IPv6 可用。")" >&2
 
     local iface
     iface=$(ip -6 route show default 2>/dev/null | head -1 | awk '{print $5}')
@@ -205,40 +220,26 @@ detect_and_configure_ipv6() {
     prefix_len=$(echo "$ipv6_full" | cut -d'/' -f2)
     log "$(t "IPv6 address: $ipv6_addr/$prefix_len" "IPv6 地址: $ipv6_addr/$prefix_len")" >&2
 
-    # 对于 /64 或更大的子网，直接接受（无需测试新地址，因为 BGP 学习延迟可能导致测试失败）
-    # 对于 /128 单地址，直接接受（SNAT 模式）
-    # 只对 /65-/127 的小子网进行可达性测试
-    if [ "$prefix_len" -le 64 ] || [ "$prefix_len" -eq 128 ]; then
-        log "$(t "✓ Public IPv6 address detected (/$prefix_len)." "✓ 检测到公网 IPv6 地址 (/$prefix_len)。")" >&2
+    # subnet 模式要求前缀 ≤ /64（至少 /64 才有足够地址空间分配给容器/VM）
+    # /65-/127 前缀过小，无法分配独立地址，回退到 SNAT
+    # /128 单地址，SNAT 模式
+    if [ "$prefix_len" -le 64 ]; then
+        log "$(t "✓ Public IPv6 subnet detected (/$prefix_len), subnet mode available." "✓ 检测到公网 IPv6 子网 (/$prefix_len)，可使用子网模式。")" >&2
         echo "$iface|$ipv6_addr|$prefix_len"
-    elif [ "$prefix_len" -gt 64 ] && [ "$prefix_len" -lt 128 ]; then
-        # 测试 /65-/127 的小子网
-        local test_addr
-        test_addr=$(ipv6_plus_one "$ipv6_addr")
-        ip addr add "$test_addr/$prefix_len" dev "$iface" 2>/dev/null || {
-            log "$(t "Cannot add test address, falling back to SNAT." "无法添加测试地址，回退到 SNAT 模式。")" >&2
-            echo "$iface|$ipv6_addr|128"; return 0
-        }
-        sleep 3
-        local ok=0
-        curl -6 --interface "$test_addr" -s --max-time 10 ip.sb >/dev/null 2>&1 && ok=1
-        ip addr del "$test_addr/$prefix_len" dev "$iface" 2>/dev/null
-
-        if [ $ok -eq 1 ]; then
-            log "$(t "✓ Public IPv6 test passed." "✓ 公网 IPv6 测试成功。")" >&2
-            echo "$iface|$ipv6_addr|$prefix_len"
-        else
-            # 子网不可用，但宿主机 IPv6 连通（curl -6 已在函数开头通过），回退到 SNAT
-            log "$(t "Subnet not usable, falling back to SNAT via host address." "子网不可用，回退到宿主机地址 SNAT 模式。")" >&2
-            echo "$iface|$ipv6_addr|128"
-        fi
+    elif [ "$prefix_len" -eq 128 ]; then
+        log "$(t "✓ Public IPv6 single address (/128) detected, SNAT mode." "✓ 检测到公网 IPv6 单地址 (/128)，使用 SNAT 模式。")" >&2
+        echo "$iface|$ipv6_addr|128"
     else
-        echo "none"; return 0
+        # /65-/127：前缀不足以划分子网，回退到 SNAT
+        log "$(t "IPv6 prefix /$prefix_len is too small for subnet mode (need ≤/64), falling back to SNAT." "IPv6 前缀 /$prefix_len 不足以用于子网模式（需 ≤/64），回退到 SNAT 模式。")" >&2
+        echo "$iface|$ipv6_addr|128"
     fi
 }
 
 enable_bbr() {
-    log "$(t "Configuring BBR..." "配置 BBR...")"
+    log "$(t "Configuring kernel parameters (BBR + forwarding)..." "配置内核参数 (BBR + 转发)...")"
+    # 多厂商兼容：DO/Hetzner/部分 VPS 默认 ip_forward=0、IPv6 forwarding=0，
+    # 容器/VM 出网会失败；启用 forwarding 后 IPv6 RA 默认会被拒，accept_ra=2 才能保留默认路由。
     cat > /etc/sysctl.d/99-narwhalcloud.conf <<'EOF'
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
@@ -249,11 +250,17 @@ kernel.pid_max=4194304
 fs.file-max=2097152
 fs.nr_open=2097152
 vm.swappiness=100
+net.ipv4.ip_forward=1
+net.ipv6.conf.all.forwarding=1
+net.ipv6.conf.default.forwarding=1
+net.ipv6.conf.all.accept_ra=2
+net.ipv6.conf.default.accept_ra=2
 net.ipv6.conf.all.use_tempaddr=0
+net.ipv6.conf.default.use_tempaddr=0
 EOF
     sysctl -p /etc/sysctl.d/99-narwhalcloud.conf >/dev/null 2>&1 \
-        && log "$(t "✓ BBR configured." "✓ BBR 已配置。")" \
-        || log "$(t "BBR will take effect after reboot." "BBR 将在重启后生效。")"
+        && log "$(t "✓ Kernel parameters configured." "✓ 内核参数已配置。")" \
+        || log "$(t "Kernel parameters will take effect after reboot." "内核参数将在重启后生效。")"
 }
 
 create_xfs_disk() {
@@ -516,9 +523,12 @@ if systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null || [ -f "$AGENT_BINA
     log "$(t "Existing NarwhalCloud Agent detected, updating..." "检测到已安装的 NarwhalCloud Agent，执行更新流程...")"
 
     ARCH=$(detect_arch)
-    if [ -f "/usr/bin/podman" ]; then
+    if command -v podman &>/dev/null; then
         check_podman_version
     fi
+
+    # 重新应用 sysctl，确保旧安装升级后也获得最新内核参数（forwarding/accept_ra 等）
+    enable_bbr
 
     download_agent "$ARCH"
 
@@ -873,6 +883,10 @@ configure_host_ipv6_routing() {
     # 先禁止 SLAAC 自动配置，防止后续再生成 /64 地址（保留 RA 默认路由）
     sysctl -w "net.ipv6.conf.$iface.autoconf=0" > /dev/null
     echo "net.ipv6.conf.$iface.autoconf=0" >> /etc/sysctl.d/99-narwhalcloud.conf
+    # forwarding=1 后必须 accept_ra=2 才会接收 RA（多厂商：systemd-networkd 会按
+    # iface 单独设置 accept_ra=1，会覆盖 all 设置，故此处显式按 iface 强制为 2）
+    sysctl -w "net.ipv6.conf.$iface.accept_ra=2" > /dev/null
+    echo "net.ipv6.conf.$iface.accept_ra=2" >> /etc/sysctl.d/99-narwhalcloud.conf
     
     # 获取当前的默认 IPv6 网关
     local _gw6
@@ -904,113 +918,126 @@ configure_host_ipv6_routing() {
 _USER_IPV6_MODE="${IPV6_MODE:-}"
 IPV6_MODE="none"
 
-read -rp "$(t "Enable public IPv6 detection? [Y/n]: " "是否进行公网 IPv6 检测? [Y/n]: ")" _ipv6
 IPV6_CONFIG="none"
 
-if [[ "${_ipv6:-Y}" =~ ^[Yy]$ ]]; then
+if [ "$_USER_IPV6_MODE" = "none" ]; then
+    log "$(t "IPv6 mode pre-set to 'none', skipping detection." "IPv6 模式已预设为 'none'，跳过 IPv6 检测。")"
+elif [ "$_USER_IPV6_MODE" = "snat" ]; then
+    log "$(t "IPv6 mode pre-set to 'snat', skipping detection." "IPv6 模式已预设为 'snat'，跳过 IPv6 检测。")"
+elif [ -n "$_USER_IPV6_MODE" ] && [ -n "${IPV6_ADDR:-}" ] && [ -n "${IPV6_SUBNET:-}" ]; then
+    # 用户提供了完整的自定义配置（模式 + 地址 + 子网），跳过检测
+    log "$(t "Custom IPv6 config provided (mode=$_USER_IPV6_MODE addr=$IPV6_ADDR subnet=$IPV6_SUBNET), skipping detection." \
+        "已提供自定义 IPv6 配置 (mode=$_USER_IPV6_MODE addr=$IPV6_ADDR subnet=$IPV6_SUBNET)，跳过检测。")"
+elif [ -n "$_USER_IPV6_MODE" ]; then
+    log "$(t "IPv6 mode pre-set to '$_USER_IPV6_MODE', auto-detecting IPv6..." "IPv6 模式已预设为 '$_USER_IPV6_MODE'，自动检测 IPv6...")"
     IPV6_CONFIG=$(detect_and_configure_ipv6)
-    if [ "$IPV6_CONFIG" = "none" ]; then
-        read -rp "$(t "No IPv6 connectivity detected. Continue without IPv6? [Y/n]: " "未检测到 IPv6 连通性，是否不配置 IPv6 继续? [Y/n]: ")" _fb
-        [[ "${_fb:-Y}" =~ ^[Nn]$ ]] && { log "$(t "Aborted." "已退出。")"; exit 1; }
+else
+    read -rp "$(t "Enable public IPv6 detection? [Y/n]: " "是否进行公网 IPv6 检测? [Y/n]: ")" _ipv6
+    if [[ "${_ipv6:-Y}" =~ ^[Yy]$ ]]; then
+        IPV6_CONFIG=$(detect_and_configure_ipv6)
+        if [ "$IPV6_CONFIG" = "none" ]; then
+            read -rp "$(t "No IPv6 connectivity detected. Continue without IPv6? [Y/n]: " "未检测到 IPv6 连通性，是否不配置 IPv6 继续? [Y/n]: ")" _fb
+            [[ "${_fb:-Y}" =~ ^[Nn]$ ]] && { log "$(t "Aborted." "已退出。")"; exit 1; }
+        fi
     fi
 fi
+
+# ── IPv6 变量规范化（合并检测结果与用户 env var，统一供后续虚拟化分支使用）────────
+# 优先使用用户通过 env var 显式提供的值，检测结果作为回退
+IPV6_ADDR="${IPV6_ADDR:-}"
+IPV6_SUBNET="${IPV6_SUBNET:-}"
+IPV6_IFACE="${IPV6_IFACE:-}"
+IPV6_PREFIX=""
+
+if [ "$IPV6_CONFIG" != "none" ]; then
+    # 从检测结果填充（env var 已有值时不覆盖）
+    [ -z "$IPV6_IFACE" ] && IPV6_IFACE=$(echo "$IPV6_CONFIG" | cut -d'|' -f1)
+    [ -z "$IPV6_ADDR"  ] && IPV6_ADDR=$(echo  "$IPV6_CONFIG" | cut -d'|' -f2)
+    IPV6_PREFIX=$(echo "$IPV6_CONFIG" | cut -d'|' -f3)
+fi
+
+# 从 IPV6_SUBNET 提取前缀长度（当检测未运行或用户自定义子网时）
+if [ -z "$IPV6_PREFIX" ] && [ -n "$IPV6_SUBNET" ]; then
+    IPV6_PREFIX=$(echo "$IPV6_SUBNET" | cut -d'/' -f2)
+fi
+
+# IPV6_IFACE 未知时，从默认路由自动推断
+if [ -z "$IPV6_IFACE" ] && [ -n "$IPV6_ADDR" ]; then
+    IPV6_IFACE=$(ip -6 route show default 2>/dev/null | head -1 | awk '{print $5}')
+fi
+
+# 决定最终 IPv6 模式（用户显式指定优先，否则按前缀自动判断）
+if [ -n "$_USER_IPV6_MODE" ]; then
+    IPV6_MODE="$_USER_IPV6_MODE"
+elif [ -n "$IPV6_PREFIX" ] && [ "$IPV6_PREFIX" -le 64 ]; then
+    IPV6_MODE="subnet"
+    # 未提供 IPV6_SUBNET 时，从 addr/prefix 计算
+    if [ -z "$IPV6_SUBNET" ]; then
+        IPV6_SUBNET=$(python3 -c "
+import ipaddress
+net = ipaddress.IPv6Network('$IPV6_ADDR/$IPV6_PREFIX', strict=False)
+print(str(net))" 2>/dev/null)
+    fi
+elif [ -n "$IPV6_PREFIX" ]; then
+    IPV6_MODE="snat"
+fi
+# IPV6_PREFIX 为空（无任何 IPv6）时 IPV6_MODE 保持 "none"
+
+# 健壮性校验：subnet 模式必须有可用子网信息，否则降级
+if [ "$IPV6_MODE" = "subnet" ] && [ -z "$IPV6_SUBNET" ]; then
+    if [ -n "$IPV6_ADDR" ]; then
+        log "$(t "Warning: subnet mode requested but no subnet info detected, falling back to SNAT." \
+            "警告: 请求 subnet 模式但未检测到可用子网信息，降级到 SNAT。")"
+        IPV6_MODE="snat"
+    else
+        log "$(t "Warning: subnet mode requested but no IPv6 detected, falling back to 'none'." \
+            "警告: 请求 subnet 模式但未检测到 IPv6，降级到 'none'。")"
+        IPV6_MODE="none"
+    fi
+fi
+
+[ -n "$IPV6_ADDR" ] && log "$(t "IPv6: mode=$IPV6_MODE addr=$IPV6_ADDR prefix=${IPV6_PREFIX:--} iface=${IPV6_IFACE:--}" \
+    "IPv6: 模式=$IPV6_MODE 地址=$IPV6_ADDR 前缀=${IPV6_PREFIX:--} 网卡=${IPV6_IFACE:--}")"
 
 # ── Network setup (conditional on virtualization type) ────────────────────────
 
 if [ "$VIRT_TYPE" = "cloudhv" ] || [ "$VIRT_TYPE" = "incus" ]; then
-    # Cloud-hypervisor / Incus: IPv6 detection and configuration
+    # IPv6 变量已由规范化块统一解析，此处直接使用
     log "$(t "Setting up $VIRT_TYPE network..." "配置 $VIRT_TYPE 网络...")"
-    
+
     if [ "$VIRT_TYPE" = "cloudhv" ]; then
         mkdir -p /opt/vm-images/instances /run/cloud-hypervisor
     fi
 
-    # 检测 IPv6 可分配情况（支持任意前缀）
-    # 如果用户通过环境变量指定了配置，则优先使用
-    IPV6_SUBNET="${IPV6_SUBNET:-}"
-    IPV6_ADDR="${IPV6_ADDR:-}"
-    IPV6_IFACE="${IPV6_IFACE:-}"
-
-    # 无公网 IPv6 时保持 IPV6_MODE="none"，不配置 IPv6
-    if [ "$IPV6_CONFIG" = "none" ] && [ -z "$IPV6_ADDR" ]; then
+    if [ "$IPV6_MODE" = "none" ]; then
         log "$(t "No public IPv6, IPv6 will not be configured." "无公网 IPv6，将不配置 IPv6。")"
-    fi
-
-    # 尝试获取可分配的 IPv6 子网或地址
-    if [ "$IPV6_CONFIG" != "none" ] || [ -n "$IPV6_ADDR" ]; then
-        if [ "$IPV6_CONFIG" != "none" ]; then
-            _DET_IFACE=$(echo "$IPV6_CONFIG" | cut -d'|' -f1)
-            _DET_ADDR=$(echo "$IPV6_CONFIG" | cut -d'|' -f2)
-            _DET_PREFIX=$(echo "$IPV6_CONFIG" | cut -d'|' -f3)
-
-            [ -z "$IPV6_IFACE" ] && IPV6_IFACE="$_DET_IFACE"
-            [ -z "$IPV6_ADDR" ] && IPV6_ADDR="$_DET_ADDR"
-        else
-            _DET_PREFIX="128" # 默认 fallback
-        fi
-
-        # 支持的前缀范围：/127 或更小（即使是 /64 也支持）
-        # 分配策略：
-        #   - 用户指定 IPV6_MODE=snat：SNAT 模式（VM 用私有 ULA，宿主机做 MASQUERADE）
-        #   - 用户指定 IPV6_MODE=subnet：subnet 模式（VM 各自获得独立地址）
-        #   - 自动检测：
-        #     - /128：使用 SNAT 模式
-        #     - <= 127：使用 subnet 模式
-        if [ -n "${_USER_IPV6_MODE}" ]; then
-            # 用户通过环境变量显式指定了模式
-            IPV6_MODE="$_USER_IPV6_MODE"
-            log "$(t "✓ IPv6 mode explicitly set to: $IPV6_MODE" "✓ IPv6 模式已指定为: $IPV6_MODE")"
-        elif [ -n "$IPV6_SUBNET" ]; then
-            IPV6_MODE="subnet"
-            log "$(t "✓ IPv6 subnet explicitly set to: $IPV6_SUBNET" "✓ IPv6 子网已指定为: $IPV6_SUBNET")"
-        elif [ "$_DET_PREFIX" = "128" ]; then
-            IPV6_MODE="snat"
-            log "$(t "✓ IPv6 single address detected (/$_DET_PREFIX): $IPV6_ADDR, using SNAT mode." "✓ 检测到 IPv6 单地址 (/$_DET_PREFIX): $IPV6_ADDR，使用 SNAT 模式。")"
-        elif [ "$_DET_PREFIX" -le 127 ]; then
-            IPV6_MODE="subnet"
-            # 计算可分配子网：使用宿主机地址作为基准
-            # 例如：如果宿主机是 2001:db8::/64，则 VM 从 2001:db8::/64 中的 ::2, ::3... 分配
-            # 如果宿主机是 2001:db8:1:2::/127，则 VM 用对端地址
-
-            # Python3 计算可分配子网（Debian 13 标配）
-            read -r IPV6_SUBNET <<< "$(python3 - <<PYEOF
-import ipaddress
-host_prefix = int('$_DET_PREFIX')
-# 可分配的最小单位是 /128（单个地址）
-# 为了支持多 VM，我们分配 /127 或 /128 级别的地址
-# 简化：直接用主地址段作为子网前缀
-addr = ipaddress.IPv6Address('$IPV6_ADDR')
-net = ipaddress.IPv6Network(f'{addr}/{host_prefix}', strict=False)
-# 返回网络地址（用作 VMs 分配的基准）
-print(str(net))
-PYEOF
-)"
-            log "$(t "✓ IPv6 subnet detected (/$_DET_PREFIX): $IPV6_SUBNET, VMs will get independent addresses." "✓ 检测到 IPv6 子网 (/$_DET_PREFIX): $IPV6_SUBNET，VM 将获得独立地址。")"
-        else
-            # 前缀 > 127，不支持（理论不存在）
-            log "$(t "✗ Invalid IPv6 prefix: /$_DET_PREFIX (must be <= 127)" "✗ 无效的 IPv6 前缀: /$_DET_PREFIX（必须 <= 127）")"
-            IPV6_MODE="none"
-        fi
-        
-        if [ "$IPV6_MODE" = "subnet" ]; then
+    elif [ "$IPV6_MODE" = "subnet" ]; then
+        if [ -n "$IPV6_IFACE" ] && [ -n "$IPV6_ADDR" ]; then
             configure_host_ipv6_routing "$IPV6_IFACE" "$IPV6_ADDR"
         fi
+        log "$(t "✓ IPv6 subnet mode: $IPV6_SUBNET, VMs will get independent addresses." "✓ IPv6 子网模式: $IPV6_SUBNET，VM 将获得独立地址。")"
+    elif [ "$IPV6_MODE" = "snat" ]; then
+        log "$(t "✓ IPv6 SNAT mode: VMs share host IPv6 via masquerade." "✓ IPv6 SNAT 模式：VM 通过宿主机 MASQUERADE 共享 IPv6。")"
     fi
 
     # Bridge creation will be handled by the agent's ensureBridge() on startup
-    log "$(t "✓ $VIRT_TYPE directories and basic network logic configured." "✓ $VIRT_TYPE 目录及基础网络逻辑配置完成。")"
+    log "$(t "✓ $VIRT_TYPE network configured." "✓ $VIRT_TYPE 网络配置完成。")"
 
-    # NDP responder 配置保存到 config.json，将在后面统一生成
     if [ "$IPV6_MODE" = "subnet" ] && [ -n "$IPV6_SUBNET" ] && [ -n "$IPV6_IFACE" ]; then
         log "$(t "✓ NDP responder will be enabled for IPv6 subnet mode." "✓ NDP 响应器将在 IPv6 子网模式下启用。")"
     fi
 elif [ "$VIRT_TYPE" = "podman" ]; then
-    # Podman: create Podman network
+    # 先安装自定义 netavark（支持 snat_ipv6 选项），再操作网络
+    if download_with_retry "$NETAVARK_BASE/netavark-new-$ARCH" "/usr/libexec/podman/netavark"; then
+        chmod +x /usr/libexec/podman/netavark
+        log "$(t "✓ Custom netavark installed." "✓ 自定义 netavark 已安装。")"
+    else
+        log "$(t "Warning: netavark download failed, using system default." "警告: netavark 下载失败，使用系统默认版本。")"
+    fi
 
 if podman network exists "$PODMAN_NETWORK" 2>/dev/null; then
     log "$(t "Podman network $PODMAN_NETWORK already exists, skipping." "Podman 网络 $PODMAN_NETWORK 已存在，跳过创建。")"
-elif [ "$IPV6_CONFIG" = "none" ]; then
-    # IPV6_MODE 保持 "none"，不配置 IPv6
+elif [ "$IPV6_MODE" = "none" ]; then
     log "$(t "Creating Podman network (IPv4 only)..." "创建 Podman 网络（仅 IPv4）...")"
     podman network create \
         --driver=bridge \
@@ -1018,37 +1045,24 @@ elif [ "$IPV6_CONFIG" = "none" ]; then
         --gateway=10.91.0.1 \
         "$PODMAN_NETWORK"
     log "$(t "✓ Podman network created (IPv4 only, no IPv6)." "✓ Podman 网络创建完成（仅 IPv4，无 IPv6）。")"
-
-else
-    IPV6_IFACE=$(echo "$IPV6_CONFIG" | cut -d'|' -f1)
-    IPV6_ADDR=$(echo  "$IPV6_CONFIG" | cut -d'|' -f2)
-    IPV6_PREFIX=$(echo "$IPV6_CONFIG" | cut -d'|' -f3)
-    log "$(t "Public IPv6: $IPV6_ADDR/$IPV6_PREFIX on $IPV6_IFACE" "公网 IPv6: $IPV6_ADDR/$IPV6_PREFIX 网卡: $IPV6_IFACE")"
-
-    if [ "$IPV6_PREFIX" = "128" ]; then
-        # /128 是单个地址，无法划分子网给容器，回退到 ULA + SNAT 模式
-        IPV6_MODE="snat"
-        log "$(t "Public IPv6 is /128 (single address): cannot allocate public subnet, using ULA with SNAT." "公网 IPv6 为 /128（单个地址）：无法分配公网子网，使用 ULA + SNAT 模式。")"
-        podman network create \
-            --driver=bridge \
-            --subnet=10.91.0.0/20 \
-            --gateway=10.91.0.1 \
-            --ipv6 \
-            --subnet=fd91:cafe:cafe:10::/64 \
-            --gateway=fd91:cafe:cafe:10::1 \
-            "$PODMAN_NETWORK"
-        log "$(t "✓ Podman network created (ULA IPv6, SNAT via host /128)." "✓ Podman 网络创建完成（ULA IPv6，通过宿主机 /128 SNAT）。")"
-        # /128 SNAT 模式：不设 NDP，不注入 snat_ipv6=false
-    else
-        # 有公网前缀（<= /127），用 python3 计算容器子网
-        IPV6_MODE="subnet"
-        # 策略：取宿主机前缀，在其内偏移固定量得到 /112 容器段，避免与 EUI-64/隐私地址冲突
-        read -r CONTAINER_BASE CONTAINER_GW <<< "$(python3 - <<PYEOF
+elif [ "$IPV6_MODE" = "snat" ]; then
+    log "$(t "Creating Podman network (ULA IPv6, SNAT)..." "创建 Podman 网络（ULA IPv6，SNAT 模式）...")"
+    podman network create \
+        --driver=bridge \
+        --subnet=10.91.0.0/20 \
+        --gateway=10.91.0.1 \
+        --ipv6 \
+        --subnet=fd91:cafe:cafe:10::/64 \
+        --gateway=fd91:cafe:cafe:10::1 \
+        "$PODMAN_NETWORK"
+    log "$(t "✓ Podman network created (ULA IPv6, SNAT via host address)." "✓ Podman 网络创建完成（ULA IPv6，通过宿主机地址 SNAT）。")"
+elif [ "$IPV6_MODE" = "subnet" ]; then
+    # 计算容器 /112 子网：在宿主机前缀内偏移固定量，避免与 EUI-64/隐私地址冲突
+    read -r CONTAINER_BASE CONTAINER_GW <<< "$(python3 - <<PYEOF
 import ipaddress
 net = ipaddress.IPv6Network('$IPV6_ADDR/$IPV6_PREFIX', strict=False)
 base_int = int(net.network_address)
 prefix = int('$IPV6_PREFIX')
-# 在前缀内取偏移量 0xcafe（51966），放在 /112 边界上
 offset = 0xcafe << (128 - prefix - 16) if prefix <= 112 else 0
 container_int = (base_int | offset) & ~((1 << (128 - 112)) - 1)
 container_net = ipaddress.IPv6Network(f'{ipaddress.IPv6Address(container_int)}/112', strict=False)
@@ -1056,37 +1070,29 @@ gw = container_net.network_address + 1
 print(str(container_net.network_address), str(gw))
 PYEOF
 )"
-        log "$(t "Container subnet: ${CONTAINER_BASE}/112  gateway: ${CONTAINER_GW}" "容器子网: ${CONTAINER_BASE}/112  网关: ${CONTAINER_GW}")"
+    log "$(t "Container subnet: ${CONTAINER_BASE}/112  gateway: ${CONTAINER_GW}" "容器子网: ${CONTAINER_BASE}/112  网关: ${CONTAINER_GW}")"
 
+    if [ -n "$IPV6_IFACE" ] && [ -n "$IPV6_ADDR" ]; then
         configure_host_ipv6_routing "$IPV6_IFACE" "$IPV6_ADDR"
-
-        # 先安装自定义 netavark（支持 snat_ipv6 选项），再操作网络
-        if download_with_retry "$NETAVARK_BASE/netavark-new-$ARCH" "/usr/libexec/podman/netavark"; then
-            chmod +x /usr/libexec/podman/netavark
-            log "$(t "✓ Custom netavark installed." "✓ 自定义 netavark 已安装。")"
-        else
-            log "$(t "Warning: netavark download failed, using system default." "警告: netavark 下载失败，使用系统默认版本。")"
-        fi
-
-        podman network create \
-            --driver=bridge \
-            --subnet=10.91.0.0/20 --gateway=10.91.0.1 \
-            --ipv6 \
-            --subnet="${CONTAINER_BASE}/112" --gateway="$CONTAINER_GW" \
-            "$PODMAN_NETWORK"
-        # snat_ipv6=false 不能通过 CLI 传入（Podman CLI 有白名单校验），直接注入 JSON。
-        NETWORK_JSON="/etc/containers/networks/${PODMAN_NETWORK}.json"
-        jq '.options["snat_ipv6"] = "false"' "$NETWORK_JSON" > "${NETWORK_JSON}.tmp" \
-            && mv "${NETWORK_JSON}.tmp" "$NETWORK_JSON" \
-            && log "$(t "✓ snat_ipv6=false injected into network config." "✓ snat_ipv6=false 已注入网络配置。")" \
-            || log "$(t "Warning: failed to inject snat_ipv6=false." "警告: 注入 snat_ipv6=false 失败。")"
-
-        # NDP responder will be handled by NarwhalCloud Agent
-        NDP_IFACE="$IPV6_IFACE"
-        NDP_SUBNETS="${CONTAINER_BASE}/112"
-        NDP_NETWORK="$PODMAN_NETWORK"
-        log "$(t "✓ NDP responder will be handled by NarwhalCloud Agent." "✓ NDP responder 将由 NarwhalCloud Agent 内置处理。")"
     fi
+
+    podman network create \
+        --driver=bridge \
+        --subnet=10.91.0.0/20 --gateway=10.91.0.1 \
+        --ipv6 \
+        --subnet="${CONTAINER_BASE}/112" --gateway="$CONTAINER_GW" \
+        "$PODMAN_NETWORK"
+    # snat_ipv6=false 不能通过 CLI 传入（Podman CLI 有白名单校验），直接注入 JSON
+    NETWORK_JSON="/etc/containers/networks/${PODMAN_NETWORK}.json"
+    jq '.options["snat_ipv6"] = "false"' "$NETWORK_JSON" > "${NETWORK_JSON}.tmp" \
+        && mv "${NETWORK_JSON}.tmp" "$NETWORK_JSON" \
+        && log "$(t "✓ snat_ipv6=false injected into network config." "✓ snat_ipv6=false 已注入网络配置。")" \
+        || log "$(t "Warning: failed to inject snat_ipv6=false." "警告: 注入 snat_ipv6=false 失败。")"
+
+    NDP_IFACE="$IPV6_IFACE"
+    NDP_SUBNETS="${CONTAINER_BASE}/112"
+    NDP_NETWORK="$PODMAN_NETWORK"
+    log "$(t "✓ NDP responder will be handled by NarwhalCloud Agent." "✓ NDP responder 将由 NarwhalCloud Agent 内置处理。")"
 fi
 
 # Podman auto-restart service
