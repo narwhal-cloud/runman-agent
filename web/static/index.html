@@ -1641,6 +1641,22 @@ async function init() {
     $('virt-badge').textContent = 'VIRT: '+(conf.virt_type||'?').toUpperCase();
     $('disk-label').textContent = 'Disk: '+(conf.monitor_disk||'/');
 
+    // Set RAM limit based on virtualization type
+    const ramInput = $('c-ram');
+    if (conf.virt_type === 'podman') {
+        ramInput.min = 64;
+        ramInput.value = 64;
+        ramInput.defaultValue = 64;
+    } else if (conf.virt_type === 'incus') {
+        ramInput.min = 128;
+        ramInput.value = 128;
+        ramInput.defaultValue = 128;
+    } else {
+        ramInput.min = 256;
+        ramInput.value = 512;
+        ramInput.defaultValue = 512;
+    }
+
     refreshConnectionStatus(conf);
 }
 
