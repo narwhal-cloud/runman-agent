@@ -44,6 +44,18 @@ func (t *podmanTracker) contains(ip netip.Addr) bool {
 	return t.activeIPs.Contains(ip)
 }
 
+func (t *podmanTracker) allIPs() []netip.Addr {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	var ips []netip.Addr
+	for _, p := range t.activeIPs.Prefixes() {
+		if p.IsSingleIP() {
+			ips = append(ips, p.Addr())
+		}
+	}
+	return ips
+}
+
 func (t *podmanTracker) run(ctx context.Context) {
 	client, err := bindings.NewConnection(ctx, t.socketPath)
 	if err != nil {

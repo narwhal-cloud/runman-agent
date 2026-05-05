@@ -220,12 +220,32 @@ detect_and_configure_ipv6() {
     prefix_len=$(echo "$ipv6_full" | cut -d'/' -f2)
     log "$(t "IPv6 address: $ipv6_addr/$prefix_len" "IPv6 地址: $ipv6_addr/$prefix_len")" >&2
 
-    # subnet 模式要求前缀 ≤ /64（至少 /64 才有足够地址空间分配给容器/VM）
-    # /65-/127 前缀过小，无法分配独立地址，回退到 SNAT
-    # /128 单地址，SNAT 模式
+    # subnet 模式要求前缀 ≤ /64，且 ISP 必须真正允许子网内多个 IP 出站。
+    # 有些 ISP 接口显示 /64 但做了严格 uRPF，只允许分配的单个 /128 出站。
+    # /65-/127 前缀太小，/128 单地址，均使用 SNAT 模式。
     if [ "$prefix_len" -le 64 ]; then
-        log "$(t "✓ Public IPv6 subnet detected (/$prefix_len), subnet mode available." "✓ 检测到公网 IPv6 子网 (/$prefix_len)，可使用子网模式。")" >&2
-        echo "$iface|$ipv6_addr|$prefix_len"
+        # 实际连通性验证：临时添加 addr+1，测试该地址能否独立出站
+        local test_addr
+        test_addr=$(ipv6_plus_one "$ipv6_addr")
+        local subnet_ok=0
+        if [ -n "$test_addr" ]; then
+            ip addr add "$test_addr/$prefix_len" dev "$iface" 2>/dev/null && {
+                sleep 2  # 等待 DAD 完成
+                for _ep in ip.sb ipv6.icanhazip.com www.cloudflare.com; do
+                    if curl -6 --interface "$test_addr" -s --max-time 8 "$_ep" >/dev/null 2>&1; then
+                        subnet_ok=1; break
+                    fi
+                done
+                ip addr del "$test_addr/$prefix_len" dev "$iface" 2>/dev/null
+            }
+        fi
+        if [ "$subnet_ok" = "1" ]; then
+            log "$(t "✓ Subnet mode confirmed (/$prefix_len), additional IPs are routable." "✓ 子网模式验证通过 (/$prefix_len)，子网内多 IP 可独立出站。")" >&2
+            echo "$iface|$ipv6_addr|$prefix_len"
+        else
+            log "$(t "⚠ ISP blocks non-assigned source IPs (strict uRPF), falling back to SNAT mode." "⚠ ISP 严格过滤非分配源 IP（strict uRPF），回退到 SNAT 模式。")" >&2
+            echo "$iface|$ipv6_addr|128"
+        fi
     elif [ "$prefix_len" -eq 128 ]; then
         log "$(t "✓ Public IPv6 single address (/128) detected, SNAT mode." "✓ 检测到公网 IPv6 单地址 (/128)，使用 SNAT 模式。")" >&2
         echo "$iface|$ipv6_addr|128"
@@ -878,35 +898,18 @@ fi
 
 configure_host_ipv6_routing() {
     local iface="$1"
-    local addr="$2"
-    
-    # 先禁止 SLAAC 自动配置，防止后续再生成 /64 地址（保留 RA 默认路由）
+    # 只配置内核参数，不修改接口地址前缀。
+    # 保留 ISP 分配的原始前缀（/64 等）对子网模式的 uRPF 至关重要。
+
+    # 禁止 SLAAC 自动配置，防止内核生成额外的临时地址
     sysctl -w "net.ipv6.conf.$iface.autoconf=0" > /dev/null
     echo "net.ipv6.conf.$iface.autoconf=0" >> /etc/sysctl.d/99-narwhalcloud.conf
-    # forwarding=1 后必须 accept_ra=2 才会接收 RA（多厂商：systemd-networkd 会按
-    # iface 单独设置 accept_ra=1，会覆盖 all 设置，故此处显式按 iface 强制为 2）
+    # forwarding=1 后必须 accept_ra=2 才能继续接收 RA 默认路由
+    # （systemd-networkd 会按接口覆盖 all 的设置，故需按接口显式指定）
     sysctl -w "net.ipv6.conf.$iface.accept_ra=2" > /dev/null
     echo "net.ipv6.conf.$iface.accept_ra=2" >> /etc/sysctl.d/99-narwhalcloud.conf
-    
-    # 获取当前的默认 IPv6 网关
-    local _gw6
-    _gw6=$(ip -6 route show default dev "$iface" | awk '{print $3}')
 
-    # 删除该网卡上所有 global scope 的非 /128 地址（包含 /56、/64 等子网地址），
-    # 消除内核连接路由，防止容器子网与宿主机路由冲突。
-    while IFS= read -r _addr_sub; do
-        ip addr del "$_addr_sub" dev "$iface" 2>/dev/null || true
-    done < <(ip -6 addr show dev "$iface" scope global | awk '{print $2}' | grep -v '/128$')
-
-    # 以 /128 重新添加宿主机公网地址，不产生连接路由
-    ip addr add "$addr/128" dev "$iface" 2>/dev/null || true
-
-    # 恢复默认路由
-    if [ -n "$_gw6" ]; then
-        ip -6 route add default via "$_gw6" dev "$iface" 2>/dev/null || true
-    fi
-
-    log "$(t "✓ All subnet addresses removed, host IPv6 re-added as /128, SLAAC disabled." "✓ 已删除所有子网地址，宿主机 IPv6 已改为 /128，SLAAC 已禁用。")"
+    log "$(t "✓ IPv6 kernel parameters set (SLAAC disabled, RA route preserved)." "✓ IPv6 内核参数已设置（SLAAC 已禁用，RA 默认路由保留）。")"
 }
 
 # ── IPv6 detection ────────────────────────────────────────────────────────────
@@ -1012,8 +1015,8 @@ if [ "$VIRT_TYPE" = "cloudhv" ] || [ "$VIRT_TYPE" = "incus" ]; then
     if [ "$IPV6_MODE" = "none" ]; then
         log "$(t "No public IPv6, IPv6 will not be configured." "无公网 IPv6，将不配置 IPv6。")"
     elif [ "$IPV6_MODE" = "subnet" ]; then
-        if [ -n "$IPV6_IFACE" ] && [ -n "$IPV6_ADDR" ]; then
-            configure_host_ipv6_routing "$IPV6_IFACE" "$IPV6_ADDR"
+        if [ -n "$IPV6_IFACE" ]; then
+            configure_host_ipv6_routing "$IPV6_IFACE"
         fi
         log "$(t "✓ IPv6 subnet mode: $IPV6_SUBNET, VMs will get independent addresses." "✓ IPv6 子网模式: $IPV6_SUBNET，VM 将获得独立地址。")"
     elif [ "$IPV6_MODE" = "snat" ]; then
@@ -1072,8 +1075,8 @@ PYEOF
 )"
     log "$(t "Container subnet: ${CONTAINER_BASE}/112  gateway: ${CONTAINER_GW}" "容器子网: ${CONTAINER_BASE}/112  网关: ${CONTAINER_GW}")"
 
-    if [ -n "$IPV6_IFACE" ] && [ -n "$IPV6_ADDR" ]; then
-        configure_host_ipv6_routing "$IPV6_IFACE" "$IPV6_ADDR"
+    if [ -n "$IPV6_IFACE" ]; then
+        configure_host_ipv6_routing "$IPV6_IFACE"
     fi
 
     podman network create \

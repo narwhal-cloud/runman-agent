@@ -129,3 +129,15 @@ func (t *incusTracker) contains(ip netip.Addr) bool {
 	defer t.mu.RUnlock()
 	return t.ips.Contains(ip)
 }
+
+func (t *incusTracker) allIPs() []netip.Addr {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	var ips []netip.Addr
+	for _, p := range t.ips.Prefixes() {
+		if p.IsSingleIP() {
+			ips = append(ips, p.Addr())
+		}
+	}
+	return ips
+}

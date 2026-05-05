@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+	"time"
 
 	"github.com/gopacket/gopacket"
 	"github.com/gopacket/gopacket/afpacket"
@@ -138,6 +139,22 @@ func (r *Responder) Run(ctx context.Context) error {
 	log.Printf("NDP responder started on %s (podman: %v, cloudhv: %v, incus: %v)", r.iface, podmanTracker != nil, cloudhvTracker != nil, incusTracker != nil)
 	sbuf := gopacket.NewSerializeBuffer()
 
+	// 周期刷新：每 10 分钟对所有活跃容器 IP 发 gratuitous NDP，
+	// 防止上游路由器/交换机的 NDP 缓存老化后入站中断。
+	ndpRefreshTicker := time.NewTicker(10 * time.Minute)
+	defer ndpRefreshTicker.Stop()
+
+	sendGratuitous := func(ip netip.Addr) {
+		if err := Gratuitous(sbuf, hi, ip); err == nil {
+			h.WritePacketData(sbuf.Bytes())
+		}
+		if hi.GatewayIP.IsValid() {
+			if err := Solicit(sbuf, hi, ip); err == nil {
+				h.WritePacketData(sbuf.Bytes())
+			}
+		}
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -171,15 +188,26 @@ func (r *Responder) Run(ctx context.Context) error {
 			if !ok {
 				continue
 			}
-			if err := Gratuitous(sbuf, hi, ip); err == nil {
-				h.WritePacketData(sbuf.Bytes())
-			}
-			if hi.GatewayIP.IsValid() {
-				if err := Solicit(sbuf, hi, ip); err == nil {
-					h.WritePacketData(sbuf.Bytes())
-				}
-			}
+			sendGratuitous(ip)
 			log.Printf("NDP: sent gratuitous/solicit for new container IP %s", ip)
+
+		case <-ndpRefreshTicker.C:
+			var allIPs []netip.Addr
+			if podmanTracker != nil {
+				allIPs = append(allIPs, podmanTracker.allIPs()...)
+			}
+			if cloudhvTracker != nil {
+				allIPs = append(allIPs, cloudhvTracker.allIPs()...)
+			}
+			if incusTracker != nil {
+				allIPs = append(allIPs, incusTracker.allIPs()...)
+			}
+			for _, ip := range allIPs {
+				sendGratuitous(ip)
+			}
+			if len(allIPs) > 0 {
+				log.Printf("NDP: periodic refresh sent for %d IPs", len(allIPs))
+			}
 		}
 	}
 }

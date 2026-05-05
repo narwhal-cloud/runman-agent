@@ -155,9 +155,20 @@ func (t *cloudhvTracker) sync() {
 	}
 }
 
-// contains checks if an IP is assigned to any cloud-hypervisor VM
 func (t *cloudhvTracker) contains(ip netip.Addr) bool {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	return t.ips.Contains(ip)
+}
+
+func (t *cloudhvTracker) allIPs() []netip.Addr {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	var ips []netip.Addr
+	for _, p := range t.ips.Prefixes() {
+		if p.IsSingleIP() {
+			ips = append(ips, p.Addr())
+		}
+	}
+	return ips
 }
