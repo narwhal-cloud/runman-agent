@@ -898,18 +898,38 @@ fi
 
 configure_host_ipv6_routing() {
     local iface="$1"
-    # 只配置内核参数，不修改接口地址前缀。
-    # 保留 ISP 分配的原始前缀（/64 等）对子网模式的 uRPF 至关重要。
+    local addr="$2"
 
     # 禁止 SLAAC 自动配置，防止内核生成额外的临时地址
     sysctl -w "net.ipv6.conf.$iface.autoconf=0" > /dev/null
     echo "net.ipv6.conf.$iface.autoconf=0" >> /etc/sysctl.d/99-narwhalcloud.conf
+    # 不处理 RA 中的前缀信息（彻底阻止 SLAAC 动态地址），但保留默认路由
+    sysctl -w "net.ipv6.conf.$iface.accept_ra_pinfo=0" > /dev/null
+    echo "net.ipv6.conf.$iface.accept_ra_pinfo=0" >> /etc/sysctl.d/99-narwhalcloud.conf
     # forwarding=1 后必须 accept_ra=2 才能继续接收 RA 默认路由
-    # （systemd-networkd 会按接口覆盖 all 的设置，故需按接口显式指定）
     sysctl -w "net.ipv6.conf.$iface.accept_ra=2" > /dev/null
     echo "net.ipv6.conf.$iface.accept_ra=2" >> /etc/sysctl.d/99-narwhalcloud.conf
 
-    log "$(t "✓ IPv6 kernel parameters set (SLAAC disabled, RA route preserved)." "✓ IPv6 内核参数已设置（SLAAC 已禁用，RA 默认路由保留）。")"
+    # 将宿主机地址改为 /128，消除 /64 连接路由，避免 Podman 容器子网冲突
+    if [ -n "$addr" ]; then
+        local current_full
+        current_full=$(ip -6 addr show dev "$iface" scope global 2>/dev/null \
+            | awk '{print $2}' | grep -F "$addr/" | head -1)
+        if [ -n "$current_full" ] && [ "$(echo "$current_full" | cut -d'/' -f2)" != "128" ]; then
+            ip addr del "$current_full" dev "$iface" 2>/dev/null || true
+            ip addr add "$addr/128" dev "$iface" 2>/dev/null || true
+        fi
+        # 移除 SLAAC/RA 动态生成的全局地址（如 EUI-64 /64），它们会产生 /64 连接路由
+        ip -6 addr flush dev "$iface" scope global dynamic 2>/dev/null || true
+        # 持久化到 /etc/network/interfaces
+        if grep -q "iface $iface inet6 static" /etc/network/interfaces 2>/dev/null; then
+            sed -i "/iface $iface inet6 static/,/^[^ ]/ s|address .*|address $addr/128|" /etc/network/interfaces
+        else
+            printf '\niface %s inet6 static\n    address %s/128\n' "$iface" "$addr" >> /etc/network/interfaces
+        fi
+    fi
+
+    log "$(t "✓ Host IPv6 set to /128, SLAAC disabled, RA route preserved." "✓ 宿主机 IPv6 已设为 /128，SLAAC 已禁用，RA 默认路由保留。")"
 }
 
 # ── IPv6 detection ────────────────────────────────────────────────────────────
@@ -1016,7 +1036,7 @@ if [ "$VIRT_TYPE" = "cloudhv" ] || [ "$VIRT_TYPE" = "incus" ]; then
         log "$(t "No public IPv6, IPv6 will not be configured." "无公网 IPv6，将不配置 IPv6。")"
     elif [ "$IPV6_MODE" = "subnet" ]; then
         if [ -n "$IPV6_IFACE" ]; then
-            configure_host_ipv6_routing "$IPV6_IFACE"
+            configure_host_ipv6_routing "$IPV6_IFACE" "$IPV6_ADDR"
         fi
         log "$(t "✓ IPv6 subnet mode: $IPV6_SUBNET, VMs will get independent addresses." "✓ IPv6 子网模式: $IPV6_SUBNET，VM 将获得独立地址。")"
     elif [ "$IPV6_MODE" = "snat" ]; then
@@ -1076,7 +1096,7 @@ PYEOF
     log "$(t "Container subnet: ${CONTAINER_BASE}/112  gateway: ${CONTAINER_GW}" "容器子网: ${CONTAINER_BASE}/112  网关: ${CONTAINER_GW}")"
 
     if [ -n "$IPV6_IFACE" ]; then
-        configure_host_ipv6_routing "$IPV6_IFACE"
+        configure_host_ipv6_routing "$IPV6_IFACE" "$IPV6_ADDR"
     fi
 
     podman network create \
