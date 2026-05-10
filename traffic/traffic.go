@@ -133,12 +133,12 @@ func (s *Service) syncOnce(ctx context.Context) {
 			deltaIn := netStats.InBytes - traffic.RawIn
 			deltaOut := netStats.OutBytes - traffic.RawOut
 
-			// 防止计数器重置（负值）
+			// 计数器重置（如容器/宿主机重启），将当前 raw 值全量计入增量
 			if deltaIn < 0 {
-				deltaIn = 0
+				deltaIn = netStats.InBytes
 			}
 			if deltaOut < 0 {
-				deltaOut = 0
+				deltaOut = netStats.OutBytes
 			}
 
 			// 累计到总数

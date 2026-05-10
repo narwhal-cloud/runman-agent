@@ -54,8 +54,10 @@ func gatherHostInfo(iface *net.Interface) (hi HostInfo, e error) {
 	log.Printf("NDP: gateway %s", hi.GatewayIP)
 
 	// Wait until the gateway neighbour entry is resolved so we can pin it as NUD_NOARP.
+	// Limit to 30 attempts (roughly 30s) to avoid blocking forever when the gateway
+	// is unreachable (e.g. network is still coming up after a host reboot).
 	var gatewayNeigh *netlink.Neigh
-	for {
+	for attempt := 0; attempt < 30; attempt++ {
 		neighs, e := nl.NeighList(iface.Index, unix.AF_INET6)
 		if e != nil {
 			log.Printf("NDP: netlink.NeighList: %v", e)
@@ -78,6 +80,8 @@ func gatherHostInfo(iface *net.Interface) (hi HostInfo, e error) {
 		exec.Command("/usr/bin/ping", "-c", "1", hi.GatewayIP.String()).Run()
 		time.Sleep(time.Second)
 	}
+	log.Printf("NDP: timed out waiting for gateway %s neighbour entry; NDP will work without pinned gateway MAC", hi.GatewayIP)
+	return hi, nil
 
 NEIGH_SET:
 	gatewayNeigh.State = unix.NUD_NOARP

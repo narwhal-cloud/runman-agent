@@ -89,9 +89,7 @@ func (m *Manager) addMapping(ctx context.Context, vmId string, protocol string, 
 			if e.GuestPort == guestPort && e.Description == description {
 				return nil
 			}
-			m.mu.Unlock()
-			_ = m.RemoveMapping(ctx, vmId, protocol, hostPort)
-			m.mu.Lock()
+			m.removeEntryLocked(vmId, protocol, hostPort)
 			exists = true
 			break
 		}
@@ -155,10 +153,9 @@ func (m *Manager) addMapping(ctx context.Context, vmId string, protocol string, 
 	return nil
 }
 
-func (m *Manager) RemoveMapping(_ context.Context, vmId string, protocol string, hostPort int) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
+// removeEntryLocked removes the entry matching (vmId, protocol, hostPort) from
+// the in-memory map and the database. Caller must hold m.mu (write lock).
+func (m *Manager) removeEntryLocked(vmId, protocol string, hostPort int) {
 	entries := m.mappings[vmId]
 	for i, e := range entries {
 		if e.Protocol == protocol && e.HostPort == hostPort {
@@ -168,16 +165,23 @@ func (m *Manager) RemoveMapping(_ context.Context, vmId string, protocol string,
 			}
 			m.mappings[vmId] = append(entries[:i], entries[i+1:]...)
 			_ = m.db.DeletePortForward(protocol, hostPort)
-			return nil
+			return
 		}
 	}
+}
+
+func (m *Manager) RemoveMapping(_ context.Context, vmId string, protocol string, hostPort int) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.removeEntryLocked(vmId, protocol, hostPort)
 	return nil
 }
 
 // SyncForVM 以 desired 为准全量对齐某个 VM 的端口转发规则
 func (m *Manager) SyncForVM(ctx context.Context, vmId string, desired []DesiredRule) error {
 	m.mu.RLock()
-	current := m.mappings[vmId]
+	current := make([]*Entry, len(m.mappings[vmId]))
+	copy(current, m.mappings[vmId])
 	m.mu.RUnlock()
 
 	// 删除不在期望列表中的规则
@@ -298,7 +302,12 @@ func (m *Manager) runUDP(ctx context.Context, pc net.PacketConn, target string) 
 		smu.Lock()
 		client, ok := sessions[addr.String()]
 		if !ok {
-			client, _ = net.Dial("udp", targetAddr.String())
+			var dialErr error
+			client, dialErr = net.Dial("udp", targetAddr.String())
+			if dialErr != nil {
+				smu.Unlock()
+				continue
+			}
 			sessions[addr.String()] = client
 			go func(a net.Addr, c net.Conn) {
 				defer func() {

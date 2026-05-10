@@ -345,6 +345,18 @@ func (m *Manager) allocNetwork(vmID string) (*netConfig, error) {
 	return m.netConfigFromDB(conf), nil
 }
 
+// getNetworkConfig is the read-only counterpart of allocNetwork.
+// It only reads from the database; it never allocates a new index or creates a record.
+// Use this in informational paths (ListVMs, GetVMInfo, GetVMNetStats, deleteVM tap cleanup)
+// to avoid accidentally persisting a CloudHVVMConfig that was never intentionally created.
+func (m *Manager) getNetworkConfig(vmID string) (*netConfig, error) {
+	conf, err := m.db.GetCloudHVConfig(vmID)
+	if err != nil {
+		return nil, fmt.Errorf("no network config for VM %s: %w", vmID, err)
+	}
+	return m.netConfigFromDB(conf), nil
+}
+
 func (m *Manager) netConfigFromDB(conf *db.CloudHVVMConfig) *netConfig {
 	return &netConfig{
 		Idx:  conf.Idx,
@@ -1228,15 +1240,12 @@ func (m *Manager) deleteVM(_ context.Context, vmID string) error {
 		log.Printf("[DeleteVM] VM stopped: %s", vmID)
 	}
 
-	// 获取网络配置（在删除 DB 记录之前）
-	netCfg, err := m.allocNetwork(vmID)
-	if err == nil {
+	// 获取网络配置（只读查询，不分配新记录）
+	if netCfg, err := m.getNetworkConfig(vmID); err == nil {
 		log.Printf("[DeleteVM] deleting TAP device: %s", netCfg.Tap)
 		if err := runCmd("ip", "link", "delete", netCfg.Tap); err != nil {
 			log.Printf("[DeleteVM] warning: failed to delete TAP device: %v", err)
 		}
-	} else {
-		log.Printf("[DeleteVM] warning: failed to get network config: %v", err)
 	}
 
 	// 清理运行时文件
@@ -1313,18 +1322,13 @@ func (m *Manager) ResetPassword(ctx context.Context, vmID, password string) erro
 
 func (m *Manager) GetVMInfo(_ context.Context, vmID string) (*agent.VMSummary, error) {
 	var ips []string
-	if nc, err := m.allocNetwork(vmID); err == nil {
+	nc, ncErr := m.getNetworkConfig(vmID)
+	if ncErr == nil {
 		if nc.IPv4 != "" {
 			ips = append(ips, nc.IPv4)
 		}
 		if nc.IPv6 != "" && m.ipv6Mode != "none" {
 			ips = append(ips, nc.IPv6)
-		}
-	} else {
-		// Fallback if allocNetwork fails
-		ip, _ := m.GetVMLocalIP(nil, vmID)
-		if ip != "" {
-			ips = append(ips, ip)
 		}
 	}
 
@@ -1335,7 +1339,7 @@ func (m *Manager) GetVMInfo(_ context.Context, vmID string) (*agent.VMSummary, e
 	if m.isRunning(vmID) {
 		if err := m.apiGet(vmID, "vm.info", nil); err == nil {
 			status = agent.VMStatus_VM_STATUS_RUNNING
-			if nc, err := m.allocNetwork(vmID); err == nil {
+			if ncErr == nil {
 				in, out = m.getTraffic(nc.Tap)
 			}
 			cpuPct, memUsed = m.getUsage(vmID)
@@ -1374,17 +1378,13 @@ func (m *Manager) ListVMs(_ context.Context) ([]*agent.VMSummary, error) {
 		}
 
 		var ips []string
-		if nc, err := m.allocNetwork(vmID); err == nil {
+		nc, ncErr := m.getNetworkConfig(vmID)
+		if ncErr == nil {
 			if nc.IPv4 != "" {
 				ips = append(ips, nc.IPv4)
 			}
 			if nc.IPv6 != "" && m.ipv6Mode != "none" {
 				ips = append(ips, nc.IPv6)
-			}
-		} else {
-			ip, _ := m.GetVMLocalIP(nil, vmID)
-			if ip != "" {
-				ips = append(ips, ip)
 			}
 		}
 
@@ -1394,7 +1394,7 @@ func (m *Manager) ListVMs(_ context.Context) ([]*agent.VMSummary, error) {
 		if m.isRunning(vmID) {
 			if err := m.apiGet(vmID, "vm.info", nil); err == nil {
 				status = agent.VMStatus_VM_STATUS_RUNNING
-				if nc, err := m.allocNetwork(vmID); err == nil {
+				if ncErr == nil {
 					in, out = m.getTraffic(nc.Tap)
 				}
 				cpuPct, memUsed = m.getUsage(vmID)
@@ -1414,7 +1414,7 @@ func (m *Manager) ListVMs(_ context.Context) ([]*agent.VMSummary, error) {
 }
 
 func (m *Manager) GetVMLocalIP(_ context.Context, vmID string) (string, error) {
-	netCfg, err := m.allocNetwork(vmID)
+	netCfg, err := m.getNetworkConfig(vmID)
 	if err != nil {
 		return "", err
 	}
@@ -1629,7 +1629,7 @@ func runCmd(name string, args ...string) error {
 
 // GetVMNetStats 获取 VM 的 network 流量统计（用于流量统计服务）
 func (m *Manager) GetVMNetStats(_ context.Context, vmID string) (*manager.VMNetStats, error) {
-	nc, err := m.allocNetwork(vmID)
+	nc, err := m.getNetworkConfig(vmID)
 	if err != nil {
 		return nil, err
 	}

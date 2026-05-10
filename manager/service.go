@@ -176,11 +176,18 @@ func (s *VMService) GetVMNetStats(ctx context.Context, vmID string) (*VMNetStats
 
 // Autostart 启动所有状态为 running 的 VM（通常在 agent 启动时调用）
 func (s *VMService) Autostart(ctx context.Context) {
-	configs, _ := s.db.ListVMConfigs()
+	configs, err := s.db.ListVMConfigs()
+	if err != nil {
+		log.Printf("[Autostart] failed to list VM configs: %v", err)
+		return
+	}
 	for _, c := range configs {
 		if c.Status == "running" {
-			// 忽略日志输出，交由调用方处理
-			_ = s.mgr.StartVM(ctx, c.VMID)
+			if err := s.mgr.StartVM(ctx, c.VMID); err != nil {
+				log.Printf("[Autostart] failed to start VM %s: %v", c.VMID, err)
+			} else {
+				log.Printf("[Autostart] started VM %s", c.VMID)
+			}
 		}
 	}
 }
