@@ -182,14 +182,13 @@ func (r *Responder) Run(ctx context.Context) error {
 				continue
 			}
 			h.WritePacketData(sbuf.Bytes())
-			log.Printf("NDP: responded for %s (solicited by %s)", ns.TargetIP, ns.RouterIP)
 
 		case ip, ok := <-newIPsCh:
 			if !ok {
 				continue
 			}
 			sendGratuitous(ip)
-			log.Printf("NDP: sent gratuitous/solicit for new container IP %s", ip)
+			log.Printf("NDP: sent gratuitous/solicit for new IP %s", ip)
 
 		case <-ndpRefreshTicker.C:
 			var allIPs []netip.Addr

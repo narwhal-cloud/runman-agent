@@ -4,7 +4,6 @@ package ndp
 
 import (
 	"context"
-	"log"
 	"net/netip"
 	"reflect"
 	"sync"
@@ -33,7 +32,6 @@ func newIncusTracker(db interface{}) *incusTracker {
 			newIPs: make(chan netip.Addr, 64),
 		}
 	}
-	log.Printf("NDP incusTracker: ListIncusConfigs method not found on db")
 	return nil
 }
 
@@ -43,7 +41,7 @@ func (t *incusTracker) run(ctx context.Context) {
 	}
 	t.sync()
 
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
 	for {

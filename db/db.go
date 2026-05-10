@@ -1,6 +1,7 @@
 package db
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"time"
@@ -93,7 +94,22 @@ func Init(path string) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	_ = db.AutoMigrate(&Traffic{}, &VMConfig{}, &PodmanVMConfig{}, &CloudHVVMConfig{}, &IncusVMConfig{}, &PortForward{}, &System{})
+
+	// SQLite 并发安全配置：
+	// WAL 模式让读操作不会被写操作阻塞（写时仍可读）；
+	// busy_timeout 避免并发写时立即返回 SQLITE_BUSY 错误（等待 5s 再报错）；
+	// synchronous=NORMAL 在 WAL 模式下已足够安全，比 FULL 快；
+	// SetMaxOpenConns(1) 保证所有 goroutine 串行使用同一个连接，彻底消除并发写冲突。
+	db.Exec("PRAGMA journal_mode = WAL")
+	db.Exec("PRAGMA busy_timeout = 5000")
+	db.Exec("PRAGMA synchronous = NORMAL")
+	if sqlDB, err := db.DB(); err == nil {
+		sqlDB.SetMaxOpenConns(1)
+	}
+
+	if err := db.AutoMigrate(&Traffic{}, &VMConfig{}, &PodmanVMConfig{}, &CloudHVVMConfig{}, &IncusVMConfig{}, &PortForward{}, &System{}); err != nil {
+		return nil, fmt.Errorf("automigrate: %w", err)
+	}
 
 	return &DB{orm: db}, nil
 }

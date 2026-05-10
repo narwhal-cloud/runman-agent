@@ -417,8 +417,12 @@ func (m *Manager) DeleteVM(ctx context.Context, vmID string) error {
 	return m.deleteVM(ctx, vmID)
 }
 
-func (m *Manager) deleteVM(_ context.Context, vmID string) error {
-	_ = m.db.DeleteVMConfig(vmID)
+func (m *Manager) deleteVM(ctx context.Context, vmID string) error {
+	// 先删 DB 记录：DB 失败时中止，避免出现"容器已删但 DB 仍有记录"的不一致状态。
+	if err := m.db.DeleteVMConfig(vmID); err != nil {
+		log.Printf("[Podman][DeleteVM] error: failed to delete VMConfig for %s: %v", vmID, err)
+		return fmt.Errorf("delete VMConfig: %w", err)
+	}
 	return m.deleteByID(vmID)
 }
 
@@ -659,11 +663,22 @@ func (m *Manager) Cleanup(ctx context.Context) error {
 		return err
 	}
 
-	// 获取数据库中登记的所有虚拟机
-	configs, _ := m.db.ListVMConfigs()
+	// 获取数据库中登记的所有虚拟机，DB 出错时必须中止：
+	// 空列表会把所有容器误判为幽灵实例并删除。
+	configs, err := m.db.ListVMConfigs()
+	if err != nil {
+		log.Printf("[Podman] Cleanup: failed to list VM configs, skipping to avoid false deletions: %v", err)
+		return err
+	}
 	registered := make(map[string]bool, len(configs))
 	for _, c := range configs {
 		registered[c.VMID] = true
+	}
+
+	// 安全检查：DB 为空但驱动有容器，可能是 DB 刚初始化或读取异常，放弃本次清理。
+	if len(configs) == 0 && len(list) > 0 {
+		log.Printf("[Podman] Cleanup: DB has 0 configs but %d containers exist, skipping to avoid false deletions", len(list))
+		return nil
 	}
 
 	for _, c := range list {
@@ -681,9 +696,9 @@ func (m *Manager) Cleanup(ctx context.Context) error {
 			continue
 		}
 
-		// 判定为幽灵实例，直接删除
+		// 判定为幽灵实例，调用 deleteVM 确保 VMConfig 也被清理
 		log.Printf("[Podman] Found ghost container %s, deleting...", name)
-		_ = m.deleteByID(c.ID)
+		_ = m.deleteVM(ctx, name)
 	}
 	return nil
 }

@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log"
 	"runman-agent/db"
@@ -133,8 +134,12 @@ func (s *VMService) ListVMs(ctx context.Context) ([]*agent.VMSummary, error) {
 		return nil, err
 	}
 
-	// 仅返回 DB 中存在的 VM，排除非平台管理的实例
-	configs, _ := s.db.ListVMConfigs()
+	// 仅返回 DB 中存在的 VM，排除非平台管理的实例。
+	// DB 出错时返回错误而非空列表，避免心跳上报 0 个 VM（会触发后端误判逻辑）。
+	configs, err := s.db.ListVMConfigs()
+	if err != nil {
+		return nil, fmt.Errorf("list VM configs: %w", err)
+	}
 	registered := make(map[string]bool, len(configs))
 	for _, c := range configs {
 		registered[c.VMID] = true

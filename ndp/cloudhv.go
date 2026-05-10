@@ -46,7 +46,7 @@ func (t *cloudhvTracker) run(ctx context.Context) {
 	}
 	t.sync() // initial sync
 
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -75,24 +75,18 @@ func (t *cloudhvTracker) sync() {
 
 	results := method.Call(nil)
 	if len(results) < 2 {
-		log.Printf("CloudHV tracker: unexpected return value count")
 		return
 	}
 
-	// First return value should be []CloudHVVMConfig
 	configsVal := results[0]
 	errVal := results[1]
 
-	// Check error
 	if !errVal.IsNil() {
-		log.Printf("CloudHV tracker: failed to list configs: %v", errVal.Interface())
 		return
 	}
 
-	// Extract IPv6 addresses from configs slice
 	var b netipx.IPSetBuilder
 	var newIPsList []netip.Addr
-	count := 0
 
 	if configsVal.Kind() == reflect.Slice {
 		for i := 0; i < configsVal.Len(); i++ {
@@ -117,7 +111,6 @@ func (t *cloudhvTracker) sync() {
 
 			ip, err := netip.ParseAddr(ipv6)
 			if err != nil {
-				log.Printf("CloudHV tracker: invalid IPv6 %q: %v", ipv6, err)
 				continue
 			}
 			b.Add(ip)
@@ -129,13 +122,11 @@ func (t *cloudhvTracker) sync() {
 				newIPsList = append(newIPsList, ip)
 			}
 
-			count++
 		}
 	}
 
 	newIPs, err := b.IPSet()
 	if err != nil {
-		log.Printf("CloudHV tracker: failed to build IPSet: %v", err)
 		return
 	}
 
@@ -151,7 +142,7 @@ func (t *cloudhvTracker) sync() {
 	}
 
 	if len(newIPsList) > 0 {
-		log.Printf("CloudHV tracker: synced %d IPv6 addresses, found %d new", count, len(newIPsList))
+		log.Printf("[NDP] CloudHV: %d new IPv6 IPs", len(newIPsList))
 	}
 }
 

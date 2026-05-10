@@ -381,7 +381,17 @@ write_files:
 }
 
 func (m *Manager) deleteVM(ctx context.Context, vmID string) error {
-	// 强杀并删除
+	// 先删 DB 记录：DB 失败时中止，避免出现"实例已删但 DB 仍有记录"的不一致状态。
+	// 若 DB 成功但后续实例删除失败，下次 Cleanup 会将其作为幽灵实例清理。
+	if err := m.db.DeleteVMConfig(vmID); err != nil {
+		log.Printf("[Incus][DeleteVM] error: failed to delete VMConfig for %s: %v", vmID, err)
+		return fmt.Errorf("delete VMConfig: %w", err)
+	}
+	if err := m.db.DeleteIncusConfig(vmID); err != nil {
+		log.Printf("[Incus][DeleteVM] warning: failed to delete IncusConfig for %s: %v", vmID, err)
+	}
+
+	// 强杀并删除实例
 	stopOp, _ := m.client.UpdateInstanceState(vmID, api.InstanceStatePut{Action: "stop", Timeout: -1, Force: true}, "")
 	if stopOp != nil {
 		_ = stopOp.Wait()
@@ -391,12 +401,7 @@ func (m *Manager) deleteVM(ctx context.Context, vmID string) error {
 	if err != nil {
 		return err
 	}
-	if err := op.Wait(); err != nil {
-		return err
-	}
-	_ = m.db.DeleteVMConfig(vmID)
-	_ = m.db.DeleteIncusConfig(vmID)
-	return nil
+	return op.Wait()
 }
 
 func (m *Manager) startVM(ctx context.Context, vmID string) error {
@@ -662,11 +667,29 @@ func (m *Manager) Cleanup(ctx context.Context) error {
 		return err
 	}
 
-	// 获取数据库中登记的所有虚拟机
-	configs, _ := m.db.ListVMConfigs()
+	// 获取数据库中登记的所有虚拟机，DB 出错时必须中止：
+	// 空列表会把所有实例误判为幽灵实例并删除。
+	configs, err := m.db.ListVMConfigs()
+	if err != nil {
+		log.Printf("[Incus] Cleanup: failed to list VM configs, skipping to avoid false deletions: %v", err)
+		return err
+	}
 	registered := make(map[string]bool, len(configs))
 	for _, c := range configs {
 		registered[c.VMID] = true
+	}
+
+	// 统计平台管理的 Incus 实例数（排除构建器）
+	var managedCount int
+	for _, inst := range instances {
+		if !strings.HasPrefix(inst.Name, "builder-") {
+			managedCount++
+		}
+	}
+	// 安全检查：DB 为空但 Incus 有实例，放弃本次清理。
+	if len(configs) == 0 && managedCount > 0 {
+		log.Printf("[Incus] Cleanup: DB has 0 configs but %d instances exist, skipping to avoid false deletions", managedCount)
+		return nil
 	}
 
 	for _, inst := range instances {

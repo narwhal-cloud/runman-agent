@@ -76,7 +76,6 @@ func gatherHostInfo(iface *net.Interface) (hi HostInfo, e error) {
 			}
 		}
 		exec.Command("/usr/bin/ping", "-c", "1", hi.GatewayIP.String()).Run()
-		log.Printf("NDP: waiting for gateway neigh entry...")
 		time.Sleep(time.Second)
 	}
 

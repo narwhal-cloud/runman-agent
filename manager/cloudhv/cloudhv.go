@@ -1249,9 +1249,14 @@ func (m *Manager) deleteVM(_ context.Context, vmID string) error {
 		_ = os.Remove(f)
 	}
 
-	// 最后才删除 DB 记录
-	_ = m.db.DeleteVMConfig(vmID)
-	_ = m.db.DeleteCloudHVConfig(vmID)
+	// 删除 DB 记录（先于磁盘删除，确保二者结果一致：DB 失败则整体失败，磁盘不会被删）
+	if err := m.db.DeleteVMConfig(vmID); err != nil {
+		log.Printf("[DeleteVM] error: failed to delete VMConfig for %s: %v", vmID, err)
+		return fmt.Errorf("delete VMConfig: %w", err)
+	}
+	if err := m.db.DeleteCloudHVConfig(vmID); err != nil {
+		log.Printf("[DeleteVM] warning: failed to delete CloudHVConfig for %s: %v", vmID, err)
+	}
 	log.Printf("[DeleteVM] database records deleted: %s", vmID)
 
 	// 删除实例目录
@@ -1648,11 +1653,29 @@ func (m *Manager) Cleanup(ctx context.Context) error {
 		return err
 	}
 
-	// 获取数据库中登记的所有虚拟机
-	configs, _ := m.db.ListVMConfigs()
+	// 获取数据库中登记的所有虚拟机，DB 出错时必须中止：
+	// 空列表会把所有实例误判为幽灵实例并删除磁盘数据。
+	configs, err := m.db.ListVMConfigs()
+	if err != nil {
+		log.Printf("[CloudHV] Cleanup: failed to list VM configs, skipping to avoid false deletions: %v", err)
+		return err
+	}
 	registered := make(map[string]bool, len(configs))
 	for _, c := range configs {
 		registered[c.VMID] = true
+	}
+
+	// 统计实例目录数量（仅目录）
+	var dirCount int
+	for _, e := range entries {
+		if e.IsDir() {
+			dirCount++
+		}
+	}
+	// 安全检查：DB 为空但磁盘有实例目录，放弃本次清理。
+	if len(configs) == 0 && dirCount > 0 {
+		log.Printf("[CloudHV] Cleanup: DB has 0 configs but %d instance dirs exist, skipping to avoid false deletions", dirCount)
+		return nil
 	}
 
 	for _, e := range entries {
