@@ -1,0 +1,399 @@
+// =============================================================================
+// Narwhal Cloud Agent Gateway Protocol  —  v1.0
+//
+// 概述 / Overview:
+//   本协议定义了 Narwhal Cloud 平台与 Agent 节点之间的双向流式 gRPC 通信。
+//   Agent 运行于宿主机（VPS 物理节点），负责管理其上所有 VM 的完整生命周期。
+//
+//   This file defines the bidirectional streaming gRPC protocol between the
+//   Narwhal Cloud platform and agent nodes. Each agent manages VMs on a single host.
+//
+// 连接流程 / Connection Flow:
+//   1. Agent 拨号平台 gRPC 端点（支持 TLS）。
+//      Agent dials the platform gRPC endpoint (TLS recommended).
+//   2. Agent 在 gRPC metadata 中携带身份令牌：
+//      Agent sets metadata:  authorization = "Bearer <agent_token>"
+//   3. Agent 调用 AgentGateway.Connect() 建立持久双向流。
+//      Agent calls AgentGateway.Connect() to open a persistent stream.
+//   4. Agent 每 30 秒发送一次 Heartbeat；平台按需下发命令。
+//      Agent sends Heartbeat every 30 s; platform sends commands on demand.
+//   5. 断线后 Agent 须以指数退避策略重连。
+//      On disconnect, agent reconnects with exponential backoff.
+//
+// 命令确认 / Command Acknowledgement:
+//   平台每条下行命令都携带全局唯一的 command_id。
+//   Agent 执行完毕（或失败）后，必须通过 CommandResult 回报结果。
+//
+//   Every platform command carries a unique command_id.
+//   Agent MUST respond with CommandResult (success or failure) for every command.
+//
+// 代码生成 / Code Generation:
+//   protoc --go_out=. --go_opt=paths=source_relative \
+//          --go-grpc_out=. --go-grpc_opt=paths=source_relative \
+//          proto/agent/agent.proto
+// =============================================================================
+
+syntax = "proto3";
+package agent;
+option go_package = "narwhal-agent/proto/agent";
+
+// =============================================================================
+// Service
+// =============================================================================
+
+// AgentGateway — Agent 与 Narwhal Cloud 平台之间的双向流式通信服务。
+// 由 Agent 主动建立连接；平台侧作为 gRPC 服务端。
+service AgentGateway {
+  // Connect 建立一条持久的双向流：
+  //   - 上行 (AgentEnvelope)：心跳、命令结果、控制台输出
+  //   - 下行 (PlatformEnvelope)：VM 操作命令、控制台控制帧
+  //
+  // The stream is long-lived. Agent should reconnect with exponential backoff on any error.
+  rpc Connect(stream AgentEnvelope) returns (stream PlatformEnvelope);
+}
+
+// =============================================================================
+// 公共枚举 / Shared Enums
+// =============================================================================
+
+// VMStatus — VM 运行时状态。
+// Agent 只上报运行时状态；到期、下线等生命周期事件由平台侧管理。
+enum VMStatus {
+  VM_STATUS_UNSPECIFIED = 0; // 未知 / unknown
+  VM_STATUS_CREATING    = 1; // 创建中，等待 Agent 回报 / being provisioned
+  VM_STATUS_RUNNING     = 2; // 运行中 / running
+  VM_STATUS_STOPPED     = 3; // 已停止 / stopped / powered off
+  VM_STATUS_ERROR       = 4; // 异常，需人工介入 / error, needs attention
+}
+
+// Protocol — 端口转发所用的传输层协议。
+enum Protocol {
+  PROTOCOL_UNSPECIFIED = 0;
+  PROTOCOL_TCP         = 1;
+  PROTOCOL_UDP         = 2;
+}
+
+// ConsoleEventType — 控制台会话生命周期事件类型。
+enum ConsoleEventType {
+  CONSOLE_EVENT_UNSPECIFIED  = 0;
+  CONSOLE_EVENT_CONNECTED    = 1; // TTY 已成功附接到 VM / TTY attached successfully
+  CONSOLE_EVENT_DISCONNECTED = 2; // TTY 正常断开 / TTY closed normally
+  CONSOLE_EVENT_ERROR        = 3; // TTY 异常断开 / TTY closed due to error
+}
+
+// =============================================================================
+// 上行消息：Agent → Platform
+// =============================================================================
+
+// AgentEnvelope — Agent 发往平台的消息信封。
+// 每条消息须携带唯一的 message_id，用于去重和链路追踪。
+message AgentEnvelope {
+  // 客户端生成的唯一消息 ID，建议使用 UUID v4。
+  // Client-generated unique message ID (UUID v4 recommended).
+  string message_id = 1;
+
+  oneof payload {
+    // --- 周期性上报 / Periodic reports ---
+    Heartbeat       heartbeat      = 2; // 心跳，每 30 秒一次 / heartbeat, every 30 s
+
+    // --- 命令回执 / Command acknowledgements ---
+    CommandResult   cmd_result     = 4; // 平台命令执行结果 / result of a platform command
+    PortForwardList port_fwd_list  = 5; // CmdGetPortForwards 的查询结果 / port-forward query result
+
+    // --- 控制台 / Console TTY ---
+    ConsoleOutput   console_output = 8; // TTY 原始输出字节 / raw TTY output bytes
+    ConsoleEvent    console_event  = 9; // 控制台会话生命周期事件 / console session lifecycle event
+  }
+}
+
+// ---- 心跳 ---------------------------------------------------------------
+
+// Heartbeat — 宿主机实时快照，每 30 秒上报一次。
+// 字段变化时才需填写 entry_host / entry_ipv6 / os_images，未变化可留空。
+// Fields entry_host, entry_ipv6, and os_images are optional;
+// only populate them when the value changes.
+message Heartbeat {
+  // --- 时间戳 ---
+  int64  timestamp      = 1;  // Unix 秒 / Unix epoch seconds
+
+  // --- 宿主机实时负载 / Host real-time metrics ---
+  float  cpu_pct        = 2;  // CPU 使用率，0–100 / CPU utilization 0–100
+  int64  ram_used_mb    = 3;  // 已用内存 (MB) / used RAM in MB
+  int64  disk_used_gb   = 4;  // 已用磁盘 (GB) / used disk in GB
+  int64  net_in_bps     = 5;  // 实时入口速率 (bytes/s) / inbound bandwidth bytes/s
+  int64  net_out_bps    = 6;  // 实时出口速率 (bytes/s) / outbound bandwidth bytes/s
+
+  // --- VM 摘要列表（平台对账用）/ VM summary list for reconciliation ---
+  repeated VMSummary vms = 7;
+
+  // --- 宿主机接入信息（变化时才填）/ Host endpoint (only when changed) ---
+  // IPv4 地址或 DDNS 域名 / IPv4 address or DDNS hostname
+  string entry_host     = 8;
+  // IPv6 地址（可选）/ IPv6 address (optional)
+  string entry_ipv6     = 9;
+
+  // --- 可用 OS 镜像列表（变化时才填）/ Available OS images (only when changed) ---
+  repeated OSImageInfo os_images = 10;
+
+  // --- 系统负载 / System load averages ---
+  float  load1          = 11; // 1 分钟负载均值 / 1-min load average
+  float  load5          = 12; // 5 分钟负载均值 / 5-min load average
+  float  load15         = 13; // 15 分钟负载均值 / 15-min load average
+  int64  uptime         = 14; // 系统运行时间 (秒) / system uptime in seconds
+
+  // --- 宿主机规格 / Host capacity ---
+  int32  cpus           = 15; // 逻辑 CPU 核数 / logical CPU count
+  int64  ram_total_mb   = 16; // 总内存 (MB) / total RAM in MB
+  int64  disk_total_gb  = 17; // 总磁盘 (GB) / total disk in GB
+  int32  bandwidth_mbps = 18; // 总带宽 (Mbps) / total bandwidth in Mbps
+
+  // --- 虚拟化类型 / Virtualization backend ---
+  // 已知值：podman（容器）、cloudhv（Cloud Hypervisor KVM）
+  // Known values: "podman" (container), "cloudhv" (Cloud Hypervisor / KVM)
+  string virt_type      = 19;
+}
+
+// OSImageInfo — 宿主机支持的操作系统镜像条目。
+message OSImageInfo {
+  string id   = 1; // 镜像唯一标识符，对应 CmdCreateVM.os_image / image ID used in CmdCreateVM
+  string name = 2; // 人类可读名称，例如 "Ubuntu 24.04 LTS" / human-readable display name
+}
+
+// VMSummary — 心跳中内嵌的单个 VM 状态摘要，供平台侧对账使用。
+message VMSummary {
+  string   vm_id                = 1; // VM UUID
+  VMStatus status               = 2; // 当前运行状态 / current runtime status
+  float    cpu_pct              = 3; // CPU 使用率，0–100 / CPU utilization 0–100
+  int64    ram_used_mb          = 4; // 已用内存 (MB) / used RAM in MB
+  int64    traffic_in_bytes     = 5; // 累计入站流量 (bytes，自创建起) / cumulative inbound traffic since creation
+  int64    traffic_out_bytes    = 6; // 累计出站流量 (bytes，自创建起) / cumulative outbound traffic since creation
+  repeated string ips           = 7; // VM 的 IP 地址列表（内部 + 公网）/ VM IP addresses (internal and public)
+  int64    monthly_traffic_in   = 8; // 本月累计入站流量 (bytes) / current month inbound traffic
+  int64    monthly_traffic_out  = 9; // 本月累计出站流量 (bytes) / current month outbound traffic
+}
+
+// ---- 命令回执 -----------------------------------------------------------
+
+// CommandResult — Agent 对平台命令的执行结果回报。
+// 每条 PlatformEnvelope 必须有且仅有一条对应的 CommandResult。
+// Every PlatformEnvelope command MUST be acknowledged with exactly one CommandResult.
+message CommandResult {
+  string command_id = 1; // 对应 PlatformEnvelope.command_id / echoes PlatformEnvelope.command_id
+  bool   success    = 2; // 执行是否成功 / whether the command succeeded
+  string error      = 3; // 失败原因（success=false 时填写）/ error message when success=false
+  // JSON 编码的附加数据，具体结构见各命令说明。
+  // JSON-encoded extra data; schema depends on the command type.
+  // Currently used by: CmdGetPortForwards (returns PortForwardEntry[])
+  bytes  data       = 4;
+}
+
+// PortForwardList — CmdGetPortForwards 的查询结果，通过 AgentEnvelope 回传。
+// 注意：此消息通过专用的 port_fwd_list 字段传输，而非 CommandResult.data。
+message PortForwardList {
+  string                   command_id = 1; // 对应 CmdGetPortForwards 的 command_id
+  repeated PortForwardEntry entries   = 2;
+}
+
+// PortForwardEntry — 单条端口转发规则。
+message PortForwardEntry {
+  string   vm_id       = 1; // VM UUID
+  Protocol protocol    = 2; // 协议 / protocol
+  int32    host_port   = 3; // 宿主机端口 / host (external) port
+  int32    guest_port  = 4; // VM 内部端口 / guest (VM-internal) port
+  string   description = 5; // 备注，例如 "SSH" / description e.g. "SSH"
+}
+
+// ---- 控制台 TTY ---------------------------------------------------------
+
+// ConsoleOutput — Agent 将 VM TTY 的原始输出转发给平台。
+// 平台再通过 WebSocket 推送给用户浏览器。
+message ConsoleOutput {
+  string session_id = 1; // 会话唯一 ID，与 CmdConsoleOpen.session_id 对应
+  bytes  data       = 2; // TTY 原始输出字节（stdout / stderr 混合）/ raw TTY output bytes
+}
+
+// ConsoleEvent — 控制台会话生命周期事件，由 Agent 上报给平台。
+message ConsoleEvent {
+  string           session_id = 1; // 会话唯一 ID / session ID
+  ConsoleEventType type       = 2; // 事件类型 / event type
+  // DISCONNECTED 或 ERROR 时填写原因描述。
+  // Reason string for DISCONNECTED or ERROR events.
+  string           reason     = 3;
+}
+
+// =============================================================================
+// 下行消息：Platform → Agent
+// =============================================================================
+
+// PlatformEnvelope — 平台发往 Agent 的命令信封。
+// Agent 完成执行后须通过 CommandResult 确认每一条命令。
+// Agent MUST acknowledge every command with a CommandResult.
+message PlatformEnvelope {
+  // 平台生成的全局唯一命令 ID（持久化到数据库，用于断线重放）。
+  // Globally unique command ID generated by the platform (persisted to DB for replay).
+  string command_id = 1;
+
+  oneof payload {
+    // --- VM 生命周期 / VM lifecycle ---
+    CmdCreateVM         create_vm      = 2;  // 创建 VM / provision a new VM
+    CmdStartVM          start_vm       = 3;  // 启动 VM / power on
+    CmdStopVM           stop_vm        = 4;  // 关闭 VM / power off
+    CmdRestartVM        restart_vm     = 5;  // 重启 VM / reboot
+    CmdDeleteVM         delete_vm      = 6;  // 销毁 VM（不可恢复）/ destroy VM (irreversible)
+    CmdReinstallVM      reinstall_vm   = 13; // 重装系统 / reinstall OS
+
+    // --- VM 配置 / VM configuration ---
+    CmdResetPassword    reset_password = 7;  // 重置 root 密码 / reset root password
+
+    // --- 端口转发 / Port forwarding ---
+    CmdSetPortForward   set_port_fwd   = 8;  // 新增端口转发规则 / add port-forward rule
+    CmdDelPortForward   del_port_fwd   = 9;  // 删除端口转发规则 / remove port-forward rule
+    CmdGetPortForwards  get_port_fwds  = 14; // 查询端口转发规则列表 / list port-forward rules
+
+    // --- 保活 / Keep-alive ---
+    Ping                ping           = 15; // 服务端保活，Agent 收到后无需回复 / no-op, no CommandResult needed
+
+    // --- 控制台 TTY / Console TTY ---
+    CmdConsoleOpen      console_open   = 16; // 打开控制台会话 / open console session
+    CmdConsoleInput     console_input  = 17; // 转发键盘输入 / forward keyboard input
+    CmdConsoleResize    console_resize = 18; // 调整终端尺寸 / resize terminal
+    CmdConsoleClose     console_close  = 19; // 关闭控制台会话 / close console session
+  }
+}
+
+// ---- VM 生命周期命令 / VM Lifecycle Commands ----------------------------
+
+// CmdCreateVM — 在宿主机上创建并启动一台新的 VM。
+// 成功后 Agent 须将 VM 状态变更为 VM_STATUS_RUNNING 并在下次心跳中上报。
+message CmdCreateVM {
+  string vm_id          = 1; // 平台分配的 VM UUID，Agent 以此作为本地标识符
+  int32  cpu            = 2; // CPU 核数 / vCPU count
+  int64  ram_mb         = 3; // 内存 (MB) / RAM in MB
+  int64  disk_gb        = 4; // 磁盘 (GB) / disk in GB
+  // 带宽限速 (Mbps)；0 表示不限速。/ bandwidth limit in Mbps; 0 = unlimited
+  int32  bandwidth_mbps = 5;
+  // 操作系统镜像 ID，须与 Heartbeat.os_images 中的 id 一致。
+  // OS image ID; must match an entry from Heartbeat.os_images.
+  string os_image       = 6;
+  // root 初始密码（明文），Agent 负责写入系统。
+  // Initial root password (plaintext); agent writes it into the VM.
+  string root_password  = 7;
+}
+
+// CmdStartVM — 启动一台处于停止状态的 VM。
+message CmdStartVM {
+  string vm_id = 1;
+}
+
+// CmdStopVM — 关闭 VM。
+message CmdStopVM {
+  string vm_id = 1;
+  // true = 强制断电（等同于拔电源），false = 优雅关机（发送 ACPI 信号）。
+  // true = force power off (hard cut); false = graceful shutdown (ACPI signal).
+  bool   force = 2;
+}
+
+// CmdRestartVM — 重启 VM（优雅重启；如需强制，先发 CmdStopVM force=true 再发 CmdStartVM）。
+message CmdRestartVM {
+  string vm_id = 1;
+}
+
+// CmdDeleteVM — 永久销毁 VM，释放全部资源（磁盘、IP、端口转发等）。
+// 此操作不可恢复，执行前平台已完成计费清算。
+// This is irreversible. Platform performs billing settlement before issuing this command.
+message CmdDeleteVM {
+  string vm_id = 1;
+}
+
+// CmdReinstallVM — 重装 VM 操作系统，原磁盘数据将被清除。
+// Agent 应先停止 VM，然后用新镜像重新创建，再启动。
+// Agent should stop the VM, reprovision with the new image, then start it.
+message CmdReinstallVM {
+  string vm_id          = 1; // VM UUID
+  string os_image       = 2; // 新操作系统镜像 ID / new OS image ID
+  string root_password  = 3; // 新 root 密码 / new root password (plaintext)
+  int32  cpu            = 4; // CPU 核数（可能随套餐变更）/ vCPU count (may change with plan)
+  int64  ram_mb         = 5; // 内存 (MB)
+  int64  disk_gb        = 6; // 磁盘 (GB)
+  int32  bandwidth_mbps = 7; // 带宽限速 (Mbps)
+}
+
+// ---- VM 配置命令 / VM Configuration Commands ----------------------------
+
+// CmdResetPassword — 重置 VM 的 root 账户密码。
+// Agent 需在 VM 运行时（或通过磁盘挂载方式）写入新密码。
+message CmdResetPassword {
+  string vm_id        = 1;
+  // 新密码（明文），Agent 负责写入虚拟机内部（如通过 cloud-init / chroot）。
+  // New root password (plaintext); agent writes it into the VM.
+  string new_password = 2;
+}
+
+// ---- 端口转发命令 / Port Forwarding Commands ----------------------------
+
+// CmdSetPortForward — 在宿主机上为指定 VM 添加一条端口转发规则。
+// 宿主机端口范围建议限制在 1024–65535。
+// Recommended host port range: 1024–65535.
+message CmdSetPortForward {
+  string   vm_id       = 1; // VM UUID
+  Protocol protocol    = 2; // 协议 / protocol
+  int32    host_port   = 3; // 宿主机（外部）端口 / host (external) port
+  int32    guest_port  = 4; // VM 内部端口 / guest (VM-internal) port
+  string   description = 5; // 备注，例如 "SSH 22" / description e.g. "SSH 22"
+}
+
+// CmdDelPortForward — 删除一条已有的端口转发规则。
+message CmdDelPortForward {
+  string   vm_id     = 1;
+  Protocol protocol  = 2;
+  int32    host_port = 3; // 要删除的宿主机端口 / host port to remove
+}
+
+// CmdGetPortForwards — 查询某 VM 当前所有端口转发规则。
+// Agent 须通过 AgentEnvelope.port_fwd_list 回传结果（而非 CommandResult.data）。
+// Agent responds via AgentEnvelope.port_fwd_list (not via CommandResult.data).
+message CmdGetPortForwards {
+  string vm_id = 1;
+}
+
+// ---- 保活 / Keep-alive --------------------------------------------------
+
+// Ping — 平台定期下发，用于维持 gRPC 连接活跃（防止代理层超时断开）。
+// Agent 收到后无需发送 CommandResult。
+// Agent does NOT need to send a CommandResult in response to Ping.
+message Ping {}
+
+// ---- 控制台 TTY 命令 / Console TTY Commands -----------------------------
+
+// CmdConsoleOpen — 请求 Agent 打开一个交互式控制台会话并附接到指定 VM 的 TTY。
+// Agent 成功附接后须上报 ConsoleEvent{type=CONNECTED}；失败则上报 DISCONNECTED 或 ERROR。
+// On success, agent reports ConsoleEvent{type=CONNECTED}.
+// On failure, agent reports ConsoleEvent{type=ERROR} with a reason string.
+message CmdConsoleOpen {
+  string vm_id      = 1; // 目标 VM UUID / target VM UUID
+  // 平台生成的会话唯一 ID，后续所有控制台帧均以此关联。
+  // Platform-generated unique session ID; all subsequent console frames reference this.
+  string session_id = 2;
+  uint32 cols       = 3; // 初始终端宽度（字符列数）/ initial terminal width in columns
+  uint32 rows       = 4; // 初始终端高度（字符行数）/ initial terminal height in rows
+}
+
+// CmdConsoleInput — 将用户键盘输入转发到 VM 的 TTY stdin。
+message CmdConsoleInput {
+  string session_id = 1;
+  bytes  data       = 2; // stdin 原始字节（含控制字符）/ raw stdin bytes (including control chars)
+}
+
+// CmdConsoleResize — 通知 Agent 调整 VM TTY 的终端尺寸（ioctl TIOCSWINSZ）。
+message CmdConsoleResize {
+  string session_id = 1;
+  uint32 cols       = 2; // 新宽度（列）/ new terminal width in columns
+  uint32 rows       = 3; // 新高度（行）/ new terminal height in rows
+}
+
+// CmdConsoleClose — 请求 Agent 关闭并清理指定控制台会话。
+// Agent 应在断开 TTY 后上报 ConsoleEvent{type=DISCONNECTED}。
+// Agent should report ConsoleEvent{type=DISCONNECTED} after closing the TTY.
+message CmdConsoleClose {
+  string session_id = 1;
+}
