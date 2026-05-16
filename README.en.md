@@ -166,6 +166,9 @@ systemctl restart narwhal-agent
 journalctl -u narwhal-agent --no-pager -n 50
 ```
 
+**rfw fails to start**
+Some cloud providers' network interface cards do not support eBPF. Try adding the `--xdp_mode skb` flag to the rfw service startup parameters.
+
 **Podman data disk not mounted**
 ```bash
 mount -o defaults,pquota,loop,noatime /xfs_disk.img /data

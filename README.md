@@ -166,6 +166,9 @@ systemctl restart narwhal-agent
 journalctl -u narwhal-agent --no-pager -n 50
 ```
 
+**rfw 启动失败**
+部分云厂商网卡不支持 eBPF。可以尝试在 rfw 服务启动参数中添加 `--xdp_mode skb`。
+
 **Podman 数据盘未挂载**
 ```bash
 mount -o defaults,pquota,loop,noatime /xfs_disk.img /data
