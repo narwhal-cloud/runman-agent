@@ -283,6 +283,21 @@ EOF
         || log "$(t "Kernel parameters will take effect after reboot." "内核参数将在重启后生效。")"
 }
 
+configure_journald() {
+    log "$(t "Configuring systemd-journald limits..." "配置 systemd-journald 日志限制...")"
+    cat > /etc/systemd/journald.conf <<EOF
+[Journal]
+SystemMaxUse=200M
+RuntimeMaxUse=50M
+SystemMaxFileSize=50M
+RateLimitIntervalSec=10s
+RateLimitBurst=1000
+ForwardToSyslog=no
+EOF
+    systemctl restart systemd-journald
+    log "$(t "✓ systemd-journald configured and restarted." "✓ systemd-journald 已配置并重启。")"
+}
+
 create_xfs_disk() {
     local disk=$1 size=$2 mount=$3 opts=$4
     if [ ! -f "$disk" ]; then
@@ -549,6 +564,7 @@ if systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null || [ -f "$AGENT_BINA
 
     # 重新应用 sysctl，确保旧安装升级后也获得最新内核参数（forwarding/accept_ra 等）
     enable_bbr
+    configure_journald
 
     download_agent "$ARCH"
 
@@ -831,6 +847,7 @@ if [ "$VIRT_TYPE" = "podman" ]; then
     check_podman_version
 fi
 enable_bbr
+configure_journald
 start_service chrony
 if [ "$VIRT_TYPE" = "podman" ]; then
     start_service lxcfs
