@@ -526,10 +526,10 @@ EOF
             log "$(t "rfw rules already exist, skipping default rules." "rfw 规则已存在，跳过默认规则安装。")"
         else
             log "$(t "Installing default rfw rules..." "安装默认 rfw 规则...")"
-            _geoip_countries='["CN","RU","IR","TM","TR","BY","VN"]'
+            _geoip_countries='["CN"]'
 
-            # Block inbound http/socks5/fet from high-risk regions
-            for _proto in http socks5 fet; do
+            # Block inbound http/socks/fet from high-risk regions
+            for _proto in http socks fet; do
                 curl -sf -X POST "http://$RFW_API_ADDR/api/rules" \
                     -H "Content-Type: application/json" \
                     -d "{\"priority\":100,\"direction\":\"in\",\"protocol\":\"$_proto\",\"action\":\"block\",\"port_start\":0,\"enabled\":true,\"ip_type\":\"geoip\",\"countries\":$_geoip_countries}" \
