@@ -5,10 +5,16 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"runman-agent/config"
 	"runman-agent/db"
 	"runman-agent/manager"
 	"sync"
 	"time"
+)
+
+const (
+	MinPort = 1024
+	MaxPort = 65535
 )
 
 // --- 转发管理实现 ---
@@ -37,13 +43,15 @@ type Manager struct {
 	mappings map[string][]*Entry
 	mgr      manager.VMManager
 	db       *db.DB
+	cfg      *config.Manager
 }
 
-func New(mgr manager.VMManager, database *db.DB) *Manager {
+func New(mgr manager.VMManager, database *db.DB, cfg *config.Manager) *Manager {
 	return &Manager{
 		mappings: make(map[string][]*Entry),
 		mgr:      mgr,
 		db:       database,
+		cfg:      cfg,
 	}
 }
 
@@ -80,6 +88,13 @@ func (m *Manager) AddMapping(ctx context.Context, vmId string, protocol string, 
 }
 
 func (m *Manager) addMapping(ctx context.Context, vmId string, protocol string, hostPort, guestPort int, description string, checkLimit bool) error {
+	if hostPort < MinPort || hostPort > MaxPort {
+		return fmt.Errorf("host port %d out of allowed range [%d, %d]", hostPort, MinPort, MaxPort)
+	}
+	if guestPort < MinPort || guestPort > MaxPort {
+		return fmt.Errorf("guest port %d out of allowed range [%d, %d]", guestPort, MinPort, MaxPort)
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -96,9 +111,7 @@ func (m *Manager) addMapping(ctx context.Context, vmId string, protocol string, 
 	}
 
 	if checkLimit && !exists {
-		// Note: MaxPortForward 现已从配置文件管理，不再从 db.Config 读取
-		// 此处使用硬编码的默认值；完整实现需注入 config.Manager
-		maxPF := 20 // TODO: 从配置管理器读取
+		maxPF := int(m.cfg.Get().MaxPortForward)
 		if len(m.mappings[vmId]) >= maxPF {
 			return fmt.Errorf("port forward limit reached (%d/%d)", len(m.mappings[vmId]), maxPF)
 		}

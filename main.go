@@ -147,7 +147,7 @@ func main() {
 
 	hostMon := monitor.NewHostMonitor()
 
-	pf := portforward.New(svc, database)
+	pf := portforward.New(svc, database, cfg)
 	// 启动时从 DB 恢复已持久化的端口转发规则
 	pf.Restore(context.Background())
 

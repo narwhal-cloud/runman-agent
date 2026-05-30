@@ -1458,6 +1458,14 @@ function rfwTag(cls, text) {
     return `<span class="inline-block px-2 py-0.5 rounded text-[11px] font-semibold ${cls}">${esc(text)}</span>`;
 }
 
+const RFW_PROTO_DPI = new Set(['http','tls','socks','socks5','ssh','fet','wireguard','openvpn','quic']);
+
+function rfwProtoTag(protocol) {
+    if (protocol === 'all')                  return rfwTag('bg-slate-100 text-slate-600', protocol);
+    if (RFW_PROTO_DPI.has(protocol))         return rfwTag('bg-purple-100 text-purple-700', protocol);
+    return rfwTag('bg-blue-100 text-blue-700', protocol); // tcp / udp
+}
+
 function rfwIpCell(rule) {
     if (rule.ip_type === 'any') return '<span class="text-slate-400 text-xs">any</span>';
     if (rule.ip_type === 'cidr') return `<code class="text-xs bg-slate-100 px-1 rounded">${esc(rule.ip)}</code>`;
@@ -1510,7 +1518,7 @@ async function rfwRefreshRules() {
                 <td class="px-4 py-2.5 text-xs">${r.priority}</td>
                 <td class="px-4 py-2.5">${rfwTag(r.enabled ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500', r.enabled ? 'on' : 'off')}</td>
                 <td class="px-4 py-2.5">${rfwTag(dirCls, r.direction)}</td>
-                <td class="px-4 py-2.5">${rfwTag('bg-indigo-100 text-indigo-700', r.protocol)}</td>
+                <td class="px-4 py-2.5">${rfwProtoTag(r.protocol)}</td>
                 <td class="px-4 py-2.5 text-xs font-mono">${port}</td>
                 <td class="px-4 py-2.5">${rfwIpCell(r)}</td>
                 <td class="px-4 py-2.5">${rfwTag(actCls, r.action)}</td>
@@ -1529,9 +1537,13 @@ async function rfwDeleteRule(id, btn) {
     if (!confirm(`Delete firewall rule #${id}?`)) return;
     btn.disabled = true;
     try {
-        await fetch(`/rfw/api/rules/${id}`, { method: 'DELETE' });
+        const r = await fetch(`/rfw/api/rules/${id}`, { method: 'DELETE' });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
         rfwRefreshRules();
-    } catch(_) { btn.disabled = false; }
+    } catch(e) {
+        alert('Delete failed: ' + e.message);
+        btn.disabled = false;
+    }
 }
 
 async function rfwCreateRule(e) {
@@ -1591,7 +1603,8 @@ function rfwOnIpType(val) {
 function rfwOnDirectionChange(val) {
     const protoSel = $('rfw-protocol');
     const options = protoSel.options;
-    const allowedOut = ['tcp', 'udp'];
+    // DPI 协议仅支持 in 方向；tcp / udp / all 支持双向
+    const allowedOut = ['tcp', 'udp', 'all'];
     
     for (let i = 0; i < options.length; i++) {
         const opt = options[i];
