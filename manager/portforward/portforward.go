@@ -91,9 +91,6 @@ func (m *Manager) addMapping(ctx context.Context, vmId string, protocol string, 
 	if hostPort < MinPort || hostPort > MaxPort {
 		return fmt.Errorf("host port %d out of allowed range [%d, %d]", hostPort, MinPort, MaxPort)
 	}
-	if guestPort < MinPort || guestPort > MaxPort {
-		return fmt.Errorf("guest port %d out of allowed range [%d, %d]", guestPort, MinPort, MaxPort)
-	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
