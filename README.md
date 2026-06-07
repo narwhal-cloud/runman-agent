@@ -25,15 +25,8 @@ NarwhalCloud Agent（`narwhal-agent`）是运行在母鸡上的后台服务，�
 
 > **警告：** 此操作会**清除整块硬盘的所有数据**。不支持 OpenVZ 或 LXC 虚拟机。
 
-**境外服务器：**
 ```bash
 curl -O https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh || wget -O reinstall.sh https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh
-bash reinstall.sh debian 13
-```
-
-**境内服务器：**
-```bash
-curl -O https://cnb.cool/bin456789/reinstall/-/git/raw/main/reinstall.sh || wget -O reinstall.sh https://cnb.cool/bin456789/reinstall/-/git/raw/main/reinstall.sh
 bash reinstall.sh debian 13
 ```
 
