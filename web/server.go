@@ -127,6 +127,8 @@ func (s *Server) ListenAndServe(addr string) error {
 
 	// 镜像列表
 	mux.HandleFunc("GET /api/images", s.handleImages)
+	mux.HandleFunc("GET /api/images/config", s.handleGetImagesConfig)
+	mux.HandleFunc("POST /api/images/config", s.handleSaveImagesConfig)
 
 	// VM 集合
 	mux.HandleFunc("GET /api/vms", s.handleListVMs)
@@ -562,7 +564,61 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, err, 500)
 		return
 	}
-	jsonOK(w, images)
+	filteredImages := manager.FilterAndSortImages(s.db, images)
+	jsonOK(w, filteredImages)
+}
+
+func (s *Server) handleGetImagesConfig(w http.ResponseWriter, r *http.Request) {
+	configStr, err := s.db.GetSystem("os_images_config")
+	if err != nil || configStr == "" {
+		configStr = "debian,alpine"
+	}
+
+	var config []string
+	for _, part := range strings.Split(configStr, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			config = append(config, part)
+		}
+	}
+
+	jsonOK(w, map[string]interface{}{
+		"config": config,
+		"all":    []string{"debian", "alpine"},
+	})
+}
+
+func (s *Server) handleSaveImagesConfig(w http.ResponseWriter, r *http.Request) {
+	var req []string
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonErr(w, err, 400)
+		return
+	}
+
+	var validated []string
+	for _, val := range req {
+		val = strings.TrimSpace(strings.ToLower(val))
+		if val == "debian" || val == "alpine" {
+			dup := false
+			for _, v := range validated {
+				if v == val {
+					dup = true
+					break
+				}
+			}
+			if !dup {
+				validated = append(validated, val)
+			}
+		}
+	}
+
+	configStr := strings.Join(validated, ",")
+	if err := s.db.SetSystem("os_images_config", configStr); err != nil {
+		jsonErr(w, err, 500)
+		return
+	}
+
+	jsonOK(w, map[string]interface{}{"success": true})
 }
 
 // ─── VM 列表 & 创建 ────────────────────────────────────────────────────────────

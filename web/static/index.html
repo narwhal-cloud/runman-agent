@@ -112,7 +112,10 @@
                     <span id="vm-count" class="text-xs bg-indigo-100 text-indigo-600 px-2 py-0.5 rounded-full font-bold">0</span>
                 </div>
                 <div class="flex items-center gap-3">
-
+                    <button onclick="openImagesConfig()" class="flex items-center gap-1.5 bg-slate-600 hover:bg-slate-700 text-white text-xs font-bold px-3 py-1.5 rounded-lg transition-colors">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+                        OS Config
+                    </button>
                     <button onclick="openCreateVM()" class="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold px-3 py-1.5 rounded-lg transition-colors">
                         <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 4v16m8-8H4"/></svg>
                         Create VM
@@ -604,6 +607,26 @@
     </div>
     <!-- Shared Tooltip -->
     <div id="monitor-tooltip" class="absolute hidden z-[60] pointer-events-none bg-slate-900/90 text-white p-2 rounded-lg text-[10px] font-mono shadow-xl border border-slate-700 backdrop-blur-sm"></div>
+</div>
+
+<!-- ─── OS Images Config Modal ──────────────────────────────────────────────── -->
+<div id="modal-images-config" class="fixed inset-0 modal-bg z-50 hidden flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden relative">
+        <div class="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50 shrink-0">
+            <div>
+                <h3 class="font-bold text-slate-800">OS Images Configuration</h3>
+                <p class="text-xs text-slate-400 mt-0.5">Toggle active OS and adjust their order in list.</p>
+            </div>
+            <button onclick="closeModal('modal-images-config')" class="text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button>
+        </div>
+        <div class="p-6 space-y-4 max-h-[60vh] overflow-y-auto" id="images-config-list">
+            <!-- Rendered dynamically -->
+        </div>
+        <div class="px-6 py-4 bg-slate-50 border-t border-slate-100 flex gap-3 shrink-0">
+            <button type="button" onclick="closeModal('modal-images-config')" class="flex-1 py-2 border border-slate-200 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-50">Cancel</button>
+            <button type="button" onclick="saveImagesConfig()" class="flex-1 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-bold transition-colors">Save Changes</button>
+        </div>
+    </div>
 </div>
 
 <!-- ─── Shared style for form labels / inputs ─────────────────────────────── -->
@@ -1293,7 +1316,7 @@ function openConsole(vmId) {
 }
 
 // Close modal on background click (excluding console)
-['modal-create','modal-manage','modal-ports','modal-version','modal-monitor'].forEach(id => {
+['modal-create','modal-manage','modal-ports','modal-version','modal-monitor','modal-images-config'].forEach(id => {
     $(id).addEventListener('click', e => { if(e.target===e.currentTarget) closeModal(id); });
 });
 // Disabled background click for console to prevent accidental closure
@@ -1676,6 +1699,96 @@ async function init() {
     }
 
     refreshConnectionStatus(conf);
+}
+
+let tempConfigList = [];
+let allConfigList = [];
+
+async function openImagesConfig() {
+    try {
+        const res = await api('GET', '/api/images/config');
+        allConfigList = res.all || ["debian", "alpine"];
+        const configItems = res.config || ["debian", "alpine"];
+        
+        tempConfigList = [...configItems];
+        allConfigList.forEach(item => {
+            if (!tempConfigList.includes(item)) {
+                tempConfigList.push(item);
+            }
+        });
+        
+        openModal('modal-images-config');
+        renderImagesConfigList(configItems);
+    } catch (e) {
+        alert('Failed to load OS images config: ' + e.message);
+    }
+}
+
+function renderImagesConfigList(activeItems) {
+    const container = document.getElementById('images-config-list');
+    container.innerHTML = tempConfigList.map((item, idx) => {
+        const enabled = activeItems.includes(item);
+        return `
+            <div class="flex items-center justify-between p-3 bg-slate-50 rounded-lg border border-slate-200">
+                <div class="flex items-center gap-3">
+                    <input type="checkbox" id="img-chk-${item}" ${enabled ? 'checked' : ''} class="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500">
+                    <span class="font-medium text-slate-700 capitalize">${item}</span>
+                </div>
+                <div class="flex items-center gap-1.5 flex-row">
+                    <button onclick="moveImageConfig(${idx}, -1)" ${idx === 0 ? 'disabled class="opacity-30 cursor-not-allowed text-slate-400 p-1"' : 'class="text-indigo-600 hover:bg-slate-100 rounded p-1"'} title="Move Up">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7"/></svg>
+                    </button>
+                    <button onclick="moveImageConfig(${idx}, 1)" ${idx === tempConfigList.length - 1 ? 'disabled class="opacity-30 cursor-not-allowed text-slate-400 p-1"' : 'class="text-indigo-600 hover:bg-slate-100 rounded p-1"'} title="Move Down">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                    </button>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+function moveImageConfig(idx, direction) {
+    const targetIdx = idx + direction;
+    if (targetIdx < 0 || targetIdx >= tempConfigList.length) return;
+    
+    const temp = tempConfigList[idx];
+    tempConfigList[idx] = tempConfigList[targetIdx];
+    tempConfigList[targetIdx] = temp;
+    
+    const currentActive = [];
+    tempConfigList.forEach(item => {
+        const chk = document.getElementById(`img-chk-${item}`);
+        if (chk && chk.checked) {
+            currentActive.push(item);
+        }
+    });
+    
+    renderImagesConfigList(currentActive);
+}
+
+function saveImagesConfig() {
+    const result = [];
+    tempConfigList.forEach(item => {
+        const chk = document.getElementById(`img-chk-${item}`);
+        if (chk && chk.checked) {
+            result.push(item);
+        }
+    });
+
+    api('POST', '/api/images/config', result)
+        .then(() => {
+            closeModal('modal-images-config');
+            return api('GET', '/api/images');
+        })
+        .then(imgs => {
+            images = imgs || [];
+            populateImageSelect('c-image');
+            populateImageSelect('r-image');
+            alert('OS configuration saved successfully!');
+        })
+        .catch(err => {
+            alert('Failed to save configuration: ' + err.message);
+        });
 }
 
 init().then(() => {

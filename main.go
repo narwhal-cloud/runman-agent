@@ -502,6 +502,7 @@ func (a *Agent) sendHeartbeat(stream agent.AgentGateway_ConnectClient) {
 
 	vms, _ := a.mgr.ListVMs(ctx)
 	images, _ := a.mgr.GetSupportedImages(ctx)
+	images = manager.FilterAndSortImages(a.db, images)
 
 	// 流量数据由 TrafficService 后台定期写入 DB，这里只读取累计值填充心跳
 	for _, vm := range vms {

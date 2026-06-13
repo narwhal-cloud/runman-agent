@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"strings"
+
 	"runman-agent/db"
 	"runman-agent/proto/agent"
 )
@@ -195,4 +197,47 @@ func (s *VMService) Autostart(ctx context.Context) {
 // Cleanup 执行幽灵实例清理
 func (s *VMService) Cleanup(ctx context.Context) error {
 	return s.mgr.Cleanup(ctx)
+}
+
+// FilterAndSortImages 根据数据库中的 os_images_config 配置对镜像列表进行过滤和排序。
+func FilterAndSortImages(d *db.DB, images []*agent.OSImageInfo) []*agent.OSImageInfo {
+	configStr, err := d.GetSystem("os_images_config")
+	if err != nil || configStr == "" {
+		return images
+	}
+
+	// 解析配置列表，如 "alpine,debian" -> ["alpine", "debian"]
+	var config []string
+	for _, part := range strings.Split(configStr, ",") {
+		part = strings.TrimSpace(strings.ToLower(part))
+		if part != "" {
+			config = append(config, part)
+		}
+	}
+
+	// 如果配置为空列表，即全取消了，返回空列表
+	if len(config) == 0 {
+		return []*agent.OSImageInfo{}
+	}
+
+	// 建立一个 map，分类为 "debian" 和 "alpine"
+	categoryMap := make(map[string]*agent.OSImageInfo)
+	for _, img := range images {
+		lowerId := strings.ToLower(img.Id)
+		if strings.Contains(lowerId, "debian") {
+			categoryMap["debian"] = img
+		} else if strings.Contains(lowerId, "alpine") {
+			categoryMap["alpine"] = img
+		}
+	}
+
+	// 按照配置顺序组装最终列表
+	var result []*agent.OSImageInfo
+	for _, cat := range config {
+		if img, ok := categoryMap[cat]; ok {
+			result = append(result, img)
+		}
+	}
+
+	return result
 }

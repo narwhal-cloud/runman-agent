@@ -748,13 +748,43 @@ update_vm_images() {
         mkdir -p "$dir"
         log "[Alpine Linux (nocloud cloud image)]"
 
-        local cloud_base="https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/cloud"
+        local cloud_base=""
+        local latest_qcow2=""
 
-        # Resolve latest nocloud bios+cloudinit qcow2
-        local latest_qcow2
-        latest_qcow2=$(wget -qO- "$cloud_base/" \
-            | grep -o 'nocloud_alpine-[0-9][^"]*-x86_64-bios-cloudinit-r[0-9]*\.qcow2' \
-            | sort -uV | tail -1)
+        # Try to resolve from latest-stable releases/cloud
+        if wget -q --spider "https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/cloud/" 2>/dev/null; then
+            cloud_base="https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/cloud"
+            latest_qcow2=$(wget -qO- "$cloud_base/" 2>/dev/null \
+                | grep -o 'nocloud_alpine-[0-9][^"]*-x86_64-bios-cloudinit-r[0-9]*\.qcow2' \
+                | sort -uV | tail -1 || true)
+        fi
+
+        # Fallback to older stable versions if the newest releases directory does not contain 'cloud' yet
+        if [ -z "$latest_qcow2" ]; then
+            log "No cloud image found in latest-stable, searching previous v3.x releases..."
+            local versions
+            versions=$(wget -qO- "https://dl-cdn.alpinelinux.org/alpine/" 2>/dev/null \
+                | grep -o 'href=["'\''\]\?v3\.[0-9]*/\?["'\''\]\?' \
+                | sed -e 's/href=//' -e 's/["'\''/]//g' \
+                | sort -t. -k2,2rn || true)
+
+            for ver in $versions; do
+                local test_url="https://dl-cdn.alpinelinux.org/alpine/$ver/releases/cloud"
+                if wget -q --spider "$test_url/" 2>/dev/null; then
+                    local qcow
+                    qcow=$(wget -qO- "$test_url/" 2>/dev/null \
+                        | grep -o 'nocloud_alpine-[0-9][^"]*-x86_64-bios-cloudinit-r[0-9]*\.qcow2' \
+                        | sort -uV | tail -1 || true)
+                    if [ -n "$qcow" ]; then
+                        cloud_base="$test_url"
+                        latest_qcow2="$qcow"
+                        log "Found cloud image in $ver: $latest_qcow2"
+                        break
+                    fi
+                fi
+            done
+        fi
+
         [ -n "$latest_qcow2" ] || die "Could not resolve Alpine cloud image filename"
 
         local latest_ver
