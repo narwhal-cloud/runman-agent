@@ -8,9 +8,18 @@ import (
 	"runman-agent/config"
 	"runman-agent/db"
 	"runman-agent/manager"
+	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
+
+// IPCount 记录单个来源 IP 的连接情况。
+type IPCount struct {
+	IP          string `json:"ip"`
+	ActiveCount int64  `json:"active_count"` // 当前活跃连接数
+	Count       int64  `json:"count"`        // 历史总连接数
+}
 
 const (
 	MinPort = 1024
@@ -26,8 +35,60 @@ type Entry struct {
 	GuestPort   int
 	TargetAddr  string // resolved "ip:port" at setup time, for diagnostics
 	Description string
-	cancel      context.CancelFunc
-	ln          io.Closer
+
+	// Stats — populated by GetReport(), zero in live entries.
+	ActiveConns int64
+	TotalConns  int64
+	TopIPs      []IPCount
+
+	// Internal live state — do not copy after first use.
+	cancel        context.CancelFunc
+	ln            io.Closer
+	connActive    int64 // atomic: current active connections
+	connTotal     int64 // atomic: all-time connections since rule added
+	connIPMu      sync.Mutex
+	connIPs       map[string]int64 // total connections per IP
+	connActiveIPs map[string]int64 // active connections per IP
+}
+
+func (e *Entry) trackConnect(ip string) {
+	atomic.AddInt64(&e.connActive, 1)
+	atomic.AddInt64(&e.connTotal, 1)
+	e.connIPMu.Lock()
+	e.connIPs[ip]++
+	e.connActiveIPs[ip]++
+	e.connIPMu.Unlock()
+}
+
+func (e *Entry) trackDisconnect(ip string) {
+	atomic.AddInt64(&e.connActive, -1)
+	e.connIPMu.Lock()
+	if e.connActiveIPs[ip] > 1 {
+		e.connActiveIPs[ip]--
+	} else {
+		delete(e.connActiveIPs, ip)
+	}
+	e.connIPMu.Unlock()
+}
+
+func (e *Entry) getTopIPs() []IPCount {
+	e.connIPMu.Lock()
+	result := make([]IPCount, 0, len(e.connIPs))
+	for ip, c := range e.connIPs {
+		result = append(result, IPCount{
+			IP:          ip,
+			Count:       c,
+			ActiveCount: e.connActiveIPs[ip],
+		})
+	}
+	e.connIPMu.Unlock()
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].ActiveCount != result[j].ActiveCount {
+			return result[i].ActiveCount > result[j].ActiveCount
+		}
+		return result[i].IP < result[j].IP
+	})
+	return result
 }
 
 // DesiredRule 用于 SyncForVM 全量同步时描述期望状态
@@ -125,13 +186,15 @@ func (m *Manager) addMapping(ctx context.Context, vmId string, protocol string, 
 
 	runCtx, cancel := context.WithCancel(context.Background())
 	entry := &Entry{
-		VMID:        vmId,
-		Protocol:    protocol,
-		HostPort:    hostPort,
-		GuestPort:   guestPort,
-		TargetAddr:  targetAddr,
-		Description: description,
-		cancel:      cancel,
+		VMID:          vmId,
+		Protocol:      protocol,
+		HostPort:      hostPort,
+		GuestPort:     guestPort,
+		TargetAddr:    targetAddr,
+		Description:   description,
+		cancel:        cancel,
+		connIPs:       make(map[string]int64),
+		connActiveIPs: make(map[string]int64),
 	}
 
 	if protocol == "tcp" {
@@ -141,7 +204,7 @@ func (m *Manager) addMapping(ctx context.Context, vmId string, protocol string, 
 			return err
 		}
 		entry.ln = ln
-		go m.runTCP(runCtx, ln, targetAddr)
+		go m.runTCP(runCtx, ln, targetAddr, entry)
 	} else {
 		pc, err := net.ListenPacket("udp", fmt.Sprintf(":%d", hostPort))
 		if err != nil {
@@ -149,7 +212,7 @@ func (m *Manager) addMapping(ctx context.Context, vmId string, protocol string, 
 			return err
 		}
 		entry.ln = pc
-		go m.runUDP(runCtx, pc, targetAddr)
+		go m.runUDP(runCtx, pc, targetAddr, entry)
 	}
 
 	m.mappings[vmId] = append(m.mappings[vmId], entry)
@@ -242,6 +305,9 @@ func (m *Manager) GetReport() []Entry {
 				GuestPort:   e.GuestPort,
 				TargetAddr:  e.TargetAddr,
 				Description: e.Description,
+				ActiveConns: atomic.LoadInt64(&e.connActive),
+				TotalConns:  atomic.LoadInt64(&e.connTotal),
+				TopIPs:      e.getTopIPs(),
 			})
 		}
 	}
@@ -250,7 +316,7 @@ func (m *Manager) GetReport() []Entry {
 
 // --- 内部转发逻辑 ---
 
-func (m *Manager) runTCP(ctx context.Context, ln net.Listener, target string) {
+func (m *Manager) runTCP(ctx context.Context, ln net.Listener, target string, e *Entry) {
 	defer func() { _ = ln.Close() }()
 	for {
 		conn, err := ln.Accept()
@@ -263,12 +329,17 @@ func (m *Manager) runTCP(ctx context.Context, ln net.Listener, target string) {
 				continue
 			}
 		}
-		go m.handleTCP(ctx, conn, target)
+		go m.handleTCP(ctx, conn, target, e)
 	}
 }
 
-func (m *Manager) handleTCP(ctx context.Context, src net.Conn, target string) {
+func (m *Manager) handleTCP(ctx context.Context, src net.Conn, target string, e *Entry) {
 	defer func() { _ = src.Close() }()
+
+	host, _, _ := net.SplitHostPort(src.RemoteAddr().String())
+	e.trackConnect(host)
+	defer e.trackDisconnect(host)
+
 	dst, err := net.DialTimeout("tcp", target, 5*time.Second)
 	if err != nil {
 		return
@@ -291,7 +362,7 @@ func (m *Manager) handleTCP(ctx context.Context, src net.Conn, target string) {
 	}
 }
 
-func (m *Manager) runUDP(ctx context.Context, pc net.PacketConn, target string) {
+func (m *Manager) runUDP(ctx context.Context, pc net.PacketConn, target string, e *Entry) {
 	defer func() { _ = pc.Close() }()
 	targetAddr, _ := net.ResolveUDPAddr("udp", target)
 	sessions := make(map[string]net.Conn)
@@ -319,12 +390,15 @@ func (m *Manager) runUDP(ctx context.Context, pc net.PacketConn, target string) 
 				continue
 			}
 			sessions[addr.String()] = client
-			go func(a net.Addr, c net.Conn) {
+			host, _, _ := net.SplitHostPort(addr.String())
+			e.trackConnect(host)
+			go func(a net.Addr, c net.Conn, h string) {
 				defer func() {
 					smu.Lock()
 					delete(sessions, a.String())
 					smu.Unlock()
 					_ = c.Close()
+					e.trackDisconnect(h)
 				}()
 				rBuf := make([]byte, 64*1024)
 				for {
@@ -335,7 +409,7 @@ func (m *Manager) runUDP(ctx context.Context, pc net.PacketConn, target string) 
 					}
 					_, _ = pc.WriteTo(rBuf[:rn], a)
 				}
-			}(addr, client)
+			}(addr, client, host)
 		}
 		smu.Unlock()
 

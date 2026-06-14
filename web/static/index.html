@@ -455,13 +455,18 @@
 
 <!-- ─── Port Forwards ─────────────────────────────────────────────────────── -->
 <div id="modal-ports" class="fixed inset-0 modal-bg z-50 hidden flex items-center justify-center p-4">
-    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg">
-        <div class="px-6 py-4 border-b border-slate-100 flex justify-between items-center">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-2xl">
+        <div class="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
             <div>
-                <h3 class="font-bold text-slate-800">Port Forwards</h3>
+                <div class="flex items-center gap-2">
+                    <h3 class="font-bold text-slate-800">Port Forwards</h3>
+                    <span id="pf-live-dot" class="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
+                        <span class="w-1.5 h-1.5 bg-emerald-500 rounded-full pulse"></span> LIVE
+                    </span>
+                </div>
                 <p id="ports-vmid" class="text-xs text-slate-400 font-mono mt-0.5"></p>
             </div>
-            <button onclick="closeModal('modal-ports')" class="text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button>
+            <button onclick="closePortFwdsModal()" class="text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button>
         </div>
         <div class="p-6 space-y-4">
             <!-- Add rule -->
@@ -488,8 +493,11 @@
             </div>
             <!-- List -->
             <div>
-                <p class="text-xs font-bold text-slate-500 uppercase tracking-widest mb-2">Active Rules</p>
-                <div id="pf-list" class="space-y-1.5 max-h-64 overflow-y-auto"></div>
+                <div class="flex items-center justify-between mb-2">
+                    <p class="text-xs font-bold text-slate-500 uppercase tracking-widest">Active Rules</p>
+                    <div id="pf-summary" class="hidden text-[10px] font-mono text-slate-400"></div>
+                </div>
+                <div id="pf-list" class="space-y-2 max-h-[420px] overflow-y-auto"></div>
                 <div id="pf-empty" class="hidden text-center text-slate-400 text-xs py-4">No port forward rules.</div>
             </div>
             <div id="ports-err" class="hidden text-red-500 text-xs bg-red-50 p-2 rounded"></div>
@@ -971,13 +979,24 @@ async function doDelete() {
 }
 
 // ─── Port Forwards ────────────────────────────────────────────────────────────
+let pfRefreshInterval = null;
+
 async function openPortFwds(vmId) {
     activeVmId = vmId;
     $('ports-vmid').textContent = vmId;
     hideErr('ports-err');
     $('pf-hport').value=''; $('pf-gport').value='';
+    $('pf-summary').classList.add('hidden');
     await refreshPortFwds();
     openModal('modal-ports');
+    clearInterval(pfRefreshInterval);
+    pfRefreshInterval = setInterval(refreshPortFwds, 3000);
+}
+
+function closePortFwdsModal() {
+    clearInterval(pfRefreshInterval);
+    pfRefreshInterval = null;
+    closeModal('modal-ports');
 }
 
 async function refreshPortFwds() {
@@ -987,20 +1006,61 @@ async function refreshPortFwds() {
         if (!rules.length) {
             list.innerHTML='';
             $('pf-empty').classList.remove('hidden');
+            $('pf-summary').classList.add('hidden');
             return;
         }
         $('pf-empty').classList.add('hidden');
-        list.innerHTML = rules.map(r => `
-            <div class="flex items-center justify-between bg-slate-50 rounded-lg px-3 py-2">
-                <div class="font-mono text-xs">
-                    <span class="font-bold text-indigo-600 uppercase">${r.protocol}</span>
-                    <span class="text-slate-600"> :${r.host_port}</span>
-                    <span class="text-slate-400"> → </span>
-                    <span class="text-slate-600">${r.target_addr || ':'+r.guest_port}</span>
-                    ${r.description ? `<span class="ml-2 text-slate-400">${r.description}</span>` : ''}
+
+        // 汇总统计
+        const totalActive = rules.reduce((s, r) => s + (r.active_conns || 0), 0);
+        const totalAll    = rules.reduce((s, r) => s + (r.total_conns || 0), 0);
+        const sumEl = $('pf-summary');
+        sumEl.textContent = `${rules.length} rules · ${totalActive} active · ${totalAll} total`;
+        sumEl.classList.remove('hidden');
+
+        list.innerHTML = rules.map(r => {
+            const active = r.active_conns || 0;
+            const total  = r.total_conns  || 0;
+            const topIPs = r.top_ips || [];
+            const activeCls = active > 0
+                ? 'bg-green-100 text-green-700 border-green-200'
+                : 'bg-slate-100 text-slate-400 border-slate-200';
+            const ipBadges = topIPs.map(ip => {
+                const hasActive = ip.active_count > 0;
+                const cls = hasActive
+                    ? 'bg-green-50 text-green-700 border-green-200'
+                    : 'bg-indigo-50 text-indigo-600 border-indigo-100';
+                const activeStr = hasActive
+                    ? `<span class="text-green-500 font-black">●${ip.active_count}</span><span class="text-slate-300">·</span>`
+                    : '';
+                return `<span class="inline-flex items-center gap-1 font-mono text-[10px] border px-1.5 py-0.5 rounded ${cls}">
+                    ${activeStr}${esc(ip.ip)}<span class="opacity-40">·</span><span class="opacity-60">${ip.count}</span>
+                </span>`;
+            }).join('');
+
+            return `
+            <div class="bg-slate-50 rounded-xl border border-slate-100 px-4 py-3 space-y-2">
+                <div class="flex items-center justify-between gap-2">
+                    <div class="flex items-center gap-2 font-mono text-xs min-w-0">
+                        <span class="font-black text-indigo-600 uppercase shrink-0">${r.protocol}</span>
+                        <span class="text-slate-700 shrink-0">:${r.host_port}</span>
+                        <span class="text-slate-300">→</span>
+                        <span class="text-slate-600 truncate">${esc(r.target_addr || ':' + r.guest_port)}</span>
+                        ${r.description ? `<span class="text-slate-400 truncate">${esc(r.description)}</span>` : ''}
+                    </div>
+                    <div class="flex items-center gap-1.5 shrink-0">
+                        <span class="text-[10px] font-bold px-2 py-0.5 rounded-full border ${activeCls}">
+                            ● ${active} active
+                        </span>
+                        <span class="text-[10px] font-bold px-2 py-0.5 rounded-full border bg-slate-100 text-slate-500 border-slate-200">
+                            ${total} total
+                        </span>
+                        <button onclick="doDelPortFwd('${r.protocol}',${r.host_port})" class="text-red-400 hover:text-red-600 text-xs font-bold w-6 h-6 flex items-center justify-center hover:bg-red-50 rounded-full transition-colors">✕</button>
+                    </div>
                 </div>
-                <button onclick="doDelPortFwd('${r.protocol}',${r.host_port})" class="text-red-400 hover:text-red-600 text-xs font-bold px-2 py-0.5 hover:bg-red-50 rounded">✕</button>
-            </div>`).join('');
+                ${topIPs.length ? `<div class="flex flex-wrap gap-1">${ipBadges}</div>` : ''}
+            </div>`;
+        }).join('');
     } catch(e){ showErr('ports-err', e.message); }
 }
 
@@ -1316,9 +1376,10 @@ function openConsole(vmId) {
 }
 
 // Close modal on background click (excluding console)
-['modal-create','modal-manage','modal-ports','modal-version','modal-monitor','modal-images-config'].forEach(id => {
+['modal-create','modal-manage','modal-version','modal-monitor','modal-images-config'].forEach(id => {
     $(id).addEventListener('click', e => { if(e.target===e.currentTarget) closeModal(id); });
 });
+$('modal-ports').addEventListener('click', e => { if(e.target===e.currentTarget) closePortFwdsModal(); });
 // Disabled background click for console to prevent accidental closure
 // $('modal-console').addEventListener('click', e => { if(e.target===e.currentTarget) closeConsole(); });
 

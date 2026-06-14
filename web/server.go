@@ -879,20 +879,24 @@ func (s *Server) handleResetTraffic(w http.ResponseWriter, r *http.Request) {
 
 // ─── 端口转发 ──────────────────────────────────────────────────────────────────
 
-// portFwdEntry 是端口转发规则的 JSON 表示。
+// portFwdEntry 是端口转发规则的 JSON 表示，含实时连接统计。
 type portFwdEntry struct {
-	Protocol    string `json:"protocol"`
-	HostPort    int    `json:"host_port"`
-	GuestPort   int    `json:"guest_port"`
-	TargetAddr  string `json:"target_addr,omitempty"`
-	Description string `json:"description,omitempty"`
+	Protocol    string                `json:"protocol"`
+	HostPort    int                   `json:"host_port"`
+	GuestPort   int                   `json:"guest_port"`
+	TargetAddr  string                `json:"target_addr,omitempty"`
+	Description string                `json:"description,omitempty"`
+	ActiveConns int64                 `json:"active_conns"`
+	TotalConns  int64                 `json:"total_conns"`
+	TopIPs      []portforward.IPCount `json:"top_ips"`
 }
 
 func (s *Server) handleListPortFwds(w http.ResponseWriter, r *http.Request) {
 	vmID := r.PathValue("id")
 	all := s.pf.GetReport()
 	result := make([]portFwdEntry, 0)
-	for _, e := range all {
+	for i := range all {
+		e := &all[i]
 		if e.VMID == vmID {
 			result = append(result, portFwdEntry{
 				Protocol:    e.Protocol,
@@ -900,6 +904,9 @@ func (s *Server) handleListPortFwds(w http.ResponseWriter, r *http.Request) {
 				GuestPort:   e.GuestPort,
 				TargetAddr:  e.TargetAddr,
 				Description: e.Description,
+				ActiveConns: e.ActiveConns,
+				TotalConns:  e.TotalConns,
+				TopIPs:      e.TopIPs,
 			})
 		}
 	}
