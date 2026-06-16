@@ -272,8 +272,15 @@ func (a *Agent) measureBandwidth() {
 }
 
 // run 是主循环：持续从配置管理器读取最新配置，等待 Token 就绪后建立 gRPC 连接，
-// 断连后自动重试。
+// 断连后使用指数退避自动重试（5s → 10s → 20s … 最大 5min）。
+// 若本次调用曾成功建立连接，下次重试延迟重置为 baseDelay。
 func (a *Agent) run() {
+	const (
+		baseDelay = 5 * time.Second
+		maxDelay  = 5 * time.Minute
+	)
+	delay := baseDelay
+
 	for {
 		a.config = a.cfg.Get()
 		if a.config.Token == "" {
@@ -281,10 +288,30 @@ func (a *Agent) run() {
 			time.Sleep(10 * time.Second)
 			continue
 		}
+
+		a.mu.RLock()
+		beforeConnect := a.lastConnected
+		a.mu.RUnlock()
+
 		err := a.connectAndLoop()
-		log.Printf("Disconnected: %v, retrying in 5s...", err)
+
+		a.mu.RLock()
+		everConnected := a.lastConnected.After(beforeConnect)
+		a.mu.RUnlock()
+
+		if everConnected {
+			delay = baseDelay
+		}
+
+		log.Printf("Disconnected: %v, retrying in %v...", err, delay)
 		a.setConnected(false, err.Error())
-		time.Sleep(5 * time.Second)
+		time.Sleep(delay)
+
+		if !everConnected {
+			if delay *= 2; delay > maxDelay {
+				delay = maxDelay
+			}
+		}
 	}
 }
 
