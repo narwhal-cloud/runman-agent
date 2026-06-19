@@ -1,12 +1,44 @@
 # NarwhalCloud Agent — Installation Guide
 
-[中文](README.md)
+> **Turn your idle server into a NAT VPS shared-hosting node. Amortize your costs. Earn revenue per day, per tenant.**
+
+[中文](README.md) | [Dashboard](https://dash.fuckip.me) | [Website](https://fuckip.me)
 
 ---
 
-## Overview
+## What Is This?
 
-NarwhalCloud Agent (`narwhal-agent`) is the host-side daemon that manages container/VM instances on your VPS. It connects your server to the NarwhalCloud platform and exposes a local web management panel.
+**NarwhalCloud** is a C2C NAT VPS sharing marketplace. You connect your server — a dedicated box, a high-bandwidth VPS, or a co-located machine — to the platform. The platform slices your server's resources into individual **NAT VPS instances** and sells them to tenants on a per-day basis. Revenue is split 80/20 in your favor. Your hosting and bandwidth bills get amortized across every paying tenant.
+
+```
+Your server ──► NarwhalCloud Agent ──► NAT VPS instances (tenants pay per day)
+                                              │
+                   Platform keeps 20% ◄──────┤
+                   You earn 80%       ◄──────┘
+```
+
+**The cost math is straightforward.** A $50/month dedicated server running 30 NAT VPS instances at $3/month each generates $90/month — your costs are covered and you net $40, plus free compute for your own use.
+
+### What Is a NAT VPS?
+
+A NAT VPS is a virtual machine that shares a single public IP with other VMs on the same host and exposes services through port forwarding rules. Because it eliminates the cost of a dedicated IPv4 address, a NAT VPS typically sells for 1/5 to 1/3 the price of an equivalent dedicated-IP VPS.
+
+For the majority of use cases — scrapers, bots, reverse proxies, learning Linux, self-hosting behind Cloudflare, game servers — a NAT VPS works exactly as well as a dedicated-IP VPS. NarwhalCloud Agent is the daemon that gives your server the ability to carve out NAT VPS instances, manage port forwarding, account for traffic, and connect to the platform — automatically.
+
+### What Servers Can You Connect?
+
+| Server Type | Typical Scenario |
+|---|---|
+| Dedicated server / bare metal | Core use case — high density, highest revenue |
+| High-bandwidth or multi-IP VPS | Monetize idle bandwidth and ports |
+| Co-located server | Offset rack rent and transit with tenant revenue |
+| Home-lab server | Cover electricity bills with lightweight shared hosting |
+
+---
+
+## Overview (Technical)
+
+NarwhalCloud Agent (`narwhal-agent`) is the host-side daemon that manages container/VM instances on your server. It connects your machine to the NarwhalCloud platform, exposes a local web management panel, and handles NAT port forwarding, traffic metering, and IPv6 allocation automatically. The agent bridges the platform control plane and the tenant instances running on your hardware — it is the only process you need to install.
 
 ## System Requirements
 
