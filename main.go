@@ -208,10 +208,10 @@ func main() {
 
 	// 启动时异步测速，结果只保留内存，不写配置
 	go a.measureBandwidth()
-	// 启动时检测公网 IPv4，附带在心跳中上报
+	// 启动时检测公网 IPv4/IPv6，附带在心跳中上报；之后每 5 分钟刷新一次
 	go a.detectIPv4()
-	// 启动时检测公网 IPv6，附带在心跳中上报
 	go a.detectIPv6()
+	go a.refreshPublicIPLoop()
 
 	// 按需启动 NDP 应答器（公网 IPv6 场景）
 	if conf.NdpIface != "" {
@@ -736,13 +736,17 @@ func vmStatusString(s agent.VMStatus) string {
 	}
 }
 
-// detectIPv4 启动时获取一次公网 IPv4
+// detectIPv4 获取公网 IPv4 并更新字段；fetch 失败时保留原值。
 func (a *Agent) detectIPv4() {
 	ip := fetchPublicIPv4()
+	if ip == "" {
+		return
+	}
 	a.mu.Lock()
+	changed := ip != a.entryIPv4
 	a.entryIPv4 = ip
 	a.mu.Unlock()
-	if ip != "" {
+	if changed {
 		log.Printf("Public IPv4: %s", ip)
 	}
 }
@@ -767,14 +771,29 @@ func fetchPublicIPv4() string {
 	return strings.TrimSpace(string(b))
 }
 
-// detectIPv6 启动时获取一次公网 IPv6
+// detectIPv6 获取公网 IPv6 并更新字段；fetch 失败时保留原值。
 func (a *Agent) detectIPv6() {
 	ip := fetchPublicIPv6()
+	if ip == "" {
+		return
+	}
 	a.mu.Lock()
+	changed := ip != a.entryIPv6
 	a.entryIPv6 = ip
 	a.mu.Unlock()
-	if ip != "" {
+	if changed {
 		log.Printf("Public IPv6: %s", ip)
+	}
+}
+
+// refreshPublicIPLoop 每 5 分钟重新检测一次公网 IP，
+// 确保母鸡 IP 变更后无需断线重连即可自动更新心跳中的入口地址。
+func (a *Agent) refreshPublicIPLoop() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		a.detectIPv4()
+		a.detectIPv6()
 	}
 }
 
