@@ -524,15 +524,12 @@ func (m *Manager) genCloudInit(vmID, distro, password string, net *netConfig) er
 	_ = os.MkdirAll(ciDir, 0755)
 
 	// 必须严格遵守 YAML 缩进格式
-	// 根据 distro 选择包管理器和服务启动方式
-	var pkgMgr, pkgList, svcRestart, svcFile, svcEnable, sshInstall, sshEnable string
+	// 基础镜像已预装 curl/e2fsprogs 等软件包并配置好 sshd root 登录
+	// （images 仓库 CI 预构建或 install.sh 回退构建时烤入），
+	// 实例级 cloud-init 不再执行联网装包，减少开机时间；
+	// runcmd 仅保留毫秒级本地命令（sed/重启 sshd）兼容旧版 install.sh 构建的镜像
+	var svcFile, svcEnable string
 	if distro == "alpine" {
-		pkgMgr = "apk add --no-cache"
-		pkgList = "curl e2fsprogs"
-		// 兜底：个别镜像/构建缺 sshd 时现场补装，并确保加入默认 runlevel（否则重启后不自启）
-		sshInstall = `[ sh, -c, "command -v sshd >/dev/null 2>&1 || apk add --no-cache openssh || true" ]`
-		sshEnable = "rc-update add sshd default 2>/dev/null || true"
-		svcRestart = "rc-service sshd restart 2>/dev/null || service sshd restart 2>/dev/null || true"
 		svcFile = `  - path: /etc/init.d/report-memory
     content: |
       #!/sbin/openrc-run
@@ -544,11 +541,6 @@ func (m *Manager) genCloudInit(vmID, distro, password string, net *netConfig) er
 		svcEnable = `  - rc-update add report-memory default
   - rc-service report-memory start`
 	} else {
-		pkgMgr = "apt-get update && apt-get install -y"
-		pkgList = "curl e2fsprogs cloud-guest-utils"
-		sshInstall = `[ sh, -c, "command -v sshd >/dev/null 2>&1 || (apt-get update && apt-get install -y openssh-server) || true" ]`
-		sshEnable = "systemctl enable ssh 2>/dev/null || systemctl enable sshd 2>/dev/null || true"
-		svcRestart = "systemctl restart sshd 2>/dev/null || service sshd restart 2>/dev/null || true"
 		svcFile = `  - path: /etc/systemd/system/report-memory.service
     content: |
       [Unit]
@@ -626,13 +618,10 @@ write_files:
 %s
 runcmd:
   - resize2fs /dev/vda1 || true
-  - %s
   - sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
-  - %s
-  - %s
-  - %s %s
+  - [ sh, -c, "systemctl restart sshd 2>/dev/null || rc-service sshd restart 2>/dev/null || true" ]
 %s
-`, password, vmID, svcFile, sshInstall, sshEnable, svcRestart, pkgMgr, pkgList, svcEnable)
+`, password, vmID, svcFile, svcEnable)
 
 	metaData := fmt.Sprintf("instance-id: %s\nlocal-hostname: %s\n", vmID, vmID)
 

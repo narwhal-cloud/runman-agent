@@ -20,6 +20,8 @@ PODMAN_NETWORK="narwhal-net"
 
 DOWNLOAD_BASE="https://github.com/narwhal-cloud/runman-agent/releases/latest/download"
 CLOUD_HYPERVISOR_BASE="https://github.com/cloud-hypervisor/cloud-hypervisor/releases/latest/download"
+# 预构建系统镜像（cloudhv/incus），由 narwhal-cloud/images 仓库 CI 每月构建
+VM_IMAGES_BASE="https://github.com/narwhal-cloud/images/releases/download/vm-latest"
 NETAVARK_BASE="https://github.com/narwhal-cloud/netavark/releases/latest/download"
 # rfw v2 随 agent 同仓库发布，资产名为 rfw-amd64 / rfw-arm64
 RFW_BASE="$DOWNLOAD_BASE"
@@ -71,7 +73,7 @@ install_packages() {
     local extra_packages
 
     if [ "$virt_type" = "cloudhv" ]; then
-        extra_packages="qemu-utils cloud-image-utils"
+        extra_packages="qemu-utils cloud-image-utils zstd"
     elif [ "$virt_type" = "incus" ]; then
         extra_packages="incus uidmap acl bridge-utils"
     else
@@ -606,7 +608,9 @@ log "$(t "Starting fresh installation..." "开始全新安装流程...")"
 update_vm_images() {
     local IMGDIR="${VM_IMAGE_DIR:-/opt/vm-images}"
     local FORCE=0
-    local TARGETS=(debian alpine)
+    # 可通过参数指定要构建的发行版（预构建镜像下载失败时的回退），默认全部
+    local TARGETS=("$@")
+    [ ${#TARGETS[@]} -eq 0 ] && TARGETS=(debian alpine)
 
     log "$(t "VM image update started. Images dir: $IMGDIR" "VM 镜像更新开始。镜像目录: $IMGDIR")"
 
@@ -638,17 +642,49 @@ update_vm_images() {
     }
 
     # ── Per-distro customization hooks ───────────────────────────────────────────
+    # 与 CI 预构建镜像保持一致：软件包与 sshd root 登录配置直接烤入镜像，
+    # Agent 的实例级 cloud-init 不再装包/改 sshd 配置
+
+    bake_sshd_config() {
+        local root="$1"
+        mkdir -p "$root/etc/ssh/sshd_config.d"
+        printf 'PermitRootLogin yes\nPasswordAuthentication yes\n' > "$root/etc/ssh/sshd_config.d/99-runman.conf"
+        sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' "$root/etc/ssh/sshd_config" 2>/dev/null || true
+        sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' "$root/etc/ssh/sshd_config" 2>/dev/null || true
+    }
 
     customize_debian() {
         local root="$1"
-        # Debian cloud image has no SSH password restrictions — nothing needed by default
-        : # no-op, placeholder for future customizations
+        log "  Baking packages and sshd config (debian)..."
+        mount -t proc proc "$root/proc" 2>/dev/null || true
+        mount --bind /dev "$root/dev" 2>/dev/null || true
+        mv "$root/etc/resolv.conf" "$root/etc/resolv.conf.bak" 2>/dev/null || true
+        echo "nameserver 1.1.1.1" > "$root/etc/resolv.conf"
+        # 阻止 chroot 内维护脚本启动服务
+        printf '#!/bin/sh\nexit 101\n' > "$root/usr/sbin/policy-rc.d"
+        chmod +x "$root/usr/sbin/policy-rc.d"
+        chroot "$root" env DEBIAN_FRONTEND=noninteractive sh -c \
+            'apt-get update && apt-get install -y curl e2fsprogs cloud-guest-utils openssh-server && apt-get clean && rm -rf /var/lib/apt/lists/*' \
+            || log "  Warning: package bake failed, image may lack curl/e2fsprogs"
+        chroot "$root" systemctl enable ssh >/dev/null 2>&1 || true
+        rm -f "$root/usr/sbin/policy-rc.d" "$root/etc/resolv.conf"
+        mv "$root/etc/resolv.conf.bak" "$root/etc/resolv.conf" 2>/dev/null || true
+        bake_sshd_config "$root"
+        umount "$root/dev" 2>/dev/null || true
+        umount "$root/proc" 2>/dev/null || true
     }
 
     customize_alpine() {
         local root="$1"
-        # Alpine nocloud cloud image ships with cloud-init — nothing needed by default
-        : # no-op, placeholder for future customizations
+        log "  Baking packages and sshd config (alpine)..."
+        mv "$root/etc/resolv.conf" "$root/etc/resolv.conf.bak" 2>/dev/null || true
+        echo "nameserver 1.1.1.1" > "$root/etc/resolv.conf"
+        chroot "$root" /sbin/apk add --no-cache curl e2fsprogs openssh \
+            || log "  Warning: package bake failed, image may lack curl/e2fsprogs"
+        rm -f "$root/etc/resolv.conf"
+        mv "$root/etc/resolv.conf.bak" "$root/etc/resolv.conf" 2>/dev/null || true
+        bake_sshd_config "$root"
+        ln -sf /etc/init.d/sshd "$root/etc/runlevels/default/sshd" 2>/dev/null || true
     }
 
     # Convert qcow2 to raw
@@ -842,6 +878,41 @@ update_vm_images() {
     done
 
     log "$(t "VM image update finished." "VM 镜像更新完成。")"
+}
+
+# ── Prebuilt VM image download ───────────────────────────────────────────────
+# 从 narwhal-cloud/images 的滚动 release 下载 CI 预构建的 cloudhv 镜像包，
+# 避免安装时在线转换 qcow2 / 提取内核。失败的发行版记录在 VM_FETCH_FAILED，
+# 由调用方回退到 update_vm_images 本地构建。
+
+VM_FETCH_FAILED=()
+fetch_vm_images() {
+    local IMGDIR="${VM_IMAGE_DIR:-/opt/vm-images}"
+    VM_FETCH_FAILED=()
+
+    local distro dir asset tmp
+    for distro in debian alpine; do
+        dir="$IMGDIR/$distro"
+        if [ -f "$dir/current.raw" ] && [ -f "$dir/vmlinuz" ] && [ -f "$dir/initrd" ] && [ -f "$dir/cmdline" ]; then
+            log "$(t "VM image $distro already present, skipping." "VM 镜像 $distro 已存在，跳过。")"
+            continue
+        fi
+
+        asset="cloudhv-${distro}-${ARCH}.tar.zst"
+        tmp=$(mktemp)
+        log "$(t "Downloading prebuilt VM image: $asset" "下载预构建 VM 镜像: $asset")"
+        if download_with_retry "$VM_IMAGES_BASE/$asset" "$tmp" \
+            && mkdir -p "$dir" \
+            && tar --zstd -xf "$tmp" -C "$dir"; then
+            log "$(t "✓ VM image $distro installed." "✓ VM 镜像 $distro 安装完成。")"
+        else
+            log "$(t "Warning: prebuilt $distro image unavailable, will build locally." "警告: 预构建 $distro 镜像不可用，将回退本地构建。")"
+            VM_FETCH_FAILED+=("$distro")
+        fi
+        rm -f "$tmp"
+    done
+
+    [ ${#VM_FETCH_FAILED[@]} -eq 0 ]
 }
 
 # ── Virtualization type selection ──────────────────────────────────────────────
@@ -1227,8 +1298,11 @@ if [ "$VIRT_TYPE" = "cloudhv" ]; then
         log "$(t "cloud-hypervisor binary already exists." "cloud-hypervisor 二进制已存在。")"
     fi
 
-    # Download base VM images (Debian, Alpine)
-    update_vm_images
+    # Download prebuilt base VM images (Debian, Alpine); fallback to local build
+    if ! fetch_vm_images; then
+        log "$(t "Falling back to local image build for: ${VM_FETCH_FAILED[*]}" "回退到本地构建镜像: ${VM_FETCH_FAILED[*]}")"
+        update_vm_images "${VM_FETCH_FAILED[@]}"
+    fi
 fi
 
 # ── Install agent ─────────────────────────────────────────────────────────────
@@ -1303,6 +1377,29 @@ if [ "$VIRT_TYPE" = "incus" ]; then
         # 移除 profile 中的 eth0，由 Agent 在创建实例时动态注入，避免 IP 冲突
         incus profile device remove default eth0 >/dev/null 2>&1 || true
     fi
+
+    # 4. 导入预构建的 ready 镜像（与 Agent ensureReadyImage 的别名一致），
+    #    跳过首次创建实例时的在线构建；下载失败时 Agent 会自动回退构建
+    for _distro in debian alpine; do
+        case "$_distro" in
+            debian) _ready_alias="debian/13/cloud/$ARCH/ready" ;;
+            alpine) _ready_alias="alpine/3.23/cloud/$ARCH/ready" ;;
+        esac
+        if incus image alias list --format csv 2>/dev/null | grep -q "^${_ready_alias},"; then
+            log "$(t "Incus image $_ready_alias already exists, skipping." "Incus 镜像 $_ready_alias 已存在，跳过。")"
+            continue
+        fi
+        _asset="incus-${_distro}-${ARCH}.tar.gz"
+        _tmp=$(mktemp)
+        log "$(t "Downloading prebuilt Incus image: $_asset" "下载预构建 Incus 镜像: $_asset")"
+        if download_with_retry "$VM_IMAGES_BASE/$_asset" "$_tmp" \
+            && incus image import "$_tmp" --alias "$_ready_alias"; then
+            log "$(t "✓ Incus image imported: $_ready_alias" "✓ Incus 镜像已导入: $_ready_alias")"
+        else
+            log "$(t "Warning: prebuilt Incus image unavailable, agent will build it on first instance creation." "警告: 预构建 Incus 镜像不可用，Agent 将在首次创建实例时自动构建。")"
+        fi
+        rm -f "$_tmp"
+    done
 fi
 
 IP=$(curl -4 -s --max-time 10 ip.sb 2>/dev/null || echo "N/A")

@@ -182,13 +182,8 @@ func (m *Manager) createVM(ctx context.Context, req *agent.CmdCreateVM) error {
 		imageSource.Alias = readyAlias
 	}
 
-	pkgSSH := "openssh-server"
-	pkgCron := "cron"
-	if req.OsImage == "alpine" {
-		pkgSSH = "openssh"
-		pkgCron = "cronie"
-	}
-
+	// ready 镜像已预装软件包并配置好 sshd（CI 预构建或 ensureReadyImage 构建），
+	// 实例级 cloud-init 只负责密码与网络，避免开机时的装包/服务操作
 	userData := fmt.Sprintf(`#cloud-config
 ssh_pwauth: true
 disable_root: false
@@ -196,18 +191,7 @@ chpasswd:
   list: |
     root:%s
   expire: false
-packages:
-  - bash
-  - wget
-  - curl
-  - %s
-  - sshpass
-  - sudo
-  - %s
-  - lsof
-  - iptables
-  - dos2unix
-`, req.RootPassword, pkgSSH, pkgCron)
+`, req.RootPassword)
 
 	if req.OsImage == "alpine" {
 		netConf := fmt.Sprintf(`      auto lo
@@ -276,13 +260,6 @@ write_files:
 `, networkConf)
 	}
 
-	userData += `  - path: /etc/ssh/sshd_config
-    content: |
-      PermitRootLogin yes
-      PasswordAuthentication yes
-      ListenAddress 0.0.0.0
-      ListenAddress ::
-`
 	userData += "runcmd:\n"
 	if req.OsImage == "alpine" {
 		userData += "  - rc-update add networking boot\n"
@@ -292,23 +269,10 @@ write_files:
 		userData += "  - rm -f /etc/systemd/network/10-cloud-init-*.network /run/systemd/network/10-cloud-init-*.network || true\n"
 		userData += "  - systemctl restart systemd-networkd || true\n"
 	}
-
-	// 兜底：ready 镜像若因历史构建失败缺少 sshd，在网络就绪后现场补装
-	if req.OsImage == "alpine" {
-		userData += fmt.Sprintf("  - [ sh, -c, \"command -v sshd >/dev/null 2>&1 || apk add --no-cache %s || true\" ]\n", pkgSSH)
-	} else {
-		userData += fmt.Sprintf("  - [ sh, -c, \"command -v sshd >/dev/null 2>&1 || (apt-get update && apt-get install -y %s) || true\" ]\n", pkgSSH)
-	}
-
-	userData += fmt.Sprintf(`  - [ sh, -c, "systemctl enable ssh || systemctl enable sshd || rc-update add sshd default || true" ]
-  - [ sh, -c, "systemctl restart ssh || systemctl restart sshd || rc-service sshd restart || true" ]
-  - [ sh, -c, "systemctl enable %s || rc-update add %s default || true" ]
-  - [ sh, -c, "systemctl restart %s || rc-service %s restart || true" ]
-`, pkgCron, pkgCron, pkgCron, pkgCron)
-
-	if req.OsImage != "alpine" {
-		userData += "  - if [ -f /root/build_done ]; then rm /root/build_done; fi\n"
-	}
+	// 本地毫秒级守护：新 ready 镜像已烤入 sshd 自启，此处仅兼容旧版构建的 ready 镜像
+	userData += `  - [ sh, -c, "rc-update add sshd default 2>/dev/null || systemctl enable ssh 2>/dev/null || true" ]
+  - [ sh, -c, "rc-service sshd start 2>/dev/null || systemctl start ssh 2>/dev/null || true" ]
+`
 
 	config := map[string]string{
 		"limits.cpu":           fmt.Sprintf("%d", req.Cpu),
@@ -481,8 +445,10 @@ runcmd:
   - [ sh, -c, "printf 'PermitRootLogin yes\\nPasswordAuthentication yes\\nListenAddress 0.0.0.0\\nListenAddress ::\\n' > /etc/ssh/sshd_config.d/99-runman.conf" ]
   - sed -i 's/^#\\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
   - sed -i 's/^#\\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+  - [ sh, -c, "systemctl enable ssh 2>/dev/null || rc-update add sshd default 2>/dev/null || true" ]
+  - [ sh, -c, "systemctl enable %s 2>/dev/null || rc-update add %s default 2>/dev/null || true" ]
   - [ sh, -c, "command -v sshd >/dev/null 2>&1 && touch /root/build_done" ]
-`, pkgSSH, pkgCron, aptConfig, installCmd)
+`, pkgSSH, pkgCron, aptConfig, installCmd, pkgCron, pkgCron)
 
 	op, err := m.client.CreateInstance(api.InstancesPost{
 		Name: builderName,
@@ -530,6 +496,9 @@ runcmd:
 	if !success {
 		return fmt.Errorf("builder timed out or failed to install packages")
 	}
+
+	// 清理构建标记，避免其残留在发布的镜像里
+	_ = m.client.DeleteInstanceFile(builderName, "/root/build_done")
 
 	if err := m.stopVM(ctx, builderName, false); err != nil {
 		return err
