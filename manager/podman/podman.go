@@ -20,6 +20,7 @@ import (
 	"github.com/containers/podman/v5/pkg/bindings"
 	"github.com/containers/podman/v5/pkg/bindings/containers"
 	"github.com/containers/podman/v5/pkg/bindings/images"
+	entTypes "github.com/containers/podman/v5/pkg/domain/entities/types"
 	"github.com/containers/podman/v5/pkg/specgen"
 	dockerContainer "github.com/docker/docker/api/types/container"
 	"github.com/opencontainers/runtime-spec/specs-go"
@@ -121,6 +122,21 @@ func lxcfsMounts() []specs.Mount {
 	return mounts
 }
 
+// createWithRetry 创建容器；若名字被残留容器占用（包括仅存在于 storage 层、
+// libpod DB 不认识的 "external" 容器，重装/创建中途失败后可能残留），
+// 强制清理同名容器后重试一次。
+func (m *Manager) createWithRetry(spec *specgen.SpecGenerator) (entTypes.ContainerCreateResponse, error) {
+	res, err := containers.CreateWithSpec(m.timeoutCtx(), spec, nil)
+	if err != nil && strings.Contains(err.Error(), "already in use") {
+		log.Printf("[Podman] create %s: name in use by stale container, force removing and retrying: %v", spec.Name, err)
+		if _, rmErr := containers.Remove(m.timeoutCtx(), spec.Name, &containers.RemoveOptions{Force: ptr(true), Ignore: ptr(true)}); rmErr != nil {
+			log.Printf("[Podman] create %s: stale container removal failed: %v", spec.Name, rmErr)
+		}
+		res, err = containers.CreateWithSpec(m.timeoutCtx(), spec, nil)
+	}
+	return res, err
+}
+
 func (m *Manager) CreateVM(ctx context.Context, req *agent.CmdCreateVM) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -165,7 +181,7 @@ func (m *Manager) createVM(_ context.Context, req *agent.CmdCreateVM) error {
 		netOpts := map[string]netTypes.PerNetworkOptions{
 			NetworkName: {},
 		}
-		res, err := containers.CreateWithSpec(m.timeoutCtx(), &specgen.SpecGenerator{
+		res, err := m.createWithRetry(&specgen.SpecGenerator{
 			ContainerBasicConfig: specgen.ContainerBasicConfig{
 				Name:     tempID,
 				Hostname: tempID,
@@ -181,7 +197,7 @@ func (m *Manager) createVM(_ context.Context, req *agent.CmdCreateVM) error {
 				HealthConfig:         &manifest.Schema2HealthConfig{Test: []string{"NONE"}},
 				HealthLogDestination: "/tmp",
 			},
-		}, nil)
+		})
 		if err != nil {
 			log.Printf("[CreateVM] %s: temp container create failed: %v", req.VmId, err)
 		} else {
@@ -253,7 +269,7 @@ func (m *Manager) createVM(_ context.Context, req *agent.CmdCreateVM) error {
 		NetworkName: netOpt,
 	}
 
-	res, err := containers.CreateWithSpec(m.timeoutCtx(), &specgen.SpecGenerator{
+	res, err := m.createWithRetry(&specgen.SpecGenerator{
 		ContainerBasicConfig: specgen.ContainerBasicConfig{
 			Name:          req.VmId,
 			Terminal:      ptr(true),
@@ -281,7 +297,7 @@ func (m *Manager) createVM(_ context.Context, req *agent.CmdCreateVM) error {
 			},
 			HealthLogDestination: "/tmp",
 		},
-	}, nil)
+	})
 
 	if err != nil {
 		if alloc {
@@ -361,24 +377,33 @@ func (m *Manager) execInContainer(id string, cmd []string) error {
 }
 
 func (m *Manager) deleteByID(id string) error {
+	name := id
 	info, err := containers.Inspect(m.timeoutCtx(), id, nil)
-	if err != nil {
-		return err
+	if err == nil {
+		name = info.Name
+		if info.State.Running {
+			_ = containers.Stop(m.timeoutCtx(), id, nil)
+		}
+	} else {
+		// Inspect 失败不代表容器不存在：可能是仅存在于 storage 层的 "external"
+		// 容器（libpod DB 不认识），此时仍要继续走 Remove 清理 storage。
+		log.Printf("[Podman] deleteByID %s: inspect failed (%v), removing anyway in case of storage-only container", id, err)
 	}
 
 	// 删除前尝试从 DB 获取 cpuset 并释放
-	if conf, err := m.db.GetPodmanConfig(info.Name); err == nil && conf.Cpuset != "" {
+	if conf, err := m.db.GetPodmanConfig(name); err == nil && conf.Cpuset != "" {
 		m.alloc.Release(conf.Cpuset)
-		_ = m.db.DeletePodmanConfig(info.Name)
-	} else if conf, err := m.db.GetPodmanConfig(id); err == nil && conf.Cpuset != "" {
-		m.alloc.Release(conf.Cpuset)
-		_ = m.db.DeletePodmanConfig(id)
+		_ = m.db.DeletePodmanConfig(name)
+	} else if name != id {
+		if conf, err := m.db.GetPodmanConfig(id); err == nil && conf.Cpuset != "" {
+			m.alloc.Release(conf.Cpuset)
+			_ = m.db.DeletePodmanConfig(id)
+		}
 	}
 
-	if info.State.Running {
-		_ = containers.Stop(m.timeoutCtx(), id, nil)
-	}
-	_, err = containers.Remove(m.timeoutCtx(), id, &containers.RemoveOptions{Force: ptr(true)})
+	// Ignore=true：容器（含 storage 层）都不存在时视为删除成功，保证幂等；
+	// 名字对应 external 容器时，服务端会回退到按 storage 删除。
+	_, err = containers.Remove(m.timeoutCtx(), name, &containers.RemoveOptions{Force: ptr(true), Ignore: ptr(true)})
 	return err
 }
 
@@ -430,8 +455,12 @@ func (m *Manager) ReinstallVM(ctx context.Context, req *agent.CmdReinstallVM) er
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	_ = m.stopVM(req.VmId, true)
-	_ = m.deleteVM(ctx, req.VmId)
+	if err := m.stopVM(req.VmId, true); err != nil {
+		log.Printf("[Podman][Reinstall] %s: stop failed (continuing): %v", req.VmId, err)
+	}
+	if err := m.deleteVM(ctx, req.VmId); err != nil {
+		log.Printf("[Podman][Reinstall] %s: delete failed (continuing, create will retry on name conflict): %v", req.VmId, err)
+	}
 	return m.createVM(ctx, &agent.CmdCreateVM{
 		VmId:          req.VmId,
 		OsImage:       req.OsImage,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"runman-agent/config"
 	"runman-agent/db"
@@ -117,14 +118,72 @@ func New(mgr manager.VMManager, database *db.DB, cfg *config.Manager) *Manager {
 }
 
 // Restore 启动时从 DB 恢复所有持久化的端口转发规则。
+// 母鸡重启后 agent 可能先于容器就绪启动，此时 GetVMLocalIP 会失败；
+// 后台协程持续对齐 DB 与内存中的规则，容器起来后自动恢复转发。
 func (m *Manager) Restore(ctx context.Context) {
 	all, err := m.db.ListAllPortForwards()
 	if err != nil {
-		return
+		log.Printf("[PortForward] restore: list rules failed: %v", err)
 	}
 	for _, pf := range all {
-		_ = m.addMapping(ctx, pf.VMID, pf.Protocol, pf.HostPort, pf.GuestPort, pf.Description, false)
+		if err := m.addMapping(ctx, pf.VMID, pf.Protocol, pf.HostPort, pf.GuestPort, pf.Description, false); err != nil {
+			log.Printf("[PortForward] restore %s %s :%d->%d failed (will retry): %v", pf.VMID, pf.Protocol, pf.HostPort, pf.GuestPort, err)
+		}
 	}
+	go m.reconcileLoop(ctx)
+}
+
+// reconcileLoop 周期性检查 DB 中登记但内存中缺失的规则并尝试重建。
+// 覆盖场景：重启时容器尚未就绪、VM 停机后再次启动、RefreshVM 期间重建失败。
+func (m *Manager) reconcileLoop(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	failCount := make(map[string]int) // key: protocol/hostPort，用于降低重复失败的日志频率
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		all, err := m.db.ListAllPortForwards()
+		if err != nil {
+			continue
+		}
+		active := make(map[string]bool)
+		for _, pf := range all {
+			key := fmt.Sprintf("%s/%d", pf.Protocol, pf.HostPort)
+			active[key] = true
+			if m.hasMapping(pf.VMID, pf.Protocol, pf.HostPort) {
+				delete(failCount, key)
+				continue
+			}
+			if err := m.addMapping(ctx, pf.VMID, pf.Protocol, pf.HostPort, pf.GuestPort, pf.Description, false); err != nil {
+				failCount[key]++
+				if failCount[key] == 1 || failCount[key]%20 == 0 {
+					log.Printf("[PortForward] reconcile %s %s :%d->%d failed %d time(s): %v", pf.VMID, pf.Protocol, pf.HostPort, pf.GuestPort, failCount[key], err)
+				}
+			} else {
+				log.Printf("[PortForward] reconcile: recovered %s %s :%d->%d", pf.VMID, pf.Protocol, pf.HostPort, pf.GuestPort)
+				delete(failCount, key)
+			}
+		}
+		for key := range failCount {
+			if !active[key] {
+				delete(failCount, key)
+			}
+		}
+	}
+}
+
+func (m *Manager) hasMapping(vmID, protocol string, hostPort int) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, e := range m.mappings[vmID] {
+		if e.Protocol == protocol && e.HostPort == hostPort {
+			return true
+		}
+	}
+	return false
 }
 
 // RefreshVM 重新解析 VM 的 IP 并重建其所有端口转发规则。
@@ -134,12 +193,17 @@ func (m *Manager) RefreshVM(ctx context.Context, vmID string) {
 	if err != nil || len(rules) == 0 {
 		return
 	}
-	// 先全部移除（释放 listener），再重新 addMapping（重新调 GetVMIP）
+	// 先全部移除（只释放 listener，保留 DB 记录），再重新 addMapping（重新调 GetVMIP）。
+	// 保留 DB 记录是为了重建失败时 reconcileLoop 还能继续重试，规则不会丢。
+	m.mu.Lock()
 	for _, r := range rules {
-		_ = m.RemoveMapping(ctx, vmID, r.Protocol, r.HostPort)
+		m.removeEntryLocked(vmID, r.Protocol, r.HostPort, false)
 	}
+	m.mu.Unlock()
 	for _, r := range rules {
-		_ = m.addMapping(ctx, vmID, r.Protocol, r.HostPort, r.GuestPort, r.Description, false)
+		if err := m.addMapping(ctx, vmID, r.Protocol, r.HostPort, r.GuestPort, r.Description, false); err != nil {
+			log.Printf("[PortForward] refresh %s %s :%d->%d failed (reconcile will retry): %v", vmID, r.Protocol, r.HostPort, r.GuestPort, err)
+		}
 	}
 }
 
@@ -162,7 +226,7 @@ func (m *Manager) addMapping(ctx context.Context, vmId string, protocol string, 
 			if e.GuestPort == guestPort && e.Description == description {
 				return nil
 			}
-			m.removeEntryLocked(vmId, protocol, hostPort)
+			m.removeEntryLocked(vmId, protocol, hostPort, true)
 			exists = true
 			break
 		}
@@ -227,8 +291,9 @@ func (m *Manager) addMapping(ctx context.Context, vmId string, protocol string, 
 }
 
 // removeEntryLocked removes the entry matching (vmId, protocol, hostPort) from
-// the in-memory map and the database. Caller must hold m.mu (write lock).
-func (m *Manager) removeEntryLocked(vmId, protocol string, hostPort int) {
+// the in-memory map, and from the database when deleteDB is true.
+// Caller must hold m.mu (write lock).
+func (m *Manager) removeEntryLocked(vmId, protocol string, hostPort int, deleteDB bool) {
 	entries := m.mappings[vmId]
 	for i, e := range entries {
 		if e.Protocol == protocol && e.HostPort == hostPort {
@@ -237,7 +302,9 @@ func (m *Manager) removeEntryLocked(vmId, protocol string, hostPort int) {
 				_ = e.ln.Close()
 			}
 			m.mappings[vmId] = append(entries[:i], entries[i+1:]...)
-			_ = m.db.DeletePortForward(protocol, hostPort)
+			if deleteDB {
+				_ = m.db.DeletePortForward(protocol, hostPort)
+			}
 			return
 		}
 	}
@@ -246,7 +313,7 @@ func (m *Manager) removeEntryLocked(vmId, protocol string, hostPort int) {
 func (m *Manager) RemoveMapping(_ context.Context, vmId string, protocol string, hostPort int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.removeEntryLocked(vmId, protocol, hostPort)
+	m.removeEntryLocked(vmId, protocol, hostPort, true)
 	return nil
 }
 
