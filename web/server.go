@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runman-agent/config"
 	"runman-agent/db"
 	"runman-agent/manager"
@@ -129,6 +130,11 @@ func (s *Server) ListenAndServe(addr string) error {
 	mux.HandleFunc("GET /api/images", s.handleImages)
 	mux.HandleFunc("GET /api/images/config", s.handleGetImagesConfig)
 	mux.HandleFunc("POST /api/images/config", s.handleSaveImagesConfig)
+
+	// 自定义镜像（仅 podman）
+	mux.HandleFunc("GET /api/images/custom", s.handleListCustomImages)
+	mux.HandleFunc("POST /api/images/custom", s.handleAddCustomImage)
+	mux.HandleFunc("DELETE /api/images/custom", s.handleDeleteCustomImage)
 
 	// VM 集合
 	mux.HandleFunc("GET /api/vms", s.handleListVMs)
@@ -565,7 +571,104 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	filteredImages := manager.FilterAndSortImages(s.db, images)
+	if s.cfg.Get().VirtType == "podman" {
+		filteredImages = manager.AppendReadyCustomImages(s.db, filteredImages)
+	}
 	jsonOK(w, filteredImages)
+}
+
+// ─── 自定义镜像（仅 podman）─────────────────────────────────────────────────────
+
+const maxCustomImages = 20
+
+// imageRefRe 粗校验镜像引用：registry[:port]/repo[:tag][@digest] 的合法字符集。
+// 具体有效性由后台拉取验证，失败会体现在 status=error。
+var imageRefRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._\-:/@]{0,255}$`)
+
+// customImagesSupported 校验当前驱动是否支持自定义镜像，不支持时写入 4xx 响应。
+func (s *Server) customImagesSupported(w http.ResponseWriter) bool {
+	if s.cfg.Get().VirtType != "podman" {
+		http.Error(w, "custom images are only supported on podman hosts", http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
+func (s *Server) handleListCustomImages(w http.ResponseWriter, _ *http.Request) {
+	list := s.db.ListCustomImages()
+	if list == nil {
+		list = []db.CustomImage{}
+	}
+	jsonOK(w, list)
+}
+
+func (s *Server) handleAddCustomImage(w http.ResponseWriter, r *http.Request) {
+	if !s.customImagesSupported(w) {
+		return
+	}
+	var req struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	req.ID = strings.TrimSpace(req.ID)
+	req.Name = strings.TrimSpace(req.Name)
+	if req.ID == "" || !imageRefRe.MatchString(req.ID) {
+		http.Error(w, "invalid image reference", 400)
+		return
+	}
+	if req.Name == "" {
+		req.Name = req.ID
+	}
+
+	list := s.db.ListCustomImages()
+	exists := false
+	for _, img := range list {
+		if img.ID == req.ID {
+			exists = true
+			break
+		}
+	}
+	if !exists && len(list) >= maxCustomImages {
+		http.Error(w, fmt.Sprintf("custom image limit reached (%d)", maxCustomImages), 400)
+		return
+	}
+
+	if err := s.db.UpsertCustomImage(db.CustomImage{
+		ID:      req.ID,
+		Name:    req.Name,
+		Status:  db.CustomImagePulling,
+		AddedAt: time.Now().Unix(),
+	}); err != nil {
+		jsonErr(w, err, 500)
+		return
+	}
+
+	// 后台拉取，结果异步更新到状态字段（重复提交同一 ID 即为重试）
+	if vs, ok := s.mgr.(*manager.VMService); ok {
+		vs.StartCustomImagePull(req.ID)
+	}
+
+	jsonOK(w, map[string]string{"status": db.CustomImagePulling})
+}
+
+func (s *Server) handleDeleteCustomImage(w http.ResponseWriter, r *http.Request) {
+	if !s.customImagesSupported(w) {
+		return
+	}
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		http.Error(w, "id query parameter required", 400)
+		return
+	}
+	if err := s.db.DeleteCustomImage(id); err != nil {
+		jsonErr(w, err, 500)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleGetImagesConfig(w http.ResponseWriter, r *http.Request) {

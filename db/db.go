@@ -1,9 +1,11 @@
 package db
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/glebarez/sqlite"
@@ -80,6 +82,8 @@ type System struct {
 
 type DB struct {
 	orm *gorm.DB
+	// ciMu 序列化自定义镜像列表的读改写，防止并发拉取状态更新互相覆盖
+	ciMu sync.Mutex
 }
 
 func Init(path string) (*DB, error) {
@@ -136,6 +140,93 @@ func (d *DB) GetSystemTime(key string) (time.Time, error) {
 		return time.Time{}, err
 	}
 	return s.UpdatedAt, nil
+}
+
+// 自定义镜像（仅 podman 驱动使用），JSON 序列化后存于 System KV
+
+const customImagesKey = "custom_images"
+
+// CustomImage 拉取状态
+const (
+	CustomImagePulling = "pulling"
+	CustomImageReady   = "ready"
+	CustomImageError   = "error"
+)
+
+type CustomImage struct {
+	ID      string `json:"id"`   // 完整镜像引用，如 docker.io/user/image:tag
+	Name    string `json:"name"` // 面向用户的显示名
+	Status  string `json:"status"`
+	Error   string `json:"error,omitempty"`
+	AddedAt int64  `json:"added_at"`
+}
+
+func (d *DB) loadCustomImagesLocked() []CustomImage {
+	raw, err := d.GetSystem(customImagesKey)
+	if err != nil || raw == "" {
+		return nil
+	}
+	var list []CustomImage
+	if json.Unmarshal([]byte(raw), &list) != nil {
+		return nil
+	}
+	return list
+}
+
+func (d *DB) saveCustomImagesLocked(list []CustomImage) error {
+	raw, err := json.Marshal(list)
+	if err != nil {
+		return err
+	}
+	return d.SetSystem(customImagesKey, string(raw))
+}
+
+func (d *DB) ListCustomImages() []CustomImage {
+	d.ciMu.Lock()
+	defer d.ciMu.Unlock()
+	return d.loadCustomImagesLocked()
+}
+
+// UpsertCustomImage 新增或更新一条自定义镜像记录（按 ID 匹配）。
+func (d *DB) UpsertCustomImage(img CustomImage) error {
+	d.ciMu.Lock()
+	defer d.ciMu.Unlock()
+	list := d.loadCustomImagesLocked()
+	for i := range list {
+		if list[i].ID == img.ID {
+			list[i] = img
+			return d.saveCustomImagesLocked(list)
+		}
+	}
+	return d.saveCustomImagesLocked(append(list, img))
+}
+
+func (d *DB) DeleteCustomImage(id string) error {
+	d.ciMu.Lock()
+	defer d.ciMu.Unlock()
+	list := d.loadCustomImagesLocked()
+	out := list[:0]
+	for _, img := range list {
+		if img.ID != id {
+			out = append(out, img)
+		}
+	}
+	return d.saveCustomImagesLocked(out)
+}
+
+// UpdateCustomImageStatus 更新指定镜像的拉取状态；记录不存在时（如拉取期间被删除）静默忽略。
+func (d *DB) UpdateCustomImageStatus(id, status, errMsg string) error {
+	d.ciMu.Lock()
+	defer d.ciMu.Unlock()
+	list := d.loadCustomImagesLocked()
+	for i := range list {
+		if list[i].ID == id {
+			list[i].Status = status
+			list[i].Error = errMsg
+			return d.saveCustomImagesLocked(list)
+		}
+	}
+	return nil
 }
 
 // VM 核心业务配置

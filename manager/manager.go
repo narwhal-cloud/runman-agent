@@ -83,6 +83,11 @@ type VMManager interface {
 	Cleanup(ctx context.Context) error
 }
 
+// ImagePuller 是可选能力接口：支持按引用预拉取镜像的驱动（目前仅 podman）实现它。
+type ImagePuller interface {
+	PullImage(ctx context.Context, ref string) error
+}
+
 // VMNetStats 表示 VM 的网络流量统计
 type VMNetStats struct {
 	VMID     string // VM ID

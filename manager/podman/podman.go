@@ -155,10 +155,8 @@ func (m *Manager) createVM(_ context.Context, req *agent.CmdCreateVM) error {
 		req.DiskGb = 1
 	}
 
-	// 1. 拉取镜像
-	if _, err := images.Pull(m.timeoutCtx(), req.OsImage, &images.PullOptions{
-		Policy: ptr("newer"),
-	}); err != nil {
+	// 1. 拉取镜像（大镜像首次拉取可能很慢，使用独立的长超时）
+	if err := m.PullImage(context.Background(), req.OsImage); err != nil {
 		return err
 	}
 
@@ -494,6 +492,17 @@ func (m *Manager) GetSupportedImages(_ context.Context) ([]*agent.OSImageInfo, e
 		{Id: "docker.io/narwhalcloud/debian:podman", Name: "Debian (Podman)"},
 		{Id: "docker.io/narwhalcloud/alpine:podman", Name: "Alpine (Podman)"},
 	}, nil
+}
+
+// PullImage 拉取镜像。使用独立的 15 分钟超时（默认 timeoutCtx 只有 1 分钟，
+// 自定义大镜像首次拉取必然超时）。调用方 ctx 为 nil 时仅使用内部超时。
+func (m *Manager) PullImage(_ context.Context, ref string) error {
+	pullCtx, cancel := context.WithTimeout(m.ctx, 15*time.Minute)
+	defer cancel()
+	_, err := images.Pull(pullCtx, ref, &images.PullOptions{
+		Policy: ptr("newer"),
+	})
+	return err
 }
 
 func (m *Manager) GetVMInfo(ctx context.Context, vmID string) (*agent.VMSummary, error) {

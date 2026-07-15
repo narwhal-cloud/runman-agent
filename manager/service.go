@@ -171,6 +171,40 @@ func (s *VMService) GetSupportedImages(ctx context.Context) ([]*agent.OSImageInf
 	return s.mgr.GetSupportedImages(ctx)
 }
 
+// SupportsCustomImages 返回底层驱动是否支持自定义镜像（即实现了 ImagePuller）。
+func (s *VMService) SupportsCustomImages() bool {
+	_, ok := s.mgr.(ImagePuller)
+	return ok
+}
+
+// StartCustomImagePull 后台拉取自定义镜像并更新其在 DB 中的状态。
+func (s *VMService) StartCustomImagePull(ref string) {
+	puller, ok := s.mgr.(ImagePuller)
+	if !ok {
+		_ = s.db.UpdateCustomImageStatus(ref, db.CustomImageError, "driver does not support custom images")
+		return
+	}
+	go func() {
+		log.Printf("[CustomImage] pulling %s ...", ref)
+		if err := puller.PullImage(context.Background(), ref); err != nil {
+			log.Printf("[CustomImage] pull %s failed: %v", ref, err)
+			_ = s.db.UpdateCustomImageStatus(ref, db.CustomImageError, err.Error())
+			return
+		}
+		log.Printf("[CustomImage] pull %s done", ref)
+		_ = s.db.UpdateCustomImageStatus(ref, db.CustomImageReady, "")
+	}()
+}
+
+// ResumeCustomImagePulls 恢复因 agent 重启而中断的拉取任务（启动时调用一次）。
+func (s *VMService) ResumeCustomImagePulls() {
+	for _, img := range s.db.ListCustomImages() {
+		if img.Status == db.CustomImagePulling {
+			s.StartCustomImagePull(img.ID)
+		}
+	}
+}
+
 // GetVMNetStats 获取 VM 的网络流量统计（用于流量统计服务）
 func (s *VMService) GetVMNetStats(ctx context.Context, vmID string) (*VMNetStats, error) {
 	return s.mgr.GetVMNetStats(ctx, vmID)
@@ -240,4 +274,24 @@ func FilterAndSortImages(d *db.DB, images []*agent.OSImageInfo) []*agent.OSImage
 	}
 
 	return result
+}
+
+// AppendReadyCustomImages 将 DB 中已就绪（ready）的自定义镜像追加到镜像列表末尾。
+// 自定义镜像不参与 FilterAndSortImages 的 debian/alpine 分类过滤，应在过滤之后调用。
+func AppendReadyCustomImages(d *db.DB, images []*agent.OSImageInfo) []*agent.OSImageInfo {
+	seen := make(map[string]bool, len(images))
+	for _, img := range images {
+		seen[img.Id] = true
+	}
+	for _, ci := range d.ListCustomImages() {
+		if ci.Status != db.CustomImageReady || seen[ci.ID] {
+			continue
+		}
+		name := ci.Name
+		if name == "" {
+			name = ci.ID
+		}
+		images = append(images, &agent.OSImageInfo{Id: ci.ID, Name: name})
+	}
+	return images
 }

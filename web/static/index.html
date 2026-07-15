@@ -627,8 +627,23 @@
             </div>
             <button onclick="closeModal('modal-images-config')" class="text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button>
         </div>
-        <div class="p-6 space-y-4 max-h-[60vh] overflow-y-auto" id="images-config-list">
-            <!-- Rendered dynamically -->
+        <div class="max-h-[60vh] overflow-y-auto">
+            <div class="p-6 space-y-4" id="images-config-list">
+                <!-- Rendered dynamically -->
+            </div>
+            <!-- Custom Images (Podman only) -->
+            <div id="custom-images-section" class="px-6 pb-6 hidden">
+                <div class="border-t border-slate-100 pt-4">
+                    <h4 class="text-sm font-bold text-slate-800">Custom Images</h4>
+                    <p class="text-[11px] text-slate-400 mt-0.5 mb-3">Image must include an init system (systemd/openrc), sshd with autostart, and bash. Pulled in background before becoming available.</p>
+                    <div id="custom-images-list" class="space-y-2 mb-3"></div>
+                    <input id="ci-ref" class="input mb-2" placeholder="docker.io/user/image:tag">
+                    <div class="flex gap-2">
+                        <input id="ci-name" class="input flex-1" placeholder="Display name (optional)">
+                        <button type="button" onclick="addCustomImage()" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-bold transition-colors shrink-0">Add</button>
+                    </div>
+                </div>
+            </div>
         </div>
         <div class="px-6 py-4 bg-slate-50 border-t border-slate-100 flex gap-3 shrink-0">
             <button type="button" onclick="closeModal('modal-images-config')" class="flex-1 py-2 border border-slate-200 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-50">Cancel</button>
@@ -1780,8 +1795,112 @@ async function openImagesConfig() {
         
         openModal('modal-images-config');
         renderImagesConfigList(configItems);
+
+        // 自定义镜像仅 podman 母鸡支持
+        const isPodman = currentConf && currentConf.virt_type === 'podman';
+        document.getElementById('custom-images-section').classList.toggle('hidden', !isPodman);
+        if (isPodman) refreshCustomImages();
     } catch (e) {
         alert('Failed to load OS images config: ' + e.message);
+    }
+}
+
+// ─── Custom Images (Podman) ──────────────────────────────────────────────────
+
+const CI_STATUS_BADGE = {
+    pulling: '<span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-100 text-amber-700">PULLING</span>',
+    ready:   '<span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700">READY</span>',
+    error:   '<span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-rose-100 text-rose-700">ERROR</span>',
+};
+
+let customImagesCache = [];
+let ciWasPulling = false;
+
+async function refreshCustomImages() {
+    let list = [];
+    try { list = await api('GET', '/api/images/custom') || []; } catch (e) { return; }
+    customImagesCache = list;
+
+    const container = document.getElementById('custom-images-list');
+    if (!list.length) {
+        container.innerHTML = '<p class="text-xs text-slate-400 italic">No custom images.</p>';
+    } else {
+        container.innerHTML = list.map((img, idx) => `
+            <div class="p-2.5 bg-slate-50 rounded-lg border border-slate-200">
+                <div class="flex items-center justify-between gap-2">
+                    <div class="min-w-0">
+                        <div class="flex items-center gap-2">
+                            <span class="text-sm font-medium text-slate-700 truncate">${escHtml(img.name)}</span>
+                            ${CI_STATUS_BADGE[img.status] || ''}
+                        </div>
+                        <div class="text-[11px] text-slate-400 font-mono truncate">${escHtml(img.id)}</div>
+                        ${img.status === 'error' ? `<div class="text-[11px] text-rose-500 mt-0.5 break-all">${escHtml(img.error || 'pull failed')}</div>` : ''}
+                    </div>
+                    <div class="flex items-center gap-1 shrink-0">
+                        ${img.status === 'error' ? `<button onclick="retryCustomImage(${idx})" class="text-indigo-600 hover:bg-slate-100 rounded px-1.5 py-1 text-xs font-medium">Retry</button>` : ''}
+                        <button onclick="deleteCustomImage(${idx})" class="text-rose-500 hover:bg-rose-50 rounded px-1.5 py-1 text-xs font-medium">Delete</button>
+                    </div>
+                </div>
+            </div>
+        `).join('');
+    }
+
+    const pulling = list.some(img => img.status === 'pulling');
+    // 拉取全部结束时刷新创建/重装下拉（新就绪的镜像会出现在列表中）
+    if (ciWasPulling && !pulling) refreshImageDropdowns();
+    ciWasPulling = pulling;
+
+    // 有镜像在拉取中且弹窗仍打开时，轮询刷新状态
+    const modalOpen = !document.getElementById('modal-images-config').classList.contains('hidden');
+    if (modalOpen && pulling) {
+        setTimeout(refreshCustomImages, 3000);
+    }
+}
+
+function escHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+async function refreshImageDropdowns() {
+    const imgs = await api('GET', '/api/images').catch(() => null);
+    if (imgs) { images = imgs; populateImageSelect('c-image'); populateImageSelect('r-image'); }
+}
+
+async function addCustomImage() {
+    const ref = document.getElementById('ci-ref').value.trim();
+    const name = document.getElementById('ci-name').value.trim();
+    if (!ref) { alert('Image reference is required'); return; }
+    try {
+        await api('POST', '/api/images/custom', { id: ref, name });
+        document.getElementById('ci-ref').value = '';
+        document.getElementById('ci-name').value = '';
+        refreshCustomImages();
+    } catch (e) {
+        alert('Failed to add custom image: ' + e.message);
+    }
+}
+
+async function retryCustomImage(idx) {
+    const img = customImagesCache[idx];
+    if (!img) return;
+    try {
+        await api('POST', '/api/images/custom', { id: img.id, name: img.name });
+        refreshCustomImages();
+    } catch (e) {
+        alert('Failed to retry: ' + e.message);
+    }
+}
+
+async function deleteCustomImage(idx) {
+    const img = customImagesCache[idx];
+    if (!img) return;
+    if (!confirm('Remove custom image "' + img.name + '" from the list?')) return;
+    try {
+        await api('DELETE', '/api/images/custom?id=' + encodeURIComponent(img.id));
+        refreshCustomImages();
+        refreshImageDropdowns();
+    } catch (e) {
+        alert('Failed to delete: ' + e.message);
     }
 }
 

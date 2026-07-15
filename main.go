@@ -137,6 +137,11 @@ func main() {
 	// VMService 作为服务层包装底层驱动，负责 ID 转换、托管 VM 过滤
 	svc := manager.NewVMService(rawMgr, database)
 
+	// 恢复因上次重启而中断的自定义镜像拉取（仅 podman）
+	if conf.VirtType == "podman" {
+		svc.ResumeCustomImagePulls()
+	}
+
 	// 虚拟化驱动自启动：agent 启动后延迟 5 秒让网络就绪，然后启动所有记录为 running 的 VM
 	if conf.VirtType == "cloudhv" || conf.VirtType == "incus" {
 		go func() {
@@ -530,6 +535,10 @@ func (a *Agent) sendHeartbeat(stream agent.AgentGateway_ConnectClient) {
 	vms, _ := a.mgr.ListVMs(ctx)
 	images, _ := a.mgr.GetSupportedImages(ctx)
 	images = manager.FilterAndSortImages(a.db, images)
+	if a.config.VirtType == "podman" {
+		// 自定义镜像随心跳上报，平台 os_images 会自动跟随更新
+		images = manager.AppendReadyCustomImages(a.db, images)
+	}
 
 	// 流量数据由 TrafficService 后台定期写入 DB，这里只读取累计值填充心跳
 	for _, vm := range vms {
