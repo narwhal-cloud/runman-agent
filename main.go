@@ -35,7 +35,6 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -450,11 +449,6 @@ func (a *Agent) GetConnStatus() (bool, string) {
 func (a *Agent) connectAndLoop() error {
 	conn, err := grpc.NewClient(serverAddr,
 		grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{})),
-		grpc.WithKeepaliveParams(keepalive.ClientParameters{
-			Time:                20 * time.Second,
-			Timeout:             10 * time.Second,
-			PermitWithoutStream: true,
-		}),
 	)
 	if err != nil {
 		return err
@@ -462,7 +456,9 @@ func (a *Agent) connectAndLoop() error {
 	defer func() { _ = conn.Close() }()
 
 	client := agent.NewAgentGatewayClient(conn)
-	ctx := metadata.AppendToOutgoingContext(context.Background(), "authorization", "Bearer "+a.config.Token)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+a.config.Token)
 	stream, err := client.Connect(ctx)
 	if err != nil {
 		return err
@@ -482,15 +478,12 @@ func (a *Agent) connectAndLoop() error {
 	go a.heartbeatLoop(stream)
 
 	// 启动 ping 超时检测：如果 60 秒未收到 Ping，判定连接死亡
-	pingDead := make(chan struct{})
-	go a.monitorPingTimeout(pingDead)
+	go a.monitorPingTimeout(cancel)
 
 	for {
 		select {
 		case <-stream.Context().Done():
 			return stream.Context().Err()
-		case <-pingDead:
-			return errors.New("ping timeout: connection dead")
 		default:
 		}
 
@@ -552,7 +545,7 @@ func (a *Agent) sendHeartbeat(stream agent.AgentGateway_ConnectClient) {
 	hb.Vms = vms
 	hb.OsImages = images
 
-	_ = stream.Send(&agent.AgentEnvelope{
+	_ = a.safeSend(stream, &agent.AgentEnvelope{
 		MessageId: uuid.NewString(),
 		Payload:   &agent.AgentEnvelope_Heartbeat{Heartbeat: hb},
 	})
@@ -560,7 +553,7 @@ func (a *Agent) sendHeartbeat(stream agent.AgentGateway_ConnectClient) {
 
 // heartbeatLoop 每 30 秒触发一次心跳上报，流断开时退出。
 func (a *Agent) heartbeatLoop(stream agent.AgentGateway_ConnectClient) {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
@@ -723,7 +716,7 @@ func (a *Agent) handleCommand(stream agent.AgentGateway_ConnectClient, env *agen
 	} else if len(respData) > 0 {
 		res.Data = respData
 	}
-	_ = stream.Send(&agent.AgentEnvelope{
+	_ = a.safeSend(stream, &agent.AgentEnvelope{
 		MessageId: uuid.NewString(),
 		Payload:   &agent.AgentEnvelope_CmdResult{CmdResult: res},
 	})
@@ -841,7 +834,7 @@ func pickFreePort(min, max int) (int, error) {
 
 // monitorPingTimeout 定期检查是否长时间未收到 Ping，检测僵尸连接。
 // 如果 pingTimeout (60秒) 内未收到任何 Ping，则向 pingDead 通道发送信号。
-func (a *Agent) monitorPingTimeout(pingDead chan<- struct{}) {
+func (a *Agent) monitorPingTimeout(cancel context.CancelFunc) {
 	const pingTimeout = 60 * time.Second
 	const checkInterval = 10 * time.Second
 
@@ -855,10 +848,7 @@ func (a *Agent) monitorPingTimeout(pingDead chan<- struct{}) {
 
 		if time.Since(lastPingTime) > pingTimeout {
 			log.Printf("Ping timeout: no ping received for %v", pingTimeout)
-			select {
-			case pingDead <- struct{}{}:
-			default:
-			}
+			cancel()
 			return
 		}
 	}
