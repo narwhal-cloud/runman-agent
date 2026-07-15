@@ -293,6 +293,13 @@ write_files:
 		userData += "  - systemctl restart systemd-networkd || true\n"
 	}
 
+	// 兜底：ready 镜像若因历史构建失败缺少 sshd，在网络就绪后现场补装
+	if req.OsImage == "alpine" {
+		userData += fmt.Sprintf("  - [ sh, -c, \"command -v sshd >/dev/null 2>&1 || apk add --no-cache %s || true\" ]\n", pkgSSH)
+	} else {
+		userData += fmt.Sprintf("  - [ sh, -c, \"command -v sshd >/dev/null 2>&1 || (apt-get update && apt-get install -y %s) || true\" ]\n", pkgSSH)
+	}
+
 	userData += fmt.Sprintf(`  - [ sh, -c, "systemctl enable ssh || systemctl enable sshd || rc-update add sshd default || true" ]
   - [ sh, -c, "systemctl restart ssh || systemctl restart sshd || rc-service sshd restart || true" ]
   - [ sh, -c, "systemctl enable %s || rc-update add %s default || true" ]
@@ -443,6 +450,14 @@ func (m *Manager) ensureReadyImage(ctx context.Context, baseAlias, readyAlias, d
 		aptConfig = "- [ sh, -c, \"echo 'Acquire::ForceIPv4 \\\"true\\\";' > /etc/apt/apt.conf.d/99force-ipv4\" ]\n  - apt-get update"
 	}
 
+	// packages 模块失败（网络未就绪/源故障）不会阻止 runcmd，因此 runcmd 里
+	// 带重试兜底安装，且 build_done 必须在确认 sshd 存在后才落盘，
+	// 避免把没有 sshd 的坏镜像发布成 ready 别名。
+	installCmd := fmt.Sprintf("apt-get update && apt-get install -y bash wget curl %s sshpass sudo %s lsof iptables dos2unix", pkgSSH, pkgCron)
+	if distro == "alpine" {
+		installCmd = fmt.Sprintf("apk add --no-cache bash wget curl %s sshpass sudo %s lsof iptables dos2unix", pkgSSH, pkgCron)
+	}
+
 	builderUserData := fmt.Sprintf(`#cloud-config
 ssh_pwauth: true
 manage_resolv_conf: true
@@ -461,12 +476,13 @@ packages:
   - dos2unix
 runcmd:
   %s
+  - [ sh, -c, "for i in $(seq 1 30); do command -v sshd >/dev/null 2>&1 && break; %s; sleep 5; done" ]
   - mkdir -p /etc/ssh/sshd_config.d
   - [ sh, -c, "printf 'PermitRootLogin yes\\nPasswordAuthentication yes\\nListenAddress 0.0.0.0\\nListenAddress ::\\n' > /etc/ssh/sshd_config.d/99-runman.conf" ]
   - sed -i 's/^#\\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
   - sed -i 's/^#\\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-  - [ sh, -c, "touch /root/build_done" ]
-`, pkgSSH, pkgCron, aptConfig)
+  - [ sh, -c, "command -v sshd >/dev/null 2>&1 && touch /root/build_done" ]
+`, pkgSSH, pkgCron, aptConfig, installCmd)
 
 	op, err := m.client.CreateInstance(api.InstancesPost{
 		Name: builderName,

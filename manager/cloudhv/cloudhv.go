@@ -525,10 +525,13 @@ func (m *Manager) genCloudInit(vmID, distro, password string, net *netConfig) er
 
 	// 必须严格遵守 YAML 缩进格式
 	// 根据 distro 选择包管理器和服务启动方式
-	var pkgMgr, pkgList, svcRestart, svcFile, svcEnable string
+	var pkgMgr, pkgList, svcRestart, svcFile, svcEnable, sshInstall, sshEnable string
 	if distro == "alpine" {
 		pkgMgr = "apk add --no-cache"
 		pkgList = "curl e2fsprogs"
+		// 兜底：个别镜像/构建缺 sshd 时现场补装，并确保加入默认 runlevel（否则重启后不自启）
+		sshInstall = `[ sh, -c, "command -v sshd >/dev/null 2>&1 || apk add --no-cache openssh || true" ]`
+		sshEnable = "rc-update add sshd default 2>/dev/null || true"
 		svcRestart = "rc-service sshd restart 2>/dev/null || service sshd restart 2>/dev/null || true"
 		svcFile = `  - path: /etc/init.d/report-memory
     content: |
@@ -543,6 +546,8 @@ func (m *Manager) genCloudInit(vmID, distro, password string, net *netConfig) er
 	} else {
 		pkgMgr = "apt-get update && apt-get install -y"
 		pkgList = "curl e2fsprogs cloud-guest-utils"
+		sshInstall = `[ sh, -c, "command -v sshd >/dev/null 2>&1 || (apt-get update && apt-get install -y openssh-server) || true" ]`
+		sshEnable = "systemctl enable ssh 2>/dev/null || systemctl enable sshd 2>/dev/null || true"
 		svcRestart = "systemctl restart sshd 2>/dev/null || service sshd restart 2>/dev/null || true"
 		svcFile = `  - path: /etc/systemd/system/report-memory.service
     content: |
@@ -621,11 +626,13 @@ write_files:
 %s
 runcmd:
   - resize2fs /dev/vda1 || true
+  - %s
   - sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
   - %s
-  - %s %s
   - %s
-`, password, vmID, svcFile, svcRestart, pkgMgr, pkgList, svcEnable)
+  - %s %s
+%s
+`, password, vmID, svcFile, sshInstall, sshEnable, svcRestart, pkgMgr, pkgList, svcEnable)
 
 	metaData := fmt.Sprintf("instance-id: %s\nlocal-hostname: %s\n", vmID, vmID)
 
