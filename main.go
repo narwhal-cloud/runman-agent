@@ -44,8 +44,10 @@ const serverAddr = "hosting.fuckip.me:443"
 
 // agentConsoleSession 保存一个活跃的控制台 TTY 会话的状态，
 // 用于将平台下发的 stdin / resize 消息路由到正确的 AttachTTY 调用。
+// stdin 经由 stdinCh 交给会话内的单一写入协程串行写 pipe，
+// 保证输入字节顺序，且 pipe 写阻塞时不会波及 gRPC Recv 循环。
 type agentConsoleSession struct {
-	stdinPW  *io.PipeWriter
+	stdinCh  chan []byte
 	resizeCh chan manager.ResizeEvent
 	cancel   context.CancelFunc
 }
@@ -286,8 +288,12 @@ func (a *Agent) run() {
 	delay := baseDelay
 
 	for {
-		a.config = a.cfg.Get()
-		if a.config.Token == "" {
+		// 上一条连接的 sendHeartbeat 等 goroutine 可能仍在读 a.config，写入需持锁
+		conf := a.cfg.Get()
+		a.mu.Lock()
+		a.config = conf
+		a.mu.Unlock()
+		if conf.Token == "" {
 			a.setConnected(false, "No token configured")
 			time.Sleep(10 * time.Second)
 			continue
@@ -307,8 +313,13 @@ func (a *Agent) run() {
 			delay = baseDelay
 		}
 
+		// connectAndLoop 在服务端干净关流（io.EOF）时返回 nil，此处 err 可能为空
+		errMsg := "stream closed by server"
+		if err != nil {
+			errMsg = err.Error()
+		}
 		log.Printf("Disconnected: %v, retrying in %v...", err, delay)
-		a.setConnected(false, err.Error())
+		a.setConnected(false, errMsg)
 		time.Sleep(delay)
 
 		if !everConnected {
@@ -342,7 +353,7 @@ func (a *Agent) handleConsoleOpen(stream agent.AgentGateway_ConnectClient, cmd *
 	resizeCh := make(chan manager.ResizeEvent, 8)
 
 	sess := &agentConsoleSession{
-		stdinPW:  stdinPW,
+		stdinCh:  make(chan []byte, 256),
 		resizeCh: resizeCh,
 		cancel:   cancel,
 	}
@@ -351,6 +362,20 @@ func (a *Agent) handleConsoleOpen(stream agent.AgentGateway_ConnectClient, cmd *
 		a.consoleSessions.Delete(cmd.SessionId)
 		cancel()
 		_ = stdinPW.Close()
+	}()
+
+	// stdin 写入协程：串行消费 stdinCh，保证键盘输入的字节顺序。
+	go func() {
+		for {
+			select {
+			case data := <-sess.stdinCh:
+				if _, err := stdinPW.Write(data); err != nil {
+					return
+				}
+			case <-sessCtx.Done():
+				return
+			}
+		}
 	}()
 
 	// 发送初始 resize 以设置终端尺寸（在 CONNECTED 之前）
@@ -478,15 +503,9 @@ func (a *Agent) connectAndLoop() error {
 	go a.heartbeatLoop(stream)
 
 	// 启动 ping 超时检测：如果 60 秒未收到 Ping，判定连接死亡
-	go a.monitorPingTimeout(cancel)
+	go a.monitorPingTimeout(stream.Context(), cancel)
 
 	for {
-		select {
-		case <-stream.Context().Done():
-			return stream.Context().Err()
-		default:
-		}
-
 		env, err := stream.Recv()
 		if err == io.EOF {
 			return nil
@@ -494,6 +513,48 @@ func (a *Agent) connectAndLoop() error {
 		if err != nil {
 			return err
 		}
+		a.dispatch(stream, env)
+	}
+}
+
+// dispatch 分发平台下发的消息：Ping / 控制台输入等控制流消息在 Recv 循环内
+// 同步处理（保证顺序、避免为每条消息开 goroutine），VM 生命周期等重命令
+// 交给 handleCommand 在独立 goroutine 中执行。
+func (a *Agent) dispatch(stream agent.AgentGateway_ConnectClient, env *agent.PlatformEnvelope) {
+	switch p := env.Payload.(type) {
+	case *agent.PlatformEnvelope_Ping:
+		a.mu.Lock()
+		a.lastPingTime = time.Now()
+		a.mu.Unlock()
+
+	case *agent.PlatformEnvelope_ConsoleOpen:
+		go a.handleConsoleOpen(stream, p.ConsoleOpen)
+
+	case *agent.PlatformEnvelope_ConsoleInput:
+		if sess := a.getConsoleSession(p.ConsoleInput.SessionId); sess != nil {
+			select {
+			case sess.stdinCh <- p.ConsoleInput.Data:
+			default: // TTY 消费停滞时丢弃输入，避免阻塞 Recv 循环
+			}
+		}
+
+	case *agent.PlatformEnvelope_ConsoleResize:
+		if sess := a.getConsoleSession(p.ConsoleResize.SessionId); sess != nil {
+			select {
+			case sess.resizeCh <- manager.ResizeEvent{
+				Cols: uint(p.ConsoleResize.Cols),
+				Rows: uint(p.ConsoleResize.Rows),
+			}:
+			default:
+			}
+		}
+
+	case *agent.PlatformEnvelope_ConsoleClose:
+		if sess := a.getConsoleSession(p.ConsoleClose.SessionId); sess != nil {
+			sess.cancel()
+		}
+
+	default:
 		go a.handleCommand(stream, env)
 	}
 }
@@ -501,8 +562,11 @@ func (a *Agent) connectAndLoop() error {
 // monitorCtx 构造携带监控配置（NIC / 磁盘挂载点）的 context，
 // 供 HostMonitor 按配置采集对应接口和分区的数据。
 func (a *Agent) monitorCtx() context.Context {
-	ctx := context.WithValue(context.Background(), monitor.NICKey, a.config.MonitorNIC)
-	return context.WithValue(ctx, monitor.DiskKey, a.config.MonitorDisk)
+	a.mu.RLock()
+	nic, disk := a.config.MonitorNIC, a.config.MonitorDisk
+	a.mu.RUnlock()
+	ctx := context.WithValue(context.Background(), monitor.NICKey, nic)
+	return context.WithValue(ctx, monitor.DiskKey, disk)
 }
 
 // sendHeartbeat 采集宿主机指标和容器列表，累计流量后通过 stream 上报心跳。
@@ -514,8 +578,9 @@ func (a *Agent) sendHeartbeat(stream agent.AgentGateway_ConnectClient) {
 	}
 	hb := hostStats.Heartbeat
 	hb.Timestamp = time.Now().Unix()
-	hb.VirtType = a.config.VirtType
 	a.mu.RLock()
+	virtType := a.config.VirtType
+	hb.VirtType = virtType
 	liveHost := a.cfg.Get().Host // 每次心跳读取最新配置，确保面板修改立即生效
 	if liveHost != "" {
 		hb.EntryHost = liveHost
@@ -528,7 +593,7 @@ func (a *Agent) sendHeartbeat(stream agent.AgentGateway_ConnectClient) {
 	vms, _ := a.mgr.ListVMs(ctx)
 	images, _ := a.mgr.GetSupportedImages(ctx)
 	images = manager.FilterAndSortImages(a.db, images)
-	if a.config.VirtType == "podman" {
+	if virtType == "podman" {
 		// 自定义镜像随心跳上报，平台 os_images 会自动跟随更新
 		images = manager.AppendReadyCustomImages(a.db, images)
 	}
@@ -569,12 +634,10 @@ func (a *Agent) heartbeatLoop(stream agent.AgentGateway_ConnectClient) {
 // 每条命令在独立 goroutine 中执行，不阻塞主接收循环。
 func (a *Agent) handleCommand(stream agent.AgentGateway_ConnectClient, env *agent.PlatformEnvelope) {
 	defer func() {
-		defer func() {
-			if panicErr := recover(); panicErr != nil {
-				log.Printf("Panic: %v\n", panicErr)
-				log.Printf("Stack:\n%s", debug.Stack())
-			}
-		}()
+		if panicErr := recover(); panicErr != nil {
+			log.Printf("Panic: %v\n", panicErr)
+			log.Printf("Stack:\n%s", debug.Stack())
+		}
 	}()
 	var (
 		err      error
@@ -642,13 +705,6 @@ func (a *Agent) handleCommand(stream agent.AgentGateway_ConnectClient, env *agen
 		}
 		err = a.pf.RemoveMapping(ctx, p.DelPortFwd.VmId, proto, int(p.DelPortFwd.HostPort))
 
-	case *agent.PlatformEnvelope_Ping:
-		// 更新最后收到 Ping 的时间（心跳检测）
-		a.mu.Lock()
-		a.lastPingTime = time.Now()
-		a.mu.Unlock()
-		return
-
 	case *agent.PlatformEnvelope_GetPortFwds:
 		var pfList []*db.PortForward
 		pfList, err = a.db.ListPortForwards(p.GetPortFwds.VmId)
@@ -678,36 +734,6 @@ func (a *Agent) handleCommand(stream agent.AgentGateway_ConnectClient, env *agen
 			})
 			return // 已单独回复，跳过末尾的 CommandResult
 		}
-
-	// ---- 控制台 TTY（不走 CommandResult 流程）----
-
-	case *agent.PlatformEnvelope_ConsoleOpen:
-		go a.handleConsoleOpen(stream, p.ConsoleOpen)
-		return
-
-	case *agent.PlatformEnvelope_ConsoleInput:
-		if sess := a.getConsoleSession(p.ConsoleInput.SessionId); sess != nil {
-			_, _ = sess.stdinPW.Write(p.ConsoleInput.Data)
-		}
-		return
-
-	case *agent.PlatformEnvelope_ConsoleResize:
-		if sess := a.getConsoleSession(p.ConsoleResize.SessionId); sess != nil {
-			select {
-			case sess.resizeCh <- manager.ResizeEvent{
-				Cols: uint(p.ConsoleResize.Cols),
-				Rows: uint(p.ConsoleResize.Rows),
-			}:
-			default:
-			}
-		}
-		return
-
-	case *agent.PlatformEnvelope_ConsoleClose:
-		if sess := a.getConsoleSession(p.ConsoleClose.SessionId); sess != nil {
-			sess.cancel()
-		}
-		return
 	}
 
 	res := &agent.CommandResult{CommandId: env.CommandId, Success: err == nil}
@@ -834,22 +860,28 @@ func pickFreePort(min, max int) (int, error) {
 
 // monitorPingTimeout 定期检查是否长时间未收到 Ping，检测僵尸连接。
 // 如果 pingTimeout (60秒) 内未收到任何 Ping，则向 pingDead 通道发送信号。
-func (a *Agent) monitorPingTimeout(cancel context.CancelFunc) {
+func (a *Agent) monitorPingTimeout(ctx context.Context, cancel context.CancelFunc) {
 	const pingTimeout = 60 * time.Second
 	const checkInterval = 10 * time.Second
 
 	ticker := time.NewTicker(checkInterval)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		a.mu.RLock()
-		lastPingTime := a.lastPingTime
-		a.mu.RUnlock()
-
-		if time.Since(lastPingTime) > pingTimeout {
-			log.Printf("Ping timeout: no ping received for %v", pingTimeout)
-			cancel()
+	for {
+		select {
+		case <-ctx.Done():
+			// 连接因其他原因结束时退出，防止每次重连泄漏一个常驻 goroutine
 			return
+		case <-ticker.C:
+			a.mu.RLock()
+			lastPingTime := a.lastPingTime
+			a.mu.RUnlock()
+
+			if time.Since(lastPingTime) > pingTimeout {
+				log.Printf("Ping timeout: no ping received for %v", pingTimeout)
+				cancel()
+				return
+			}
 		}
 	}
 }
