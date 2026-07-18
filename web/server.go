@@ -156,6 +156,10 @@ func (s *Server) ListenAndServe(addr string) error {
 	mux.HandleFunc("PUT /api/vms/{id}/portfwds", s.handleSyncPortFwds)
 	mux.HandleFunc("DELETE /api/vms/{id}/portfwds/{protocol}/{hostPort}", s.handleDelPortFwd)
 
+	// 端口转发唯一来源 IP 数限制
+	mux.HandleFunc("GET /api/vms/{id}/iplimit", s.handleGetIPLimit)
+	mux.HandleFunc("PUT /api/vms/{id}/iplimit", s.handleSetIPLimit)
+
 	// 控制台 TTY（WebSocket）
 	mux.HandleFunc("GET /api/vms/{id}/tty", s.handleVMTTY)
 
@@ -392,6 +396,7 @@ type configRequest struct {
 	WebPass         string `json:"web_pass"` // plaintext，服务端 bcrypt 后存储
 	Host            string `json:"host"`
 	MaxPortForward  int32  `json:"max_port_forward"`
+	MaxForwardIPs   *int32 `json:"max_forward_ips"` // 指针以区分"未提交"与"设为 0（不限制）"
 	TrafficResetDay int    `json:"traffic_reset_day"`
 }
 
@@ -403,6 +408,7 @@ type configResponse struct {
 	VirtType        string `json:"virt_type"`
 	Host            string `json:"host"`
 	MaxPortForward  int32  `json:"max_port_forward"`
+	MaxForwardIPs   int32  `json:"max_forward_ips"`
 	TrafficResetDay int    `json:"traffic_reset_day"`
 }
 
@@ -428,6 +434,9 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			cfg.Host = req.Host
 			if req.MaxPortForward > 0 {
 				cfg.MaxPortForward = req.MaxPortForward
+			}
+			if req.MaxForwardIPs != nil && *req.MaxForwardIPs >= 0 {
+				cfg.MaxForwardIPs = *req.MaxForwardIPs
 			}
 			if req.WebUser != "" {
 				cfg.WebUser = req.WebUser
@@ -456,6 +465,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		VirtType:        conf.VirtType,
 		Host:            conf.Host,
 		MaxPortForward:  conf.MaxPortForward,
+		MaxForwardIPs:   conf.MaxForwardIPs,
 		TrafficResetDay: conf.TrafficResetDay,
 	})
 }
@@ -896,6 +906,8 @@ func (s *Server) handleDeleteVM(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, err, 500)
 		return
 	}
+	// 与 gRPC 删除路径保持一致：清理该 VM 的端口转发规则及 IP 限制覆盖
+	s.pf.DeleteVM(r.Context(), vmID)
 	_ = s.db.DeleteVMConfig(vmID)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -1083,6 +1095,47 @@ func (s *Server) handleSyncPortFwds(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.pf.SyncForVM(r.Context(), vmID, desired); err != nil {
+		jsonErr(w, err, 500)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ─── 端口转发唯一来源 IP 数限制 ────────────────────────────────────────────────
+
+// ipLimitResponse 描述某 VM 的唯一来源 IP 数限制状态。
+// Override 为 nil 表示未按 VM 覆盖（使用全局值）；Effective 为实际生效值（0 = 不限制）。
+type ipLimitResponse struct {
+	Override  *int `json:"override"`
+	Global    int  `json:"global"`
+	Effective int  `json:"effective"`
+	ActiveIPs int  `json:"active_ips"`
+}
+
+func (s *Server) handleGetIPLimit(w http.ResponseWriter, r *http.Request) {
+	vmID := r.PathValue("id")
+	jsonOK(w, ipLimitResponse{
+		Override:  s.pf.GetVMIPLimit(vmID),
+		Global:    int(s.cfg.Get().MaxForwardIPs),
+		Effective: s.pf.EffectiveIPLimit(vmID),
+		ActiveIPs: s.pf.ActiveIPCount(vmID),
+	})
+}
+
+func (s *Server) handleSetIPLimit(w http.ResponseWriter, r *http.Request) {
+	vmID := r.PathValue("id")
+	var req struct {
+		Limit *int `json:"limit"` // nil = 清除覆盖，0 = 不限制，>0 = 上限
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	if req.Limit != nil && *req.Limit < 0 {
+		http.Error(w, "limit must be >= 0", 400)
+		return
+	}
+	if err := s.pf.SetVMIPLimit(vmID, req.Limit); err != nil {
 		jsonErr(w, err, 500)
 		return
 	}

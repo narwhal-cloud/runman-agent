@@ -52,6 +52,13 @@ type IncusVMConfig struct {
 	IPv6      string // 静态 IPv6
 }
 
+// VMIPLimit 按 VM 覆盖端口转发唯一来源 IP 数上限。
+// 无记录时使用全局配置 MaxForwardIPs；MaxIPs 为 0 表示该 VM 不限制。
+type VMIPLimit struct {
+	VMID   string `gorm:"primaryKey"`
+	MaxIPs int
+}
+
 // PortForward 持久化端口转发规则。(Protocol, HostPort) 联合主键保证宿主机端口唯一。
 type PortForward struct {
 	Protocol    string `gorm:"primaryKey"`
@@ -111,7 +118,7 @@ func Init(path string) (*DB, error) {
 		sqlDB.SetMaxOpenConns(1)
 	}
 
-	if err := db.AutoMigrate(&Traffic{}, &VMConfig{}, &PodmanVMConfig{}, &CloudHVVMConfig{}, &IncusVMConfig{}, &PortForward{}, &System{}); err != nil {
+	if err := db.AutoMigrate(&Traffic{}, &VMConfig{}, &PodmanVMConfig{}, &CloudHVVMConfig{}, &IncusVMConfig{}, &PortForward{}, &VMIPLimit{}, &System{}); err != nil {
 		return nil, fmt.Errorf("automigrate: %w", err)
 	}
 
@@ -278,6 +285,22 @@ func (d *DB) ListAllPortForwards() ([]*PortForward, error) {
 
 func (d *DB) DeletePortForwardsForVM(vmId string) error {
 	return d.orm.Delete(&PortForward{}, "vm_id = ?", vmId).Error
+}
+
+// 端口转发唯一来源 IP 数限制（按 VM 覆盖）
+
+func (d *DB) SaveVMIPLimit(vmId string, maxIPs int) error {
+	return d.orm.Save(&VMIPLimit{VMID: vmId, MaxIPs: maxIPs}).Error
+}
+
+func (d *DB) DeleteVMIPLimit(vmId string) error {
+	return d.orm.Delete(&VMIPLimit{}, "vm_id = ?", vmId).Error
+}
+
+func (d *DB) ListVMIPLimits() ([]*VMIPLimit, error) {
+	var list []*VMIPLimit
+	err := d.orm.Find(&list).Error
+	return list, err
 }
 
 // 流量

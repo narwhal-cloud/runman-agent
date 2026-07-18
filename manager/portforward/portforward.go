@@ -106,14 +106,117 @@ type Manager struct {
 	mgr      manager.VMManager
 	db       *db.DB
 	cfg      *config.Manager
+
+	// 唯一来源 IP 数限制：ipLimits 缓存各 VM 的覆盖值（DB 为准），
+	// vmActiveIPs 跟踪各 VM 当前活跃的来源 IP 及其连接数。
+	ipLimitMu   sync.RWMutex
+	ipLimits    map[string]int
+	vmIPMu      sync.Mutex
+	vmActiveIPs map[string]map[string]int64
 }
 
 func New(mgr manager.VMManager, database *db.DB, cfg *config.Manager) *Manager {
-	return &Manager{
-		mappings: make(map[string][]*Entry),
-		mgr:      mgr,
-		db:       database,
-		cfg:      cfg,
+	m := &Manager{
+		mappings:    make(map[string][]*Entry),
+		mgr:         mgr,
+		db:          database,
+		cfg:         cfg,
+		ipLimits:    make(map[string]int),
+		vmActiveIPs: make(map[string]map[string]int64),
+	}
+	if limits, err := database.ListVMIPLimits(); err == nil {
+		for _, l := range limits {
+			m.ipLimits[l.VMID] = l.MaxIPs
+		}
+	}
+	return m
+}
+
+// EffectiveIPLimit 返回某 VM 生效的唯一来源 IP 数上限（0 表示不限制）。
+func (m *Manager) EffectiveIPLimit(vmID string) int {
+	m.ipLimitMu.RLock()
+	v, ok := m.ipLimits[vmID]
+	m.ipLimitMu.RUnlock()
+	if ok {
+		return v
+	}
+	return int(m.cfg.Get().MaxForwardIPs)
+}
+
+// GetVMIPLimit 返回某 VM 的覆盖值（nil 表示未覆盖，使用全局）。
+func (m *Manager) GetVMIPLimit(vmID string) *int {
+	m.ipLimitMu.RLock()
+	defer m.ipLimitMu.RUnlock()
+	if v, ok := m.ipLimits[vmID]; ok {
+		return &v
+	}
+	return nil
+}
+
+// SetVMIPLimit 设置某 VM 的覆盖值；limit 为 nil 时清除覆盖（回退到全局配置）。
+func (m *Manager) SetVMIPLimit(vmID string, limit *int) error {
+	if limit == nil {
+		if err := m.db.DeleteVMIPLimit(vmID); err != nil {
+			return err
+		}
+		m.ipLimitMu.Lock()
+		delete(m.ipLimits, vmID)
+		m.ipLimitMu.Unlock()
+		return nil
+	}
+	if *limit < 0 {
+		return fmt.Errorf("ip limit must be >= 0")
+	}
+	if err := m.db.SaveVMIPLimit(vmID, *limit); err != nil {
+		return err
+	}
+	m.ipLimitMu.Lock()
+	m.ipLimits[vmID] = *limit
+	m.ipLimitMu.Unlock()
+	return nil
+}
+
+// ActiveIPCount 返回某 VM 当前活跃的唯一来源 IP 数。
+func (m *Manager) ActiveIPCount(vmID string) int {
+	m.vmIPMu.Lock()
+	defer m.vmIPMu.Unlock()
+	return len(m.vmActiveIPs[vmID])
+}
+
+// tryAcquireIP 尝试为一条新连接登记来源 IP。
+// 已在活跃集合中的 IP 总是放行（一个 IP 允许多条连接）；
+// 新 IP 在唯一 IP 数达到上限时被拒绝。返回 false 表示应拒绝连接。
+func (m *Manager) tryAcquireIP(vmID, ip string) bool {
+	limit := m.EffectiveIPLimit(vmID)
+	m.vmIPMu.Lock()
+	defer m.vmIPMu.Unlock()
+	set := m.vmActiveIPs[vmID]
+	if set == nil {
+		set = make(map[string]int64)
+		m.vmActiveIPs[vmID] = set
+	}
+	if _, exists := set[ip]; !exists && limit > 0 && len(set) >= limit {
+		return false
+	}
+	set[ip]++
+	return true
+}
+
+// releaseIP 在连接结束时释放来源 IP 的占用。
+func (m *Manager) releaseIP(vmID, ip string) {
+	m.vmIPMu.Lock()
+	defer m.vmIPMu.Unlock()
+	set := m.vmActiveIPs[vmID]
+	if set == nil {
+		return
+	}
+	if set[ip] > 1 {
+		set[ip]--
+	} else {
+		delete(set, ip)
+		if len(set) == 0 {
+			delete(m.vmActiveIPs, vmID)
+		}
 	}
 }
 
@@ -356,6 +459,10 @@ func (m *Manager) DeleteVM(ctx context.Context, vmId string) {
 		_ = m.RemoveMapping(ctx, vmId, e.Protocol, e.HostPort)
 	}
 	_ = m.db.DeletePortForwardsForVM(vmId)
+	_ = m.db.DeleteVMIPLimit(vmId)
+	m.ipLimitMu.Lock()
+	delete(m.ipLimits, vmId)
+	m.ipLimitMu.Unlock()
 }
 
 func (m *Manager) GetReport() []Entry {
@@ -404,6 +511,11 @@ func (m *Manager) handleTCP(ctx context.Context, src net.Conn, target string, e 
 	defer func() { _ = src.Close() }()
 
 	host, _, _ := net.SplitHostPort(src.RemoteAddr().String())
+	if !m.tryAcquireIP(e.VMID, host) {
+		// 唯一来源 IP 数已达上限，拒绝新 IP 的连接
+		return
+	}
+	defer m.releaseIP(e.VMID, host)
 	e.trackConnect(host)
 	defer e.trackDisconnect(host)
 
@@ -450,14 +562,20 @@ func (m *Manager) runUDP(ctx context.Context, pc net.PacketConn, target string, 
 		smu.Lock()
 		client, ok := sessions[addr.String()]
 		if !ok {
+			host, _, _ := net.SplitHostPort(addr.String())
+			if !m.tryAcquireIP(e.VMID, host) {
+				// 唯一来源 IP 数已达上限，丢弃新 IP 的数据包
+				smu.Unlock()
+				continue
+			}
 			var dialErr error
 			client, dialErr = net.Dial("udp", targetAddr.String())
 			if dialErr != nil {
+				m.releaseIP(e.VMID, host)
 				smu.Unlock()
 				continue
 			}
 			sessions[addr.String()] = client
-			host, _, _ := net.SplitHostPort(addr.String())
 			e.trackConnect(host)
 			go func(a net.Addr, c net.Conn, h string) {
 				defer func() {
@@ -466,6 +584,7 @@ func (m *Manager) runUDP(ctx context.Context, pc net.PacketConn, target string, 
 					smu.Unlock()
 					_ = c.Close()
 					e.trackDisconnect(h)
+					m.releaseIP(e.VMID, h)
 				}()
 				rBuf := make([]byte, 64*1024)
 				for {

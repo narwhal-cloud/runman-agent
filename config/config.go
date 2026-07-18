@@ -41,6 +41,9 @@ type Config struct {
 	// 每个 VM 最大端口转发数
 	MaxPortForward int32 `json:"max_port_forward"`
 
+	// 每个 VM 端口转发允许的最大唯一来源 IP 数（全局默认值，0 表示不限制，可按 VM 覆盖）
+	MaxForwardIPs int32 `json:"max_forward_ips"`
+
 	// 每月自动重置流量的日期（1-28）
 	TrafficResetDay int `json:"traffic_reset_day"`
 

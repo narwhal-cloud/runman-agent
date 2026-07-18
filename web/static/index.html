@@ -313,9 +313,15 @@
                     </div>
                 </div>
                 <div class="space-y-3">
-                    <div>
-                        <label class="label">Max Port Forward (Per VM)</label>
-                        <input type="number" id="maxPortForward" class="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none text-sm" min="1" max="1000">
+                    <div class="grid grid-cols-2 gap-3">
+                        <div>
+                            <label class="label">Max Port Forward (Per VM)</label>
+                            <input type="number" id="maxPortForward" class="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none text-sm" min="1" max="1000">
+                        </div>
+                        <div>
+                            <label class="label">Max Conn IPs (Per VM, 0 = ∞)</label>
+                            <input type="number" id="maxForwardIPs" class="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none text-sm" min="0" max="100000" placeholder="0 = unlimited">
+                        </div>
                     </div>
                     <div>
                         <label class="label">Entry Host (optional, for DDNS)</label>
@@ -490,6 +496,22 @@
                     </div>
                 </div>
                 <button onclick="doAddPortFwd()" class="w-full py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-lg">Add Forward Rule</button>
+            </div>
+            <!-- Unique IP limit -->
+            <div class="bg-slate-50 rounded-xl p-4 space-y-3">
+                <div class="flex items-center justify-between">
+                    <p class="text-xs font-bold text-slate-500 uppercase tracking-widest">Connection IP Limit</p>
+                    <span id="iplimit-status" class="text-[10px] font-mono text-slate-400"></span>
+                </div>
+                <div class="flex items-end gap-3">
+                    <div class="flex-1">
+                        <label class="label">Max Unique IPs (empty = global, 0 = unlimited)</label>
+                        <input type="number" id="iplimit-value" class="input" min="0" max="100000" placeholder="use global">
+                    </div>
+                    <button onclick="doSetIPLimit(false)" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-lg">Set</button>
+                    <button onclick="doSetIPLimit(true)" class="px-4 py-2 bg-slate-200 hover:bg-slate-300 text-slate-600 text-xs font-bold rounded-lg">Use Global</button>
+                </div>
+                <p class="text-[10px] text-slate-400">New connections from an IP already connected are always allowed; connections from a new IP are rejected once the unique-IP count reaches the limit.</p>
             </div>
             <!-- List -->
             <div>
@@ -1002,10 +1024,12 @@ async function openPortFwds(vmId) {
     hideErr('ports-err');
     $('pf-hport').value=''; $('pf-gport').value='';
     $('pf-summary').classList.add('hidden');
+    $('iplimit-value').value=''; $('iplimit-status').textContent='';
     await refreshPortFwds();
+    await loadIPLimit(true);
     openModal('modal-ports');
     clearInterval(pfRefreshInterval);
-    pfRefreshInterval = setInterval(refreshPortFwds, 3000);
+    pfRefreshInterval = setInterval(() => { refreshPortFwds(); loadIPLimit(false); }, 3000);
 }
 
 function closePortFwdsModal() {
@@ -1077,6 +1101,36 @@ async function refreshPortFwds() {
             </div>`;
         }).join('');
     } catch(e){ showErr('ports-err', e.message); }
+}
+
+// fillInput=true 时把覆盖值填入输入框（仅打开弹窗时），刷新时只更新状态文字
+async function loadIPLimit(fillInput) {
+    try {
+        const info = await api('GET', `/api/vms/${activeVmId}/iplimit`);
+        if (fillInput) $('iplimit-value').value = info.override === null ? '' : info.override;
+        const eff = info.effective > 0 ? info.effective : '∞';
+        const src = info.override === null ? `global(${info.global > 0 ? info.global : '∞'})` : 'override';
+        $('iplimit-status').textContent = `${info.active_ips} active IPs / limit ${eff} · ${src}`;
+    } catch(e) { /* 静默：旧 agent 无此接口 */ }
+}
+
+async function doSetIPLimit(useGlobal) {
+    hideErr('ports-err');
+    let limit = null;
+    if (!useGlobal) {
+        const v = $('iplimit-value').value.trim();
+        if (v === '') { useGlobal = true; }
+        else {
+            limit = parseInt(v);
+            if (isNaN(limit) || limit < 0) { showErr('ports-err','IP limit must be a number >= 0.'); return; }
+        }
+    }
+    disableAllButtons(true);
+    try {
+        await api('PUT', `/api/vms/${activeVmId}/iplimit`, {limit: useGlobal ? null : limit});
+        await loadIPLimit(true);
+    } catch(e){ showErr('ports-err', e.message); }
+    finally { disableAllButtons(false); }
 }
 
 async function doAddPortFwd() {
@@ -1415,6 +1469,7 @@ $('configForm').onsubmit = async (e) => {
             monitor_nic:      $('monitorNIC').value,
             monitor_disk:     $('monitorDisk').value,
             max_port_forward: parseInt($('maxPortForward').value) || 20,
+            max_forward_ips:  Math.max(0, parseInt($('maxForwardIPs').value) || 0),
             traffic_reset_day: parseInt($('trafficResetDay').value) || 1,
             host:             $('entryHost').value,
             web_user:         $('webUser').value,
@@ -1752,6 +1807,7 @@ async function init() {
     $('monitorNIC').value     = conf.monitor_nic     || '';
     $('monitorDisk').value    = conf.monitor_disk    || '';
     $('maxPortForward').value = conf.max_port_forward  || 20;
+    $('maxForwardIPs').value  = conf.max_forward_ips   || 0;
     $('trafficResetDay').value = conf.traffic_reset_day || 1;
     $('entryHost').value      = conf.host             || '';
     $('webUser').value        = conf.web_user        || '';
