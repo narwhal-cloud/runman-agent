@@ -18,6 +18,7 @@ import (
 	"runman-agent/manager"
 	"runman-agent/manager/cloudhv"
 	"runman-agent/manager/portforward"
+	"runman-agent/manager/wgbind"
 	"runman-agent/monitor"
 	"runman-agent/proto/agent"
 	"runman-agent/updater"
@@ -53,6 +54,7 @@ type Server struct {
 	cloudHVMgr   *cloudhv.Manager // 如果使用 CloudHV，保存直接引用以便内存上报
 	hostMon      *monitor.HostMonitor
 	pf           *portforward.Manager
+	wg           *wgbind.Manager
 	agent        interface{}
 	vmSnapshots  map[string]*vmNetSnapshot
 	vmSnapshotMu sync.Mutex
@@ -66,7 +68,7 @@ type Server struct {
 // NewServer 接收两个 manager：
 // - mgr (svc) 是 VMService 包装层
 // - rawMgr 是真正的驱动实现（CloudHV/Podman），用于内存上报等功能
-func NewServer(database *db.DB, mgr manager.VMManager, hostMon *monitor.HostMonitor, cfg *config.Manager, pf *portforward.Manager, agent interface{}, rawMgr manager.VMManager, version string, upd *updater.Service) *Server {
+func NewServer(database *db.DB, mgr manager.VMManager, hostMon *monitor.HostMonitor, cfg *config.Manager, pf *portforward.Manager, wg *wgbind.Manager, agent interface{}, rawMgr manager.VMManager, version string, upd *updater.Service) *Server {
 	var cloudHVMgr *cloudhv.Manager
 	if ch, ok := rawMgr.(*cloudhv.Manager); ok {
 		cloudHVMgr = ch
@@ -79,6 +81,7 @@ func NewServer(database *db.DB, mgr manager.VMManager, hostMon *monitor.HostMoni
 		cloudHVMgr:  cloudHVMgr,
 		hostMon:     hostMon,
 		pf:          pf,
+		wg:          wg,
 		agent:       agent,
 		version:     version,
 		updater:     upd,
@@ -155,6 +158,13 @@ func (s *Server) ListenAndServe(addr string) error {
 	mux.HandleFunc("POST /api/vms/{id}/portfwds", s.handleAddPortFwd)
 	mux.HandleFunc("PUT /api/vms/{id}/portfwds", s.handleSyncPortFwds)
 	mux.HandleFunc("DELETE /api/vms/{id}/portfwds/{protocol}/{hostPort}", s.handleDelPortFwd)
+
+	// WireGuard 绑定（纯用户态隧道，全端口转发到 VM）
+	mux.HandleFunc("GET /api/vms/{id}/wg", s.handleListWG)
+	mux.HandleFunc("POST /api/vms/{id}/wg", s.handleAddWG)
+	mux.HandleFunc("PUT /api/vms/{id}/wg/{bindID}", s.handleUpdateWG)
+	mux.HandleFunc("DELETE /api/vms/{id}/wg/{bindID}", s.handleDelWG)
+	mux.HandleFunc("POST /api/wg/keypair", s.handleWGKeypair)
 
 	// 端口转发唯一来源 IP 数限制
 	mux.HandleFunc("GET /api/vms/{id}/iplimit", s.handleGetIPLimit)
@@ -908,6 +918,7 @@ func (s *Server) handleDeleteVM(w http.ResponseWriter, r *http.Request) {
 	}
 	// 与 gRPC 删除路径保持一致：清理该 VM 的端口转发规则及 IP 限制覆盖
 	s.pf.DeleteVM(r.Context(), vmID)
+	s.wg.DeleteVM(vmID)
 	_ = s.db.DeleteVMConfig(vmID)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -1099,6 +1110,150 @@ func (s *Server) handleSyncPortFwds(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ─── WireGuard 绑定 ────────────────────────────────────────────────────────────
+
+// wgRequest 是新建/更新 WG 绑定的请求体。
+//
+// 所有字段都是指针，语义为"只覆盖请求里出现过的字段"。这样面板上的
+// 启用/停用开关只需 PUT {"enabled":false}，不必回传整份配置——
+// 也正因如此，前端手里没有私钥（后端从不回显）也能安全地改其它字段。
+type wgRequest struct {
+	Name          *string `json:"name"`
+	Enabled       *bool   `json:"enabled"`
+	PrivateKey    *string `json:"private_key"`
+	Address       *string `json:"address"`
+	ListenPort    *int    `json:"listen_port"`
+	MTU           *int    `json:"mtu"`
+	PeerPublicKey *string `json:"peer_public_key"`
+	PresharedKey  *string `json:"preshared_key"`
+	Endpoint      *string `json:"endpoint"`
+	AllowedIPs    *string `json:"allowed_ips"`
+	Keepalive     *int    `json:"keepalive"`
+}
+
+func (req *wgRequest) apply(b *db.WGBinding) {
+	setStr := func(dst *string, src *string) {
+		if src != nil {
+			*dst = strings.TrimSpace(*src)
+		}
+	}
+	setInt := func(dst *int, src *int) {
+		if src != nil {
+			*dst = *src
+		}
+	}
+	setStr(&b.Name, req.Name)
+	setStr(&b.Address, req.Address)
+	setStr(&b.PeerPublicKey, req.PeerPublicKey)
+	setStr(&b.PresharedKey, req.PresharedKey)
+	setStr(&b.Endpoint, req.Endpoint)
+	setStr(&b.AllowedIPs, req.AllowedIPs)
+	setInt(&b.ListenPort, req.ListenPort)
+	setInt(&b.MTU, req.MTU)
+	setInt(&b.Keepalive, req.Keepalive)
+	// 私钥留空表示沿用原值，否则编辑任何字段都得重新输入私钥。
+	if req.PrivateKey != nil && strings.TrimSpace(*req.PrivateKey) != "" {
+		b.PrivateKey = strings.TrimSpace(*req.PrivateKey)
+	}
+	if req.Enabled != nil {
+		b.Enabled = *req.Enabled
+	}
+}
+
+func (s *Server) handleListWG(w http.ResponseWriter, r *http.Request) {
+	list, err := s.wg.List(r.PathValue("id"))
+	if err != nil {
+		jsonErr(w, err, 500)
+		return
+	}
+	jsonOK(w, list)
+}
+
+func (s *Server) handleAddWG(w http.ResponseWriter, r *http.Request) {
+	vmID := r.PathValue("id")
+	var req wgRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+
+	// 新建时默认启用，前端不传 enabled 也能立刻用起来。
+	rec := db.WGBinding{Enabled: true}
+	req.apply(&rec)
+
+	created, err := s.wg.Add(vmID, rec)
+	if err != nil {
+		// created 非 nil 说明记录已落库、只是隧道没起来（比如端口被占）。
+		// 这种情况回 200 并带上错误，面板能显示为 error 状态而不是丢失记录。
+		if created != nil {
+			jsonOK(w, map[string]any{"id": created.ID, "error": err.Error()})
+			return
+		}
+		jsonErr(w, err, 400)
+		return
+	}
+	jsonOK(w, map[string]any{"id": created.ID})
+}
+
+func (s *Server) handleUpdateWG(w http.ResponseWriter, r *http.Request) {
+	bindID := r.PathValue("bindID")
+	existing, err := s.wg.Get(bindID)
+	if err != nil {
+		http.Error(w, "binding not found", 404)
+		return
+	}
+	if existing.VMID != r.PathValue("id") {
+		http.Error(w, "binding does not belong to this VM", 400)
+		return
+	}
+
+	var req wgRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	req.apply(existing)
+
+	updated, err := s.wg.Update(bindID, *existing)
+	if err != nil {
+		if updated != nil {
+			jsonOK(w, map[string]any{"id": updated.ID, "error": err.Error()})
+			return
+		}
+		jsonErr(w, err, 400)
+		return
+	}
+	jsonOK(w, map[string]any{"id": updated.ID})
+}
+
+func (s *Server) handleDelWG(w http.ResponseWriter, r *http.Request) {
+	bindID := r.PathValue("bindID")
+	existing, err := s.wg.Get(bindID)
+	if err != nil {
+		w.WriteHeader(http.StatusNoContent) // 已经没了，当作成功
+		return
+	}
+	if existing.VMID != r.PathValue("id") {
+		http.Error(w, "binding does not belong to this VM", 400)
+		return
+	}
+	if err := s.wg.Remove(bindID); err != nil {
+		jsonErr(w, err, 500)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleWGKeypair 生成一对新密钥供面板填表，服务端不做任何保存。
+func (s *Server) handleWGKeypair(w http.ResponseWriter, _ *http.Request) {
+	priv, pub, err := wgbind.GenerateKeyPair()
+	if err != nil {
+		jsonErr(w, err, 500)
+		return
+	}
+	jsonOK(w, map[string]string{"private_key": priv, "public_key": pub})
 }
 
 // ─── 端口转发唯一来源 IP 数限制 ────────────────────────────────────────────────

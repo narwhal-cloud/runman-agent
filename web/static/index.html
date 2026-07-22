@@ -527,6 +527,120 @@
     </div>
 </div>
 
+<!-- ─── WireGuard Bindings ────────────────────────────────────────────────── -->
+<div id="modal-wg" class="fixed inset-0 modal-bg z-50 hidden flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[92vh] flex flex-col">
+        <div class="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50 shrink-0">
+            <div>
+                <div class="flex items-center gap-2">
+                    <h3 class="font-bold text-slate-800">WireGuard Bindings</h3>
+                    <span class="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
+                        <span class="w-1.5 h-1.5 bg-emerald-500 rounded-full pulse"></span> LIVE
+                    </span>
+                </div>
+                <p id="wg-vmid" class="text-xs text-slate-400 font-mono mt-0.5"></p>
+            </div>
+            <button onclick="closeWGModal()" class="text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button>
+        </div>
+
+        <div class="p-6 space-y-4 overflow-y-auto">
+            <p class="text-[11px] text-slate-500 bg-indigo-50 border border-indigo-100 rounded-lg px-3 py-2">
+                纯用户态 WireGuard。隧道地址（IPv4 或 IPv6）上收到的<b>全部 TCP/UDP 流量按原端口</b>转发到该 VM 的内网 IPv4；
+                发往隧道地址的 ping 由 Agent 直接应答。不加载内核 wg 模块、不改 iptables。
+                <b>仅入站方向</b>——VM 主动发出的连接仍走母鸡默认出口。<br>
+                填了 <b>Endpoint</b> = 由本机主动连对端（keepalive 默认 25s，握手靠它发起，别设成 0）；
+                留空 = 被动等对端连入，此时必须指定 Listen Port。
+            </p>
+
+            <!-- Add / Edit -->
+            <div class="bg-slate-50 rounded-xl p-4 space-y-3">
+                <div class="flex items-center justify-between">
+                    <p id="wg-form-title" class="text-xs font-bold text-slate-500 uppercase tracking-widest">Add Binding</p>
+                    <button id="wg-cancel-edit" onclick="wgResetForm()" class="hidden text-[10px] font-bold text-slate-500 hover:text-slate-700 underline">cancel edit</button>
+                </div>
+
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label class="label">Name</label>
+                        <input type="text" id="wg-name" class="input" placeholder="tunnel-hk">
+                    </div>
+                    <div>
+                        <label class="label">Tunnel Address *</label>
+                        <input type="text" id="wg-address" class="input" placeholder="10.7.0.5 或 2001:db8::5">
+                    </div>
+                </div>
+
+                <div>
+                    <label class="label">Private Key * <span id="wg-key-hint" class="text-slate-400 normal-case font-normal"></span></label>
+                    <div class="flex gap-2">
+                        <input type="text" id="wg-privkey" class="input font-mono text-[11px]" placeholder="base64, 44 chars">
+                        <button onclick="wgGenerateKey()" class="px-3 py-2 bg-slate-200 hover:bg-slate-300 text-slate-600 text-xs font-bold rounded-lg whitespace-nowrap">Generate</button>
+                    </div>
+                    <p id="wg-pubkey-hint" class="hidden mt-1 text-[10px] font-mono text-emerald-700 bg-emerald-50 border border-emerald-100 rounded px-2 py-1 break-all"></p>
+                </div>
+
+                <div>
+                    <label class="label">Peer Public Key *</label>
+                    <input type="text" id="wg-peerkey" class="input font-mono text-[11px]" placeholder="对端（服务商）的公钥">
+                </div>
+
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label class="label">Endpoint</label>
+                        <input type="text" id="wg-endpoint" class="input" placeholder="1.2.3.4:51820（留空=被动等待）">
+                    </div>
+                    <div>
+                        <label class="label">Listen Port</label>
+                        <input type="number" id="wg-listenport" class="input" min="0" max="65535" placeholder="0 = 随机">
+                    </div>
+                </div>
+
+                <details class="text-xs">
+                    <summary class="cursor-pointer text-slate-500 font-bold select-none">Advanced</summary>
+                    <div class="mt-3 space-y-3">
+                        <div>
+                            <label class="label">Preshared Key</label>
+                            <input type="text" id="wg-psk" class="input font-mono text-[11px]" placeholder="可选">
+                        </div>
+                        <div>
+                            <label class="label">Allowed IPs</label>
+                            <input type="text" id="wg-allowedips" class="input font-mono text-[11px]" placeholder="0.0.0.0/0, ::/0">
+                        </div>
+                        <div class="grid grid-cols-2 gap-3">
+                            <div>
+                                <label class="label">MTU</label>
+                                <input type="number" id="wg-mtu" class="input" min="576" max="9000" placeholder="1420">
+                            </div>
+                            <div>
+                                <label class="label">Persistent Keepalive (s)</label>
+                                <input type="number" id="wg-keepalive" class="input" min="0" max="65535" placeholder="留空 = 25">
+                            </div>
+                        </div>
+                    </div>
+                </details>
+
+                <label class="flex items-center gap-2 text-xs text-slate-600 font-bold">
+                    <input type="checkbox" id="wg-enabled" checked class="rounded"> Enabled
+                </label>
+
+                <button id="wg-submit" onclick="doSaveWG()" class="w-full py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-lg">Add Binding</button>
+            </div>
+
+            <!-- List -->
+            <div>
+                <div class="flex items-center justify-between mb-2">
+                    <p class="text-xs font-bold text-slate-500 uppercase tracking-widest">Bindings</p>
+                    <div id="wg-summary" class="hidden text-[10px] font-mono text-slate-400"></div>
+                </div>
+                <div id="wg-list" class="space-y-2"></div>
+                <div id="wg-empty" class="hidden text-center text-slate-400 text-xs py-4">No WireGuard bindings.</div>
+            </div>
+
+            <div id="wg-err" class="hidden text-red-500 text-xs bg-red-50 p-2 rounded whitespace-pre-wrap"></div>
+        </div>
+    </div>
+</div>
+
 <!-- ─── Console Terminal ───────────────────────────────────────────────────── -->
 <div id="modal-console" class="fixed inset-0 modal-bg z-50 hidden flex items-center justify-center p-4">
     <div id="console-window" class="bg-gray-950 rounded-2xl shadow-2xl w-full max-w-4xl flex flex-col overflow-hidden relative" style="height:70vh; min-height: 300px; min-width: 400px; resize: both;">
@@ -886,6 +1000,7 @@ async function refreshVMs() {
                     }
                     <button class="btn-txt bg-emerald-100 text-emerald-700 hover:bg-emerald-200" onclick="openMonitor('${vm.vm_id}')">📈 Monitor</button>
                     <button class="btn-txt bg-purple-100 text-purple-700 hover:bg-purple-200" onclick="openPortFwds('${vm.vm_id}')">⇄ Port Fwds</button>
+                    <button class="btn-txt bg-teal-100 text-teal-700 hover:bg-teal-200" onclick="openWG('${vm.vm_id}')">🔒 WireGuard</button>
                     <button class="btn-txt bg-gray-800 text-green-400 hover:bg-gray-700" onclick="openConsole('${vm.vm_id}')">⊞ Console</button>
                     <button class="btn-txt bg-indigo-100 text-indigo-700 hover:bg-indigo-200" onclick="openManage('${vm.vm_id}')">⚙ Manage</button>
                 </div>
@@ -1101,6 +1216,218 @@ async function refreshPortFwds() {
             </div>`;
         }).join('');
     } catch(e){ showErr('ports-err', e.message); }
+}
+
+// ─── WireGuard Bindings ───────────────────────────────────────────────────────
+let wgRefreshInterval = null;
+let wgEditId = null;   // 非 null 表示正在编辑该 binding
+
+async function openWG(vmId) {
+    activeVmId = vmId;
+    $('wg-vmid').textContent = vmId;
+    hideErr('wg-err');
+    wgResetForm();
+    await refreshWG();
+    openModal('modal-wg');
+    clearInterval(wgRefreshInterval);
+    wgRefreshInterval = setInterval(refreshWG, 3000);
+}
+
+function closeWGModal() {
+    clearInterval(wgRefreshInterval);
+    wgRefreshInterval = null;
+    closeModal('modal-wg');
+}
+
+function wgResetForm() {
+    wgEditId = null;
+    ['wg-name','wg-address','wg-privkey','wg-peerkey','wg-endpoint',
+     'wg-listenport','wg-psk','wg-allowedips','wg-mtu','wg-keepalive'].forEach(id => $(id).value = '');
+    $('wg-enabled').checked = true;
+    $('wg-form-title').textContent = 'Add Binding';
+    $('wg-submit').textContent = 'Add Binding';
+    $('wg-cancel-edit').classList.add('hidden');
+    $('wg-pubkey-hint').classList.add('hidden');
+    $('wg-key-hint').textContent = '';
+    $('wg-privkey').placeholder = 'base64, 44 chars';
+}
+
+// 编辑已有绑定。私钥永不回显（后端也不返回），留空即沿用原私钥。
+function wgEdit(id) {
+    const b = (wgCache || []).find(x => x.id === id);
+    if (!b) return;
+    wgEditId = id;
+    $('wg-name').value = b.name || '';
+    $('wg-address').value = b.address || '';
+    $('wg-privkey').value = '';
+    $('wg-privkey').placeholder = '留空 = 沿用当前私钥';
+    $('wg-peerkey').value = b.peer_public_key || '';
+    $('wg-endpoint').value = b.endpoint || '';
+    $('wg-listenport').value = b.listen_port || '';
+    $('wg-psk').value = '';
+    $('wg-allowedips').value = b.allowed_ips || '';
+    $('wg-mtu').value = b.mtu || '';
+    $('wg-keepalive').value = b.keepalive || '';
+    $('wg-enabled').checked = !!b.enabled;
+    $('wg-form-title').textContent = 'Edit Binding';
+    $('wg-submit').textContent = 'Save Changes';
+    $('wg-cancel-edit').classList.remove('hidden');
+    $('wg-key-hint').textContent = b.has_psk ? '· PSK 已设置（留空保留）' : '';
+    $('wg-pubkey-hint').textContent = 'local public key: ' + (b.public_key || '?');
+    $('wg-pubkey-hint').classList.remove('hidden');
+    $('modal-wg').querySelector('.overflow-y-auto').scrollTop = 0;
+}
+
+async function wgGenerateKey() {
+    hideErr('wg-err');
+    try {
+        const kp = await api('POST', '/api/wg/keypair', {});
+        $('wg-privkey').value = kp.private_key;
+        $('wg-pubkey-hint').textContent = 'local public key: ' + kp.public_key + '  ← 把这个填到对端的 [Peer] PublicKey';
+        $('wg-pubkey-hint').classList.remove('hidden');
+    } catch(e) { showErr('wg-err', e.message); }
+}
+
+function wgNum(id) { const v = $(id).value.trim(); return v === '' ? 0 : parseInt(v, 10); }
+
+async function doSaveWG() {
+    hideErr('wg-err');
+    const body = {
+        name:            $('wg-name').value.trim(),
+        address:         $('wg-address').value.trim(),
+        private_key:     $('wg-privkey').value.trim(),
+        peer_public_key: $('wg-peerkey').value.trim(),
+        endpoint:        $('wg-endpoint').value.trim(),
+        listen_port:     wgNum('wg-listenport'),
+        allowed_ips:     $('wg-allowedips').value.trim(),
+        mtu:             wgNum('wg-mtu'),
+        keepalive:       wgNum('wg-keepalive'),
+        enabled:         $('wg-enabled').checked,
+    };
+    // preshared_key 用 null 表示"不改动"，编辑时留空就保留原值
+    const psk = $('wg-psk').value.trim();
+    if (!wgEditId || psk !== '') body.preshared_key = psk;
+
+    if (!body.address)         { showErr('wg-err', 'Tunnel Address is required'); return; }
+    if (!body.peer_public_key) { showErr('wg-err', 'Peer Public Key is required'); return; }
+    if (!wgEditId && !body.private_key) { showErr('wg-err', 'Private Key is required (点 Generate 可生成一对)'); return; }
+
+    try {
+        const res = wgEditId
+            ? await api('PUT',  `/api/vms/${activeVmId}/wg/${wgEditId}`, body)
+            : await api('POST', `/api/vms/${activeVmId}/wg`, body);
+        // 记录已保存但隧道没起来（端口占用等），提示但不当作失败
+        if (res && res.error) showErr('wg-err', 'Saved, but the tunnel failed to start:\n' + res.error);
+        else wgResetForm();
+        await refreshWG();
+    } catch(e) { showErr('wg-err', e.message); }
+}
+
+async function doDelWG(id, label) {
+    if (!confirm(`Delete WireGuard binding ${label}?`)) return;
+    hideErr('wg-err');
+    try {
+        await api('DELETE', `/api/vms/${activeVmId}/wg/${id}`);
+        if (wgEditId === id) wgResetForm();
+        await refreshWG();
+    } catch(e) { showErr('wg-err', e.message); }
+}
+
+async function doToggleWG(id, enable) {
+    hideErr('wg-err');
+    try {
+        const res = await api('PUT', `/api/vms/${activeVmId}/wg/${id}`, {enabled: enable});
+        if (res && res.error) showErr('wg-err', res.error);
+        await refreshWG();
+    } catch(e) { showErr('wg-err', e.message); }
+}
+
+function wgAgo(unixSec) {
+    if (!unixSec) return 'never';
+    const d = Math.max(0, Math.floor(Date.now()/1000) - unixSec);
+    if (d < 60)   return d + 's ago';
+    if (d < 3600) return Math.floor(d/60) + 'm ago';
+    return Math.floor(d/3600) + 'h ago';
+}
+
+let wgCache = [];
+
+async function refreshWG() {
+    try {
+        const list = (await api('GET', `/api/vms/${activeVmId}/wg`)) || [];
+        wgCache = list;
+        const el = $('wg-list');
+        if (!list.length) {
+            el.innerHTML = '';
+            $('wg-empty').classList.remove('hidden');
+            $('wg-summary').classList.add('hidden');
+            return;
+        }
+        $('wg-empty').classList.add('hidden');
+
+        const running = list.filter(b => b.state === 'running').length;
+        const active  = list.reduce((s, b) => s + (b.active_conns || 0), 0);
+        const sum = $('wg-summary');
+        sum.textContent = `${list.length} bindings · ${running} running · ${active} active conns`;
+        sum.classList.remove('hidden');
+
+        el.innerHTML = list.map(b => {
+            const stateCls = {
+                running: 'bg-green-100 text-green-700 border-green-200',
+                stopped: 'bg-slate-100 text-slate-500 border-slate-200',
+                error:   'bg-red-100 text-red-700 border-red-200',
+            }[b.state] || 'bg-slate-100 text-slate-500 border-slate-200';
+
+            // 隧道有没有真正通：看最近一次握手
+            const hs = b.last_handshake || 0;
+            const hsFresh = hs > 0 && (Date.now()/1000 - hs) < 180;
+            const hsCls = hsFresh ? 'text-green-600' : (hs ? 'text-amber-600' : 'text-slate-400');
+
+            const ipBadges = (b.top_ips || []).map(ip => {
+                const cls = ip.active_count > 0
+                    ? 'bg-green-50 text-green-700 border-green-200'
+                    : 'bg-indigo-50 text-indigo-600 border-indigo-100';
+                const a = ip.active_count > 0
+                    ? `<span class="text-green-500 font-black">●${ip.active_count}</span><span class="text-slate-300">·</span>` : '';
+                return `<span class="inline-flex items-center gap-1 font-mono text-[10px] border px-1.5 py-0.5 rounded ${cls}">
+                    ${a}${esc(ip.ip)}<span class="opacity-40">·</span><span class="opacity-60">${ip.count}</span></span>`;
+            }).join('');
+
+            const problem = b.error || b.last_dial_err;
+
+            return `
+            <div class="bg-slate-50 rounded-xl border border-slate-100 px-4 py-3 space-y-2">
+                <div class="flex items-start justify-between gap-2">
+                    <div class="min-w-0 space-y-1">
+                        <div class="flex items-center gap-2 flex-wrap">
+                            <span class="text-[10px] font-bold px-2 py-0.5 rounded-full border uppercase ${stateCls}">${esc(b.state)}</span>
+                            <span class="font-mono text-xs font-black text-indigo-600">${esc(b.address)}</span>
+                            <span class="text-slate-300 text-xs">→</span>
+                            <span class="font-mono text-xs text-slate-600">${esc(b.target_ip || 'VM')} :同端口</span>
+                            ${b.name ? `<span class="text-[10px] text-slate-400">${esc(b.name)}</span>` : ''}
+                        </div>
+                        <div class="flex items-center gap-3 flex-wrap text-[10px] font-mono text-slate-500">
+                            <span>udp :${b.actual_port || b.listen_port || '?'}</span>
+                            <span>peer ${esc(b.peer_endpoint || b.endpoint || 'passive')}</span>
+                            <span class="${hsCls} font-bold">handshake ${wgAgo(hs)}</span>
+                            <span>↓ ${formatBytes(b.rx_bytes||0)} / ↑ ${formatBytes(b.tx_bytes||0)}</span>
+                            <span>mtu ${b.mtu}</span>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-1.5 shrink-0">
+                        <span class="text-[10px] font-bold px-2 py-0.5 rounded-full border ${(b.active_conns||0) > 0 ? 'bg-green-100 text-green-700 border-green-200' : 'bg-slate-100 text-slate-400 border-slate-200'}">● ${b.active_conns||0} active</span>
+                        <span class="text-[10px] font-bold px-2 py-0.5 rounded-full border bg-slate-100 text-slate-500 border-slate-200">${b.total_conns||0} total</span>
+                        <button onclick="doToggleWG('${b.id}',${!b.enabled})" title="${b.enabled ? 'Disable' : 'Enable'}" class="text-slate-400 hover:text-indigo-600 text-xs font-bold w-6 h-6 flex items-center justify-center hover:bg-indigo-50 rounded-full">${b.enabled ? '⏸' : '▶'}</button>
+                        <button onclick="wgEdit('${b.id}')" title="Edit" class="text-slate-400 hover:text-indigo-600 text-xs font-bold w-6 h-6 flex items-center justify-center hover:bg-indigo-50 rounded-full">✎</button>
+                        <button onclick="doDelWG('${b.id}','${esc(b.address)}')" title="Delete" class="text-red-400 hover:text-red-600 text-xs font-bold w-6 h-6 flex items-center justify-center hover:bg-red-50 rounded-full">✕</button>
+                    </div>
+                </div>
+                <div class="font-mono text-[10px] text-slate-400 break-all">local pubkey ${esc(b.public_key || '?')}</div>
+                ${ipBadges ? `<div class="flex flex-wrap gap-1">${ipBadges}</div>` : ''}
+                ${problem ? `<div class="text-[10px] text-red-500 bg-red-50 border border-red-100 rounded px-2 py-1 break-all">${esc(problem)}</div>` : ''}
+            </div>`;
+        }).join('');
+    } catch(e) { showErr('wg-err', e.message); }
 }
 
 // fillInput=true 时把覆盖值填入输入框（仅打开弹窗时），刷新时只更新状态文字

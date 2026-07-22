@@ -21,6 +21,7 @@ import (
 	"runman-agent/manager/incus"
 	"runman-agent/manager/podman"
 	"runman-agent/manager/portforward"
+	"runman-agent/manager/wgbind"
 	"runman-agent/monitor"
 	"runman-agent/ndp"
 	"runman-agent/proto/agent"
@@ -60,6 +61,7 @@ type Agent struct {
 	mgr           manager.VMManager
 	hostMon       *monitor.HostMonitor
 	pf            *portforward.Manager
+	wg            *wgbind.Manager
 	config        config.Config // 缓存的配置副本（仅在 run() 循环中更新）
 	mu            sync.RWMutex
 	connected     bool
@@ -157,6 +159,10 @@ func main() {
 	// 启动时从 DB 恢复已持久化的端口转发规则
 	pf.Restore(context.Background())
 
+	// 纯用户态 WireGuard 绑定：恢复已启用的隧道，失败的由内部循环持续重试
+	wg := wgbind.New(context.Background(), svc, database)
+	wg.Restore()
+
 	// VM 创建后自动添加一条随机端口 → 22 的 SSH 转发
 	svc.OnCreated = func(ctx context.Context, vmID string, bandwidthMbps int) {
 		port, err := pickFreePort(20000, 60000)
@@ -177,6 +183,7 @@ func main() {
 		mgr:     svc,
 		hostMon: hostMon,
 		pf:      pf,
+		wg:      wg,
 		config:  conf,
 	}
 
@@ -186,7 +193,7 @@ func main() {
 
 	// 启动本地 Web 状态页，供运维人员直接查看节点信息
 	// 同时传入 rawMgr 以便 Web 服务能访问具体的 Manager 实现（如 CloudHV 的内存报告）
-	ws := web.NewServer(database, svc, hostMon, cfg, a.pf, a, rawMgr, version, upd)
+	ws := web.NewServer(database, svc, hostMon, cfg, a.pf, a.wg, a, rawMgr, version, upd)
 	go func() {
 		log.Printf("Starting web server on %s", conf.Web)
 		_ = ws.ListenAndServe(conf.Web)
@@ -669,12 +676,14 @@ func (a *Agent) handleCommand(stream agent.AgentGateway_ConnectClient, env *agen
 		}
 		if err == nil {
 			a.pf.RefreshVM(ctx, p.ReinstallVm.VmId)
+			a.wg.RefreshVM(p.ReinstallVm.VmId)
 		}
 	case *agent.PlatformEnvelope_DeleteVm:
 		err = a.mgr.DeleteVM(ctx, p.DeleteVm.VmId)
 		// DeleteVM already removes VMConfig from DB; only clean up ancillary records here.
 		_ = a.db.DeleteTraffic(p.DeleteVm.VmId)
 		a.pf.DeleteVM(ctx, p.DeleteVm.VmId)
+		a.wg.DeleteVM(p.DeleteVm.VmId)
 
 	case *agent.PlatformEnvelope_StartVm:
 		err = a.mgr.StartVM(ctx, p.StartVm.VmId)
@@ -686,6 +695,7 @@ func (a *Agent) handleCommand(stream agent.AgentGateway_ConnectClient, env *agen
 		err = a.mgr.RestartVM(ctx, p.RestartVm.VmId)
 		if err == nil {
 			a.pf.RefreshVM(ctx, p.RestartVm.VmId)
+			a.wg.RefreshVM(p.RestartVm.VmId)
 		}
 
 	case *agent.PlatformEnvelope_ResetPassword:
