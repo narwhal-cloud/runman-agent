@@ -36,11 +36,14 @@ die() { log "$1" >&2; exit 1; }
 
 # Support non-interactive mode via environment variable or command line argument
 INSTALL_RFW_FORCE=0
+# 1: 忽略版本戳，强制重新下载 cloudhv / incus 预构建镜像
+FORCE_IMAGE_REFRESH="${FORCE_IMAGE_REFRESH:-0}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         zh) LANG_CODE="zh"; shift ;;
         en) LANG_CODE="en"; shift ;;
         --install-rfw) INSTALL_RFW_FORCE=1; shift ;;
+        --force-images) FORCE_IMAGE_REFRESH=1; shift ;;
         *) shift ;;
     esac
 done
@@ -554,55 +557,6 @@ EOF
     log "$(t "✓ rfw firewall installed/updated." "✓ rfw 防火墙已安装/更新。")"
 }
 
-# ── Update flow ───────────────────────────────────────────────────────────────
-
-if systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null || [ -f "$AGENT_BINARY" ]; then
-    log "$(t "Existing NarwhalCloud Agent detected, updating..." "检测到已安装的 NarwhalCloud Agent，执行更新流程...")"
-
-    ARCH=$(detect_arch)
-    if command -v podman &>/dev/null; then
-        check_podman_version
-    fi
-
-    # 重新应用 sysctl，确保旧安装升级后也获得最新内核参数（forwarding/accept_ra 等）
-    enable_bbr
-    configure_journald
-
-    download_agent "$ARCH"
-
-    # Update netavark
-    if [ -f "/usr/libexec/podman/netavark" ]; then
-        if download_with_retry "$NETAVARK_BASE/netavark-new-$ARCH" "/usr/libexec/podman/netavark.new"; then
-            chmod +x /usr/libexec/podman/netavark.new
-            mv /usr/libexec/podman/netavark.new /usr/libexec/podman/netavark
-            log "$(t "✓ Custom netavark updated." "✓ 自定义 netavark 已更新。")"
-        fi
-    fi
-
-    systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null && systemctl restart "$AGENT_SERVICE"
-    log "$(t "✓ NarwhalCloud Agent updated." "✓ NarwhalCloud Agent 已更新。")"
-
-    # Update rfw if binary exists or force install requested
-    if [ "$INSTALL_RFW_FORCE" = "1" ]; then
-        install_rfw 1
-    else
-        install_rfw 2
-    fi
-
-    IP=$(curl -4 -s --max-time 10 ip.sb 2>/dev/null || echo "N/A")
-    echo ""
-    log "========================================"
-    log "$(t "✓ Update complete!" "✓ 更新完成！")"
-    log "$(t "IP: $IP" "IP: $IP")"
-    log "========================================"
-    exit 0
-fi
-
-# ── Fresh install ─────────────────────────────────────────────────────────────
-
-log "$(t "Starting fresh installation..." "开始全新安装流程...")"
-
-
 # ── VM Images Updater ────────────────────────────────────────────────────────
 
 update_vm_images() {
@@ -884,36 +838,237 @@ update_vm_images() {
 # 从 narwhal-cloud/images 的滚动 release 下载 CI 预构建的 cloudhv 镜像包，
 # 避免安装时在线转换 qcow2 / 提取内核。失败的发行版记录在 VM_FETCH_FAILED，
 # 由调用方回退到 update_vm_images 本地构建。
+#
+# vm-latest 是滚动 tag，同名资产每月被覆盖，因此本地记录远端资产的 ETag /
+# Last-Modified 作为版本戳（.image-stamp），更新流程据此判断是否需要重新下载。
 
+# 返回远端资产的版本戳（优先 ETag，其次 Last-Modified）；无法获取时返回非 0
+remote_asset_stamp() {
+    local headers stamp
+    headers=$(curl -fsSLI --max-time 30 "$1" 2>/dev/null | tr -d '\r' | tr 'A-Z' 'a-z') || return 1
+    stamp=$(printf '%s\n' "$headers" | grep '^etag:' | tail -n1 | sed 's/^etag:[[:space:]]*//') || true
+    [ -z "$stamp" ] && stamp=$(printf '%s\n' "$headers" | grep '^last-modified:' | tail -n1 | sed 's/^last-modified:[[:space:]]*//') || true
+    [ -n "$stamp" ] || return 1
+    printf '%s\n' "$stamp"
+}
+
+# VM_FETCH_FAILED: 本次下载失败的发行版
+# VM_FETCH_ABSENT: 下载失败且本地没有可用镜像的发行版（需要回退本地构建）
 VM_FETCH_FAILED=()
+VM_FETCH_ABSENT=()
 fetch_vm_images() {
     local IMGDIR="${VM_IMAGE_DIR:-/opt/vm-images}"
+    # 1: 镜像已存在时也检查远端是否有新版本（更新流程使用）
+    local refresh="${VM_IMAGE_REFRESH:-0}"
     VM_FETCH_FAILED=()
+    VM_FETCH_ABSENT=()
 
-    local distro dir asset tmp
+    local distro dir asset url tmp stamp_file remote_stamp present
     for distro in debian alpine; do
         dir="$IMGDIR/$distro"
-        if [ -f "$dir/current.raw" ] && [ -f "$dir/vmlinuz" ] && [ -f "$dir/initrd" ] && [ -f "$dir/cmdline" ]; then
-            log "$(t "VM image $distro already present, skipping." "VM 镜像 $distro 已存在，跳过。")"
-            continue
-        fi
-
         asset="cloudhv-${distro}-${ARCH}.tar.zst"
+        url="$VM_IMAGES_BASE/$asset"
+        stamp_file="$dir/.image-stamp"
+        present=0
+        [ -f "$dir/current.raw" ] && [ -f "$dir/vmlinuz" ] && [ -f "$dir/initrd" ] && [ -f "$dir/cmdline" ] && present=1
+
+        remote_stamp=""
+        if [ "$present" = "1" ]; then
+            if [ "$refresh" != "1" ]; then
+                log "$(t "VM image $distro already present, skipping." "VM 镜像 $distro 已存在，跳过。")"
+                continue
+            fi
+            if [ "$FORCE_IMAGE_REFRESH" != "1" ]; then
+                remote_stamp=$(remote_asset_stamp "$url") || remote_stamp=""
+                if [ -z "$remote_stamp" ]; then
+                    log "$(t "Warning: cannot query remote version for $asset, keeping existing image." "警告: 无法获取 $asset 的远端版本信息，保留现有镜像。")"
+                    continue
+                fi
+                if [ -f "$stamp_file" ] && [ "$(cat "$stamp_file" 2>/dev/null)" = "$remote_stamp" ]; then
+                    log "$(t "VM image $distro is up to date." "VM 镜像 $distro 已是最新。")"
+                    continue
+                fi
+                log "$(t "Newer prebuilt VM image found for $distro, updating..." "发现 $distro 的新预构建 VM 镜像，开始更新...")"
+            else
+                log "$(t "Force refreshing VM image $distro..." "强制刷新 VM 镜像 $distro...")"
+            fi
+        fi
+        [ -n "$remote_stamp" ] || remote_stamp=$(remote_asset_stamp "$url") || remote_stamp=""
+
         tmp=$(mktemp)
         log "$(t "Downloading prebuilt VM image: $asset" "下载预构建 VM 镜像: $asset")"
-        if download_with_retry "$VM_IMAGES_BASE/$asset" "$tmp" \
-            && mkdir -p "$dir" \
-            && tar --zstd -xf "$tmp" -C "$dir"; then
+        # 解压到临时目录后整体替换，避免覆盖过程中 Agent 读到半个镜像
+        if download_with_retry "$url" "$tmp" \
+            && rm -rf "$dir.new" && mkdir -p "$dir.new" \
+            && tar --zstd -xf "$tmp" -C "$dir.new"; then
+            [ -n "$remote_stamp" ] && printf '%s\n' "$remote_stamp" > "$dir.new/.image-stamp"
+            rm -rf "$dir.old"
+            [ "$present" = "1" ] && mv "$dir" "$dir.old"
+            mkdir -p "$IMGDIR"
+            mv "$dir.new" "$dir"
+            rm -rf "$dir.old"
             log "$(t "✓ VM image $distro installed." "✓ VM 镜像 $distro 安装完成。")"
         else
-            log "$(t "Warning: prebuilt $distro image unavailable, will build locally." "警告: 预构建 $distro 镜像不可用，将回退本地构建。")"
+            rm -rf "$dir.new"
             VM_FETCH_FAILED+=("$distro")
+            if [ "$present" = "1" ]; then
+                log "$(t "Warning: prebuilt $distro image unavailable, keeping existing image." "警告: 预构建 $distro 镜像不可用，保留现有镜像。")"
+            else
+                log "$(t "Warning: prebuilt $distro image unavailable, will build locally." "警告: 预构建 $distro 镜像不可用，将回退本地构建。")"
+                VM_FETCH_ABSENT+=("$distro")
+            fi
         fi
         rm -f "$tmp"
     done
 
     [ ${#VM_FETCH_FAILED[@]} -eq 0 ]
 }
+
+# ── Prebuilt Incus image import ──────────────────────────────────────────────
+# 导入预构建的 ready 镜像（别名与 Agent ensureReadyImage 一致），跳过首次创建
+# 实例时的在线构建；下载失败时 Agent 会自动回退构建。
+# INCUS_IMAGE_REFRESH=1 时对已存在的别名检查远端更新并重新导入。
+
+incus_ready_alias() {
+    case "$1" in
+        debian) echo "debian/13/cloud/$ARCH/ready" ;;
+        alpine) echo "alpine/3.23/cloud/$ARCH/ready" ;;
+    esac
+}
+
+import_incus_images() {
+    local refresh="${INCUS_IMAGE_REFRESH:-0}"
+    local stamp_dir="$AGENT_DATA_DIR/incus-image-stamps"
+    command -v incus &>/dev/null || return 0
+    mkdir -p "$stamp_dir"
+
+    local distro alias asset url tmp stamp_file remote_stamp present
+    for distro in debian alpine; do
+        alias=$(incus_ready_alias "$distro")
+        asset="incus-${distro}-${ARCH}.tar.gz"
+        url="$VM_IMAGES_BASE/$asset"
+        stamp_file="$stamp_dir/$distro-$ARCH"
+        present=0
+        incus image alias list --format csv 2>/dev/null | grep -q "^${alias}," && present=1
+
+        remote_stamp=""
+        if [ "$present" = "1" ]; then
+            if [ "$refresh" != "1" ]; then
+                log "$(t "Incus image $alias already exists, skipping." "Incus 镜像 $alias 已存在，跳过。")"
+                continue
+            fi
+            if [ "$FORCE_IMAGE_REFRESH" != "1" ]; then
+                remote_stamp=$(remote_asset_stamp "$url") || remote_stamp=""
+                if [ -z "$remote_stamp" ]; then
+                    log "$(t "Warning: cannot query remote version for $asset, keeping existing image." "警告: 无法获取 $asset 的远端版本信息，保留现有镜像。")"
+                    continue
+                fi
+                if [ -f "$stamp_file" ] && [ "$(cat "$stamp_file" 2>/dev/null)" = "$remote_stamp" ]; then
+                    log "$(t "Incus image $alias is up to date." "Incus 镜像 $alias 已是最新。")"
+                    continue
+                fi
+                log "$(t "Newer prebuilt Incus image found for $distro, updating..." "发现 $distro 的新预构建 Incus 镜像，开始更新...")"
+            else
+                log "$(t "Force refreshing Incus image $alias..." "强制刷新 Incus 镜像 $alias...")"
+            fi
+        fi
+        [ -n "$remote_stamp" ] || remote_stamp=$(remote_asset_stamp "$url") || remote_stamp=""
+
+        tmp=$(mktemp)
+        log "$(t "Downloading prebuilt Incus image: $asset" "下载预构建 Incus 镜像: $asset")"
+        # 先下载成功再删除旧镜像，避免下载失败后本地无镜像可用
+        if download_with_retry "$url" "$tmp"; then
+            [ "$present" = "1" ] && incus image delete "$alias" >/dev/null 2>&1 || true
+            if incus image import "$tmp" --alias "$alias"; then
+                [ -n "$remote_stamp" ] && printf '%s\n' "$remote_stamp" > "$stamp_file"
+                log "$(t "✓ Incus image imported: $alias" "✓ Incus 镜像已导入: $alias")"
+            else
+                rm -f "$stamp_file"
+                log "$(t "Warning: Incus image import failed, agent will build it on first instance creation." "警告: Incus 镜像导入失败，Agent 将在首次创建实例时自动构建。")"
+            fi
+        else
+            log "$(t "Warning: prebuilt Incus image unavailable, agent will build it on first instance creation." "警告: 预构建 Incus 镜像不可用，Agent 将在首次创建实例时自动构建。")"
+        fi
+        rm -f "$tmp"
+    done
+}
+
+# 从已有配置文件读取虚拟化类型（更新流程判断需要刷新哪类镜像）
+detect_installed_virt_type() {
+    [ -f "$AGENT_CONFIG_FILE" ] || return 0
+    grep -o '"virt_type"[[:space:]]*:[[:space:]]*"[^"]*"' "$AGENT_CONFIG_FILE" 2>/dev/null \
+        | head -n1 | sed 's/.*:[[:space:]]*"//; s/"$//' || true
+}
+
+# ── Update flow ───────────────────────────────────────────────────────────────
+
+if systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null || [ -f "$AGENT_BINARY" ]; then
+    log "$(t "Existing NarwhalCloud Agent detected, updating..." "检测到已安装的 NarwhalCloud Agent，执行更新流程...")"
+
+    ARCH=$(detect_arch)
+    if command -v podman &>/dev/null; then
+        check_podman_version
+    fi
+
+    # 重新应用 sysctl，确保旧安装升级后也获得最新内核参数（forwarding/accept_ra 等）
+    enable_bbr
+    configure_journald
+
+    download_agent "$ARCH"
+
+    # Update netavark
+    if [ -f "/usr/libexec/podman/netavark" ]; then
+        if download_with_retry "$NETAVARK_BASE/netavark-new-$ARCH" "/usr/libexec/podman/netavark.new"; then
+            chmod +x /usr/libexec/podman/netavark.new
+            mv /usr/libexec/podman/netavark.new /usr/libexec/podman/netavark
+            log "$(t "✓ Custom netavark updated." "✓ 自定义 netavark 已更新。")"
+        fi
+    fi
+
+    systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null && systemctl restart "$AGENT_SERVICE"
+    log "$(t "✓ NarwhalCloud Agent updated." "✓ NarwhalCloud Agent 已更新。")"
+
+    # Refresh prebuilt base images for VM-style virtualization.
+    # 已运行的实例使用的是镜像副本，替换基础镜像只影响之后新建的实例。
+    VIRT_TYPE=$(detect_installed_virt_type)
+    case "$VIRT_TYPE" in
+        cloudhv)
+            log "$(t "Checking prebuilt VM images for updates..." "检查预构建 VM 镜像更新...")"
+            VM_IMAGE_REFRESH=1
+            if ! fetch_vm_images; then
+                if [ ${#VM_FETCH_ABSENT[@]} -gt 0 ]; then
+                    log "$(t "Falling back to local image build for: ${VM_FETCH_ABSENT[*]}" "回退到本地构建镜像: ${VM_FETCH_ABSENT[*]}")"
+                    update_vm_images "${VM_FETCH_ABSENT[@]}"
+                fi
+            fi
+            ;;
+        incus)
+            log "$(t "Checking prebuilt Incus images for updates..." "检查预构建 Incus 镜像更新...")"
+            INCUS_IMAGE_REFRESH=1
+            import_incus_images
+            ;;
+    esac
+
+    # Update rfw if binary exists or force install requested
+    if [ "$INSTALL_RFW_FORCE" = "1" ]; then
+        install_rfw 1
+    else
+        install_rfw 2
+    fi
+
+    IP=$(curl -4 -s --max-time 10 ip.sb 2>/dev/null || echo "N/A")
+    echo ""
+    log "========================================"
+    log "$(t "✓ Update complete!" "✓ 更新完成！")"
+    log "$(t "IP: $IP" "IP: $IP")"
+    log "========================================"
+    exit 0
+fi
+
+# ── Fresh install ─────────────────────────────────────────────────────────────
+
+log "$(t "Starting fresh installation..." "开始全新安装流程...")"
+
 
 # ── Virtualization type selection ──────────────────────────────────────────────
 
@@ -1378,28 +1533,8 @@ if [ "$VIRT_TYPE" = "incus" ]; then
         incus profile device remove default eth0 >/dev/null 2>&1 || true
     fi
 
-    # 4. 导入预构建的 ready 镜像（与 Agent ensureReadyImage 的别名一致），
-    #    跳过首次创建实例时的在线构建；下载失败时 Agent 会自动回退构建
-    for _distro in debian alpine; do
-        case "$_distro" in
-            debian) _ready_alias="debian/13/cloud/$ARCH/ready" ;;
-            alpine) _ready_alias="alpine/3.23/cloud/$ARCH/ready" ;;
-        esac
-        if incus image alias list --format csv 2>/dev/null | grep -q "^${_ready_alias},"; then
-            log "$(t "Incus image $_ready_alias already exists, skipping." "Incus 镜像 $_ready_alias 已存在，跳过。")"
-            continue
-        fi
-        _asset="incus-${_distro}-${ARCH}.tar.gz"
-        _tmp=$(mktemp)
-        log "$(t "Downloading prebuilt Incus image: $_asset" "下载预构建 Incus 镜像: $_asset")"
-        if download_with_retry "$VM_IMAGES_BASE/$_asset" "$_tmp" \
-            && incus image import "$_tmp" --alias "$_ready_alias"; then
-            log "$(t "✓ Incus image imported: $_ready_alias" "✓ Incus 镜像已导入: $_ready_alias")"
-        else
-            log "$(t "Warning: prebuilt Incus image unavailable, agent will build it on first instance creation." "警告: 预构建 Incus 镜像不可用，Agent 将在首次创建实例时自动构建。")"
-        fi
-        rm -f "$_tmp"
-    done
+    # 4. 导入预构建的 ready 镜像
+    import_incus_images
 fi
 
 IP=$(curl -4 -s --max-time 10 ip.sb 2>/dev/null || echo "N/A")
