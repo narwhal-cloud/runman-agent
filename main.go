@@ -744,6 +744,60 @@ func (a *Agent) handleCommand(stream agent.AgentGateway_ConnectClient, env *agen
 			})
 			return // 已单独回复，跳过末尾的 CommandResult
 		}
+
+	case *agent.PlatformEnvelope_SetWgBind:
+		cfg := db.WGBinding{
+			Name:          p.SetWgBind.ResourceId,
+			Enabled:       true,
+			PrivateKey:    p.SetWgBind.PrivateKey,
+			Address:       p.SetWgBind.Address,
+			PeerPublicKey: p.SetWgBind.PeerPublicKey,
+			PresharedKey:  p.SetWgBind.PresharedKey,
+			Endpoint:      p.SetWgBind.Endpoint,
+			AllowedIPs:    strings.Join(p.SetWgBind.AllowedIps, ", "),
+			Keepalive:     int(p.SetWgBind.KeepaliveSec),
+		}
+		if existing := a.findWGBindingByResource(p.SetWgBind.VmId, p.SetWgBind.ResourceId); existing != nil {
+			_, err = a.wg.Update(existing.ID, cfg)
+		} else {
+			_, err = a.wg.Add(p.SetWgBind.VmId, cfg)
+		}
+
+	case *agent.PlatformEnvelope_DelWgBind:
+		if existing := a.findWGBindingByResource(p.DelWgBind.VmId, p.DelWgBind.ResourceId); existing != nil {
+			err = a.wg.Remove(existing.ID)
+		}
+		// 找不到已有绑定视为已经解除，幂等删除不报错。
+
+	case *agent.PlatformEnvelope_GetWgStatus:
+		var list []wgbind.Status
+		list, err = a.wg.List(p.GetWgStatus.VmId)
+		if err == nil {
+			entries := make([]*agent.WGBindStatusEntry, 0, len(list))
+			for _, st := range list {
+				entries = append(entries, &agent.WGBindStatusEntry{
+					VmId:          st.VMID,
+					ResourceId:    st.Name,
+					PublicKey:     st.PublicKey,
+					PeerEndpoint:  st.PeerEndpoint,
+					LastHandshake: st.LastHands,
+					RxBytes:       st.RxBytes,
+					TxBytes:       st.TxBytes,
+					State:         st.State,
+					Error:         st.Error,
+				})
+			}
+			_ = a.safeSend(stream, &agent.AgentEnvelope{
+				MessageId: uuid.NewString(),
+				Payload: &agent.AgentEnvelope_WgBindStatusList{
+					WgBindStatusList: &agent.WGBindStatusList{
+						CommandId: env.CommandId,
+						Entries:   entries,
+					},
+				},
+			})
+			return // 已单独回复，跳过末尾的 CommandResult
+		}
 	}
 
 	res := &agent.CommandResult{CommandId: env.CommandId, Success: err == nil}
@@ -756,6 +810,24 @@ func (a *Agent) handleCommand(stream agent.AgentGateway_ConnectClient, env *agen
 		MessageId: uuid.NewString(),
 		Payload:   &agent.AgentEnvelope_CmdResult{CmdResult: res},
 	})
+}
+
+// findWGBindingByResource 在指定 VM 的绑定列表里，按 Name（约定存放平台的
+// resource_id）查找已有绑定。wgbind.Manager.Add 总是自己生成随机的绑定 ID，
+// 不认识平台的 resource_id；借助已经暴露给面板用的自由文本 Name 字段，
+// 使 CmdSetWGBind/CmdDelWGBind 可以按 resource_id 寻址，而不需要改动
+// wgbind 包本身。
+func (a *Agent) findWGBindingByResource(vmID, resourceID string) *wgbind.Status {
+	list, err := a.wg.List(vmID)
+	if err != nil {
+		return nil
+	}
+	for i := range list {
+		if list[i].Name == resourceID {
+			return &list[i]
+		}
+	}
+	return nil
 }
 
 // vmStatusString 将 proto VMStatus 枚举转为 DB 存储的状态字符串。

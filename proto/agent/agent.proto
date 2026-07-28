@@ -103,6 +103,9 @@ message AgentEnvelope {
     // --- 控制台 / Console TTY ---
     ConsoleOutput   console_output = 8; // TTY 原始输出字节 / raw TTY output bytes
     ConsoleEvent    console_event  = 9; // 控制台会话生命周期事件 / console session lifecycle event
+
+    // --- 专属IP绑定 / Dedicated IP via WireGuard ---
+    WGBindStatusList wg_bind_status_list = 10; // CmdGetWGStatus 的查询结果 / result of CmdGetWGStatus
   }
 }
 
@@ -258,6 +261,11 @@ message PlatformEnvelope {
     CmdConsoleInput     console_input  = 17; // 转发键盘输入 / forward keyboard input
     CmdConsoleResize    console_resize = 18; // 调整终端尺寸 / resize terminal
     CmdConsoleClose     console_close  = 19; // 关闭控制台会话 / close console session
+
+    // --- 专属IP绑定 / Dedicated IP via WireGuard ---
+    CmdSetWGBind        set_wg_bind    = 20; // 新增/更新 WG 绑定 / create or update a WG binding
+    CmdDelWGBind        del_wg_bind    = 21; // 删除 WG 绑定 / remove a WG binding
+    CmdGetWGStatus      get_wg_status  = 22; // 查询 WG 绑定状态 / query WG binding status
   }
 }
 
@@ -396,4 +404,70 @@ message CmdConsoleResize {
 // Agent should report ConsoleEvent{type=DISCONNECTED} after closing the TTY.
 message CmdConsoleClose {
   string session_id = 1;
+}
+
+// ---- 专属IP绑定命令 / Dedicated-IP-via-WireGuard Binding Commands ----------
+
+// CmdSetWGBind — 下发/更新一个 WireGuard 绑定：把平台侧 VyOS 网关上已创建好的
+// Peer 的私钥与网关连接信息推送给 Agent；Agent 成为该 Peer 的主动拨号端，将
+// 这条隧道地址的流量转发进目标 VM（复用 Agent 已有的 wgbind.Manager 实现）。
+// 该命令按 resource_id 幂等：Agent 应在 resource_id 已存在绑定时更新而非重复创建。
+//
+// CmdSetWGBind — create or update a WireGuard binding: pushes the private key
+// and gateway connection info for a peer already created on the platform-side
+// VyOS gateway down to the Agent; the Agent becomes the active dialer for this
+// peer and forwards traffic addressed to the tunnel address into the target VM
+// (reusing the Agent's existing wgbind.Manager). Idempotent by resource_id.
+message CmdSetWGBind {
+  string vm_id           = 1; // 目标 VM UUID / target VM UUID
+  string resource_id     = 2; // 平台 IPResource UUID，Agent 侧用作幂等 key / platform IPResource UUID, used as the agent-side idempotency key
+  string private_key     = 3; // 本端(Agent侧)私钥，base64，由平台生成 / local (agent-side) private key, base64, platform-generated
+  string address         = 4; // 隧道地址(即用户租用的公网IP)，可带前缀 / tunnel address (the rented public IP), may include a prefix length
+  string peer_public_key = 5; // 对端(VyOS网关WG接口)公钥，base64 / remote (VyOS gateway WG interface) public key, base64
+  string preshared_key   = 6; // 预共享密钥，base64，可为空 / preshared key, base64, may be empty
+  string endpoint        = 7; // 对端 host:port（网关WG监听地址）/ remote endpoint host:port (gateway's WG listen address)
+  repeated string allowed_ips = 8; // 允许的网段，通常为该资源自身地址 / allowed IPs, usually just this resource's own address
+  int32  keepalive_sec   = 9; // PersistentKeepalive 秒数，建议 25 / persistent keepalive interval in seconds, 25 recommended
+}
+
+// CmdDelWGBind — 删除一个 WireGuard 绑定（解绑 / VM销毁 / 资源到期回收时下发）。
+// CmdDelWGBind — remove a WireGuard binding (on unbind / VM destruction / resource expiry reclaim).
+message CmdDelWGBind {
+  string vm_id       = 1; // 目标 VM UUID / target VM UUID
+  string resource_id = 2; // 平台 IPResource UUID / platform IPResource UUID
+}
+
+// CmdGetWGStatus — 查询某 VM（为空则查询该 Agent 上的全部）的 WireGuard 绑定
+// 实时状态，用于绑定前冲突检测和定期回填流量/握手信息。
+// Agent 须通过 AgentEnvelope.wg_bind_status_list 回传，而非 CommandResult.data。
+//
+// CmdGetWGStatus — query the live status of WireGuard bindings for a VM (or
+// all bindings on this Agent if vm_id is empty), used for pre-bind conflict
+// checks and periodic traffic/handshake backfill.
+// Agent MUST respond via AgentEnvelope.wg_bind_status_list, not CommandResult.data.
+message CmdGetWGStatus {
+  string vm_id = 1; // 为空表示查询该 Agent 上的全部 WG 绑定 / empty means query all WG bindings on this agent
+}
+
+// WGBindStatusList — CmdGetWGStatus 的查询结果，通过 AgentEnvelope 回传。
+// 注意：此消息通过专用的 wg_bind_status_list 字段传输，而非 CommandResult.data。
+// WGBindStatusList — the result of CmdGetWGStatus, delivered via AgentEnvelope.
+// Note: this message travels over the dedicated wg_bind_status_list field, not CommandResult.data.
+message WGBindStatusList {
+  string command_id = 1; // 对应 CmdGetWGStatus 的 command_id / echoes CmdGetWGStatus's command_id
+  repeated WGBindStatusEntry entries = 2;
+}
+
+// WGBindStatusEntry — 单条 WireGuard 绑定的运行态。
+// WGBindStatusEntry — runtime status of a single WireGuard binding.
+message WGBindStatusEntry {
+  string vm_id          = 1; // VM UUID
+  string resource_id    = 2; // 平台 IPResource UUID / platform IPResource UUID
+  string public_key     = 3; // 本端(Agent侧)公钥，由私钥推导，供核对 / local (agent-side) public key, derived from the private key, for verification
+  string peer_endpoint  = 4; // 对端当前实际地址（被动模式下由握手学到）/ the peer's currently observed real address (learned from handshake in passive mode)
+  int64  last_handshake = 5; // Unix秒，0=从未握手 / Unix seconds, 0 = never handshaked
+  int64  rx_bytes       = 6; // 累计接收字节数 / cumulative bytes received
+  int64  tx_bytes       = 7; // 累计发送字节数 / cumulative bytes sent
+  string state          = 8; // running/stopped/error
+  string error          = 9; // state=error 时的原因 / reason when state=error
 }
