@@ -230,7 +230,7 @@ type AgentEnvelope struct {
 	//	*AgentEnvelope_PortFwdList
 	//	*AgentEnvelope_ConsoleOutput
 	//	*AgentEnvelope_ConsoleEvent
-	//	*AgentEnvelope_WgBindStatusList
+	//	*AgentEnvelope_WgSyncRequest
 	Payload       isAgentEnvelope_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -325,10 +325,10 @@ func (x *AgentEnvelope) GetConsoleEvent() *ConsoleEvent {
 	return nil
 }
 
-func (x *AgentEnvelope) GetWgBindStatusList() *WGBindStatusList {
+func (x *AgentEnvelope) GetWgSyncRequest() *WGSyncRequest {
 	if x != nil {
-		if x, ok := x.Payload.(*AgentEnvelope_WgBindStatusList); ok {
-			return x.WgBindStatusList
+		if x, ok := x.Payload.(*AgentEnvelope_WgSyncRequest); ok {
+			return x.WgSyncRequest
 		}
 	}
 	return nil
@@ -361,9 +361,9 @@ type AgentEnvelope_ConsoleEvent struct {
 	ConsoleEvent *ConsoleEvent `protobuf:"bytes,9,opt,name=console_event,json=consoleEvent,proto3,oneof"` // 控制台会话生命周期事件 / console session lifecycle event
 }
 
-type AgentEnvelope_WgBindStatusList struct {
+type AgentEnvelope_WgSyncRequest struct {
 	// --- 专属IP绑定 / Dedicated IP via WireGuard ---
-	WgBindStatusList *WGBindStatusList `protobuf:"bytes,10,opt,name=wg_bind_status_list,json=wgBindStatusList,proto3,oneof"` // CmdGetWGStatus 的查询结果 / result of CmdGetWGStatus
+	WgSyncRequest *WGSyncRequest `protobuf:"bytes,11,opt,name=wg_sync_request,json=wgSyncRequest,proto3,oneof"` // Agent 定期主动拉取本机应有的 WG 绑定期望状态 / agent-initiated periodic pull of desired WG bindings for this host
 }
 
 func (*AgentEnvelope_Heartbeat) isAgentEnvelope_Payload() {}
@@ -376,7 +376,7 @@ func (*AgentEnvelope_ConsoleOutput) isAgentEnvelope_Payload() {}
 
 func (*AgentEnvelope_ConsoleEvent) isAgentEnvelope_Payload() {}
 
-func (*AgentEnvelope_WgBindStatusList) isAgentEnvelope_Payload() {}
+func (*AgentEnvelope_WgSyncRequest) isAgentEnvelope_Payload() {}
 
 // Heartbeat — 宿主机实时快照，每 30 秒上报一次。
 // 字段变化时才需填写 entry_host / entry_ipv6 / os_images，未变化可留空。
@@ -1091,9 +1091,7 @@ type PlatformEnvelope struct {
 	//	*PlatformEnvelope_ConsoleInput
 	//	*PlatformEnvelope_ConsoleResize
 	//	*PlatformEnvelope_ConsoleClose
-	//	*PlatformEnvelope_SetWgBind
-	//	*PlatformEnvelope_DelWgBind
-	//	*PlatformEnvelope_GetWgStatus
+	//	*PlatformEnvelope_WgSyncResponse
 	Payload       isPlatformEnvelope_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1278,28 +1276,10 @@ func (x *PlatformEnvelope) GetConsoleClose() *CmdConsoleClose {
 	return nil
 }
 
-func (x *PlatformEnvelope) GetSetWgBind() *CmdSetWGBind {
+func (x *PlatformEnvelope) GetWgSyncResponse() *WGSyncResponse {
 	if x != nil {
-		if x, ok := x.Payload.(*PlatformEnvelope_SetWgBind); ok {
-			return x.SetWgBind
-		}
-	}
-	return nil
-}
-
-func (x *PlatformEnvelope) GetDelWgBind() *CmdDelWGBind {
-	if x != nil {
-		if x, ok := x.Payload.(*PlatformEnvelope_DelWgBind); ok {
-			return x.DelWgBind
-		}
-	}
-	return nil
-}
-
-func (x *PlatformEnvelope) GetGetWgStatus() *CmdGetWGStatus {
-	if x != nil {
-		if x, ok := x.Payload.(*PlatformEnvelope_GetWgStatus); ok {
-			return x.GetWgStatus
+		if x, ok := x.Payload.(*PlatformEnvelope_WgSyncResponse); ok {
+			return x.WgSyncResponse
 		}
 	}
 	return nil
@@ -1374,17 +1354,9 @@ type PlatformEnvelope_ConsoleClose struct {
 	ConsoleClose *CmdConsoleClose `protobuf:"bytes,19,opt,name=console_close,json=consoleClose,proto3,oneof"` // 关闭控制台会话 / close console session
 }
 
-type PlatformEnvelope_SetWgBind struct {
+type PlatformEnvelope_WgSyncResponse struct {
 	// --- 专属IP绑定 / Dedicated IP via WireGuard ---
-	SetWgBind *CmdSetWGBind `protobuf:"bytes,20,opt,name=set_wg_bind,json=setWgBind,proto3,oneof"` // 新增/更新 WG 绑定 / create or update a WG binding
-}
-
-type PlatformEnvelope_DelWgBind struct {
-	DelWgBind *CmdDelWGBind `protobuf:"bytes,21,opt,name=del_wg_bind,json=delWgBind,proto3,oneof"` // 删除 WG 绑定 / remove a WG binding
-}
-
-type PlatformEnvelope_GetWgStatus struct {
-	GetWgStatus *CmdGetWGStatus `protobuf:"bytes,22,opt,name=get_wg_status,json=getWgStatus,proto3,oneof"` // 查询 WG 绑定状态 / query WG binding status
+	WgSyncResponse *WGSyncResponse `protobuf:"bytes,23,opt,name=wg_sync_response,json=wgSyncResponse,proto3,oneof"` // 响应 Agent 的 WGSyncRequest：本机当前应有的全部 WG 绑定 / response to the agent's WGSyncRequest: the full set of WG bindings that should currently exist on this host
 }
 
 func (*PlatformEnvelope_CreateVm) isPlatformEnvelope_Payload() {}
@@ -1417,11 +1389,7 @@ func (*PlatformEnvelope_ConsoleResize) isPlatformEnvelope_Payload() {}
 
 func (*PlatformEnvelope_ConsoleClose) isPlatformEnvelope_Payload() {}
 
-func (*PlatformEnvelope_SetWgBind) isPlatformEnvelope_Payload() {}
-
-func (*PlatformEnvelope_DelWgBind) isPlatformEnvelope_Payload() {}
-
-func (*PlatformEnvelope_GetWgStatus) isPlatformEnvelope_Payload() {}
+func (*PlatformEnvelope_WgSyncResponse) isPlatformEnvelope_Payload() {}
 
 // CmdCreateVM — 在宿主机上创建并启动一台新的 VM。
 // 成功后 Agent 须将 VM 状态变更为 VM_STATUS_RUNNING 并在下次心跳中上报。
@@ -2326,20 +2294,127 @@ func (x *CmdConsoleClose) GetSessionId() string {
 	return ""
 }
 
-// CmdSetWGBind — 下发/更新一个 WireGuard 绑定：把平台侧 VyOS 网关上已创建好的
-// Peer 的私钥与网关连接信息推送给 Agent；Agent 成为该 Peer 的主动拨号端，将
-// 这条隧道地址的流量转发进目标 VM（复用 Agent 已有的 wgbind.Manager 实现）。
-// 该命令按 resource_id 幂等：Agent 应在 resource_id 已存在绑定时更新而非重复创建。
+// WGSyncRequest — Agent 主动发起，请求平台下发本机当前应有的 WG 绑定期望状态。
+// WGSyncRequest — agent-initiated request for the desired WG binding state of this host.
+type WGSyncRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RequestId     string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"` // Agent 生成的唯一请求 ID / agent-generated unique request ID
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WGSyncRequest) Reset() {
+	*x = WGSyncRequest{}
+	mi := &file_proto_agent_agent_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WGSyncRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WGSyncRequest) ProtoMessage() {}
+
+func (x *WGSyncRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_agent_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WGSyncRequest.ProtoReflect.Descriptor instead.
+func (*WGSyncRequest) Descriptor() ([]byte, []int) {
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{25}
+}
+
+func (x *WGSyncRequest) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+// WGSyncResponse — WGSyncRequest 的响应：该宿主机当前应当存在的全部绑定。
+// 不在列表中的、Agent 本地已有的绑定应当被删除（幂等收敛，而非增量指令）。
 //
-// CmdSetWGBind — create or update a WireGuard binding: pushes the private key
-// and gateway connection info for a peer already created on the platform-side
-// VyOS gateway down to the Agent; the Agent becomes the active dialer for this
-// peer and forwards traffic addressed to the tunnel address into the target VM
-// (reusing the Agent's existing wgbind.Manager). Idempotent by resource_id.
-type CmdSetWGBind struct {
+// WGSyncResponse — the response to WGSyncRequest: the full set of bindings
+// that should currently exist on this host. Any binding the agent currently
+// holds locally that is NOT in this list should be removed (idempotent
+// reconciliation to a full desired-state snapshot, not an incremental diff).
+type WGSyncResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RequestId     string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"` // 对应 WGSyncRequest.request_id / echoes WGSyncRequest.request_id
+	Bindings      []*WGBindDesired       `protobuf:"bytes,2,rep,name=bindings,proto3" json:"bindings,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WGSyncResponse) Reset() {
+	*x = WGSyncResponse{}
+	mi := &file_proto_agent_agent_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WGSyncResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WGSyncResponse) ProtoMessage() {}
+
+func (x *WGSyncResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_agent_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WGSyncResponse.ProtoReflect.Descriptor instead.
+func (*WGSyncResponse) Descriptor() ([]byte, []int) {
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *WGSyncResponse) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+func (x *WGSyncResponse) GetBindings() []*WGBindDesired {
+	if x != nil {
+		return x.Bindings
+	}
+	return nil
+}
+
+// WGBindDesired — 单条 WireGuard 绑定的期望配置：把平台侧 VyOS 网关上已创建好
+// 的 Peer 的私钥与网关连接信息交给 Agent；Agent 是该 Peer 的主动拨号端，将这条
+// 隧道地址的流量转发进目标 VM（复用 Agent 已有的 wgbind.Manager 实现）。按
+// resource_id 寻址：Agent 应在本地已有同 resource_id 的绑定时原地更新，否则新建。
+//
+// WGBindDesired — desired configuration for a single WireGuard binding: the
+// private key and gateway connection info for a peer already created on the
+// platform-side VyOS gateway, handed to the agent, which becomes the active
+// dialer for this peer and forwards traffic addressed to the tunnel address
+// into the target VM (reusing the agent's existing wgbind.Manager). Addressed
+// by resource_id: the agent should update an existing local binding with the
+// same resource_id in place, or create one if none exists.
+type WGBindDesired struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	VmId          string                 `protobuf:"bytes,1,opt,name=vm_id,json=vmId,proto3" json:"vm_id,omitempty"`                              // 目标 VM UUID / target VM UUID
-	ResourceId    string                 `protobuf:"bytes,2,opt,name=resource_id,json=resourceId,proto3" json:"resource_id,omitempty"`            // 平台 IPResource UUID，Agent 侧用作幂等 key / platform IPResource UUID, used as the agent-side idempotency key
+	ResourceId    string                 `protobuf:"bytes,2,opt,name=resource_id,json=resourceId,proto3" json:"resource_id,omitempty"`            // 平台 IPResource UUID，Agent 侧用作寻址/幂等 key / platform IPResource UUID, used as the agent-side addressing/idempotency key
 	PrivateKey    string                 `protobuf:"bytes,3,opt,name=private_key,json=privateKey,proto3" json:"private_key,omitempty"`            // 本端(Agent侧)私钥，base64，由平台生成 / local (agent-side) private key, base64, platform-generated
 	Address       string                 `protobuf:"bytes,4,opt,name=address,proto3" json:"address,omitempty"`                                    // 隧道地址(即用户租用的公网IP)，可带前缀 / tunnel address (the rented public IP), may include a prefix length
 	PeerPublicKey string                 `protobuf:"bytes,5,opt,name=peer_public_key,json=peerPublicKey,proto3" json:"peer_public_key,omitempty"` // 对端(VyOS网关WG接口)公钥，base64 / remote (VyOS gateway WG interface) public key, base64
@@ -2351,21 +2426,21 @@ type CmdSetWGBind struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *CmdSetWGBind) Reset() {
-	*x = CmdSetWGBind{}
-	mi := &file_proto_agent_agent_proto_msgTypes[25]
+func (x *WGBindDesired) Reset() {
+	*x = WGBindDesired{}
+	mi := &file_proto_agent_agent_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *CmdSetWGBind) String() string {
+func (x *WGBindDesired) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*CmdSetWGBind) ProtoMessage() {}
+func (*WGBindDesired) ProtoMessage() {}
 
-func (x *CmdSetWGBind) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[25]
+func (x *WGBindDesired) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_agent_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2376,351 +2451,79 @@ func (x *CmdSetWGBind) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use CmdSetWGBind.ProtoReflect.Descriptor instead.
-func (*CmdSetWGBind) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{25}
+// Deprecated: Use WGBindDesired.ProtoReflect.Descriptor instead.
+func (*WGBindDesired) Descriptor() ([]byte, []int) {
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{27}
 }
 
-func (x *CmdSetWGBind) GetVmId() string {
+func (x *WGBindDesired) GetVmId() string {
 	if x != nil {
 		return x.VmId
 	}
 	return ""
 }
 
-func (x *CmdSetWGBind) GetResourceId() string {
+func (x *WGBindDesired) GetResourceId() string {
 	if x != nil {
 		return x.ResourceId
 	}
 	return ""
 }
 
-func (x *CmdSetWGBind) GetPrivateKey() string {
+func (x *WGBindDesired) GetPrivateKey() string {
 	if x != nil {
 		return x.PrivateKey
 	}
 	return ""
 }
 
-func (x *CmdSetWGBind) GetAddress() string {
+func (x *WGBindDesired) GetAddress() string {
 	if x != nil {
 		return x.Address
 	}
 	return ""
 }
 
-func (x *CmdSetWGBind) GetPeerPublicKey() string {
+func (x *WGBindDesired) GetPeerPublicKey() string {
 	if x != nil {
 		return x.PeerPublicKey
 	}
 	return ""
 }
 
-func (x *CmdSetWGBind) GetPresharedKey() string {
+func (x *WGBindDesired) GetPresharedKey() string {
 	if x != nil {
 		return x.PresharedKey
 	}
 	return ""
 }
 
-func (x *CmdSetWGBind) GetEndpoint() string {
+func (x *WGBindDesired) GetEndpoint() string {
 	if x != nil {
 		return x.Endpoint
 	}
 	return ""
 }
 
-func (x *CmdSetWGBind) GetAllowedIps() []string {
+func (x *WGBindDesired) GetAllowedIps() []string {
 	if x != nil {
 		return x.AllowedIps
 	}
 	return nil
 }
 
-func (x *CmdSetWGBind) GetKeepaliveSec() int32 {
+func (x *WGBindDesired) GetKeepaliveSec() int32 {
 	if x != nil {
 		return x.KeepaliveSec
 	}
 	return 0
 }
 
-// CmdDelWGBind — 删除一个 WireGuard 绑定（解绑 / VM销毁 / 资源到期回收时下发）。
-// CmdDelWGBind — remove a WireGuard binding (on unbind / VM destruction / resource expiry reclaim).
-type CmdDelWGBind struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	VmId          string                 `protobuf:"bytes,1,opt,name=vm_id,json=vmId,proto3" json:"vm_id,omitempty"`                   // 目标 VM UUID / target VM UUID
-	ResourceId    string                 `protobuf:"bytes,2,opt,name=resource_id,json=resourceId,proto3" json:"resource_id,omitempty"` // 平台 IPResource UUID / platform IPResource UUID
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *CmdDelWGBind) Reset() {
-	*x = CmdDelWGBind{}
-	mi := &file_proto_agent_agent_proto_msgTypes[26]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *CmdDelWGBind) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*CmdDelWGBind) ProtoMessage() {}
-
-func (x *CmdDelWGBind) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[26]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use CmdDelWGBind.ProtoReflect.Descriptor instead.
-func (*CmdDelWGBind) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{26}
-}
-
-func (x *CmdDelWGBind) GetVmId() string {
-	if x != nil {
-		return x.VmId
-	}
-	return ""
-}
-
-func (x *CmdDelWGBind) GetResourceId() string {
-	if x != nil {
-		return x.ResourceId
-	}
-	return ""
-}
-
-// CmdGetWGStatus — 查询某 VM（为空则查询该 Agent 上的全部）的 WireGuard 绑定
-// 实时状态，用于绑定前冲突检测和定期回填流量/握手信息。
-// Agent 须通过 AgentEnvelope.wg_bind_status_list 回传，而非 CommandResult.data。
-//
-// CmdGetWGStatus — query the live status of WireGuard bindings for a VM (or
-// all bindings on this Agent if vm_id is empty), used for pre-bind conflict
-// checks and periodic traffic/handshake backfill.
-// Agent MUST respond via AgentEnvelope.wg_bind_status_list, not CommandResult.data.
-type CmdGetWGStatus struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	VmId          string                 `protobuf:"bytes,1,opt,name=vm_id,json=vmId,proto3" json:"vm_id,omitempty"` // 为空表示查询该 Agent 上的全部 WG 绑定 / empty means query all WG bindings on this agent
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *CmdGetWGStatus) Reset() {
-	*x = CmdGetWGStatus{}
-	mi := &file_proto_agent_agent_proto_msgTypes[27]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *CmdGetWGStatus) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*CmdGetWGStatus) ProtoMessage() {}
-
-func (x *CmdGetWGStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[27]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use CmdGetWGStatus.ProtoReflect.Descriptor instead.
-func (*CmdGetWGStatus) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{27}
-}
-
-func (x *CmdGetWGStatus) GetVmId() string {
-	if x != nil {
-		return x.VmId
-	}
-	return ""
-}
-
-// WGBindStatusList — CmdGetWGStatus 的查询结果，通过 AgentEnvelope 回传。
-// 注意：此消息通过专用的 wg_bind_status_list 字段传输，而非 CommandResult.data。
-// WGBindStatusList — the result of CmdGetWGStatus, delivered via AgentEnvelope.
-// Note: this message travels over the dedicated wg_bind_status_list field, not CommandResult.data.
-type WGBindStatusList struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	CommandId     string                 `protobuf:"bytes,1,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"` // 对应 CmdGetWGStatus 的 command_id / echoes CmdGetWGStatus's command_id
-	Entries       []*WGBindStatusEntry   `protobuf:"bytes,2,rep,name=entries,proto3" json:"entries,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *WGBindStatusList) Reset() {
-	*x = WGBindStatusList{}
-	mi := &file_proto_agent_agent_proto_msgTypes[28]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *WGBindStatusList) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*WGBindStatusList) ProtoMessage() {}
-
-func (x *WGBindStatusList) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[28]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use WGBindStatusList.ProtoReflect.Descriptor instead.
-func (*WGBindStatusList) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{28}
-}
-
-func (x *WGBindStatusList) GetCommandId() string {
-	if x != nil {
-		return x.CommandId
-	}
-	return ""
-}
-
-func (x *WGBindStatusList) GetEntries() []*WGBindStatusEntry {
-	if x != nil {
-		return x.Entries
-	}
-	return nil
-}
-
-// WGBindStatusEntry — 单条 WireGuard 绑定的运行态。
-// WGBindStatusEntry — runtime status of a single WireGuard binding.
-type WGBindStatusEntry struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	VmId          string                 `protobuf:"bytes,1,opt,name=vm_id,json=vmId,proto3" json:"vm_id,omitempty"`                             // VM UUID
-	ResourceId    string                 `protobuf:"bytes,2,opt,name=resource_id,json=resourceId,proto3" json:"resource_id,omitempty"`           // 平台 IPResource UUID / platform IPResource UUID
-	PublicKey     string                 `protobuf:"bytes,3,opt,name=public_key,json=publicKey,proto3" json:"public_key,omitempty"`              // 本端(Agent侧)公钥，由私钥推导，供核对 / local (agent-side) public key, derived from the private key, for verification
-	PeerEndpoint  string                 `protobuf:"bytes,4,opt,name=peer_endpoint,json=peerEndpoint,proto3" json:"peer_endpoint,omitempty"`     // 对端当前实际地址（被动模式下由握手学到）/ the peer's currently observed real address (learned from handshake in passive mode)
-	LastHandshake int64                  `protobuf:"varint,5,opt,name=last_handshake,json=lastHandshake,proto3" json:"last_handshake,omitempty"` // Unix秒，0=从未握手 / Unix seconds, 0 = never handshaked
-	RxBytes       int64                  `protobuf:"varint,6,opt,name=rx_bytes,json=rxBytes,proto3" json:"rx_bytes,omitempty"`                   // 累计接收字节数 / cumulative bytes received
-	TxBytes       int64                  `protobuf:"varint,7,opt,name=tx_bytes,json=txBytes,proto3" json:"tx_bytes,omitempty"`                   // 累计发送字节数 / cumulative bytes sent
-	State         string                 `protobuf:"bytes,8,opt,name=state,proto3" json:"state,omitempty"`                                       // running/stopped/error
-	Error         string                 `protobuf:"bytes,9,opt,name=error,proto3" json:"error,omitempty"`                                       // state=error 时的原因 / reason when state=error
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *WGBindStatusEntry) Reset() {
-	*x = WGBindStatusEntry{}
-	mi := &file_proto_agent_agent_proto_msgTypes[29]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *WGBindStatusEntry) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*WGBindStatusEntry) ProtoMessage() {}
-
-func (x *WGBindStatusEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[29]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use WGBindStatusEntry.ProtoReflect.Descriptor instead.
-func (*WGBindStatusEntry) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{29}
-}
-
-func (x *WGBindStatusEntry) GetVmId() string {
-	if x != nil {
-		return x.VmId
-	}
-	return ""
-}
-
-func (x *WGBindStatusEntry) GetResourceId() string {
-	if x != nil {
-		return x.ResourceId
-	}
-	return ""
-}
-
-func (x *WGBindStatusEntry) GetPublicKey() string {
-	if x != nil {
-		return x.PublicKey
-	}
-	return ""
-}
-
-func (x *WGBindStatusEntry) GetPeerEndpoint() string {
-	if x != nil {
-		return x.PeerEndpoint
-	}
-	return ""
-}
-
-func (x *WGBindStatusEntry) GetLastHandshake() int64 {
-	if x != nil {
-		return x.LastHandshake
-	}
-	return 0
-}
-
-func (x *WGBindStatusEntry) GetRxBytes() int64 {
-	if x != nil {
-		return x.RxBytes
-	}
-	return 0
-}
-
-func (x *WGBindStatusEntry) GetTxBytes() int64 {
-	if x != nil {
-		return x.TxBytes
-	}
-	return 0
-}
-
-func (x *WGBindStatusEntry) GetState() string {
-	if x != nil {
-		return x.State
-	}
-	return ""
-}
-
-func (x *WGBindStatusEntry) GetError() string {
-	if x != nil {
-		return x.Error
-	}
-	return ""
-}
-
 var File_proto_agent_agent_proto protoreflect.FileDescriptor
 
 const file_proto_agent_agent_proto_rawDesc = "" +
 	"\n" +
-	"\x17proto/agent/agent.proto\x12\x05agent\"\xa5\x03\n" +
+	"\x17proto/agent/agent.proto\x12\x05agent\"\xa1\x03\n" +
 	"\rAgentEnvelope\x12\x1d\n" +
 	"\n" +
 	"message_id\x18\x01 \x01(\tR\tmessageId\x120\n" +
@@ -2729,10 +2532,10 @@ const file_proto_agent_agent_proto_rawDesc = "" +
 	"cmd_result\x18\x04 \x01(\v2\x14.agent.CommandResultH\x00R\tcmdResult\x12<\n" +
 	"\rport_fwd_list\x18\x05 \x01(\v2\x16.agent.PortForwardListH\x00R\vportFwdList\x12=\n" +
 	"\x0econsole_output\x18\b \x01(\v2\x14.agent.ConsoleOutputH\x00R\rconsoleOutput\x12:\n" +
-	"\rconsole_event\x18\t \x01(\v2\x13.agent.ConsoleEventH\x00R\fconsoleEvent\x12H\n" +
-	"\x13wg_bind_status_list\x18\n" +
-	" \x01(\v2\x17.agent.WGBindStatusListH\x00R\x10wgBindStatusListB\t\n" +
-	"\apayload\"\xcf\x04\n" +
+	"\rconsole_event\x18\t \x01(\v2\x13.agent.ConsoleEventH\x00R\fconsoleEvent\x12>\n" +
+	"\x0fwg_sync_request\x18\v \x01(\v2\x14.agent.WGSyncRequestH\x00R\rwgSyncRequestB\t\n" +
+	"\apayloadJ\x04\b\n" +
+	"\x10\v\"\xcf\x04\n" +
 	"\tHeartbeat\x12\x1c\n" +
 	"\ttimestamp\x18\x01 \x01(\x03R\ttimestamp\x12\x17\n" +
 	"\acpu_pct\x18\x02 \x01(\x02R\x06cpuPct\x12\x1e\n" +
@@ -2797,7 +2600,7 @@ const file_proto_agent_agent_proto_rawDesc = "" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12+\n" +
 	"\x04type\x18\x02 \x01(\x0e2\x17.agent.ConsoleEventTypeR\x04type\x12\x16\n" +
-	"\x06reason\x18\x03 \x01(\tR\x06reason\"\xba\b\n" +
+	"\x06reason\x18\x03 \x01(\tR\x06reason\"\xe4\a\n" +
 	"\x10PlatformEnvelope\x12\x1d\n" +
 	"\n" +
 	"command_id\x18\x01 \x01(\tR\tcommandId\x121\n" +
@@ -2818,11 +2621,9 @@ const file_proto_agent_agent_proto_rawDesc = "" +
 	"\fconsole_open\x18\x10 \x01(\v2\x15.agent.CmdConsoleOpenH\x00R\vconsoleOpen\x12=\n" +
 	"\rconsole_input\x18\x11 \x01(\v2\x16.agent.CmdConsoleInputH\x00R\fconsoleInput\x12@\n" +
 	"\x0econsole_resize\x18\x12 \x01(\v2\x17.agent.CmdConsoleResizeH\x00R\rconsoleResize\x12=\n" +
-	"\rconsole_close\x18\x13 \x01(\v2\x16.agent.CmdConsoleCloseH\x00R\fconsoleClose\x125\n" +
-	"\vset_wg_bind\x18\x14 \x01(\v2\x13.agent.CmdSetWGBindH\x00R\tsetWgBind\x125\n" +
-	"\vdel_wg_bind\x18\x15 \x01(\v2\x13.agent.CmdDelWGBindH\x00R\tdelWgBind\x12;\n" +
-	"\rget_wg_status\x18\x16 \x01(\v2\x15.agent.CmdGetWGStatusH\x00R\vgetWgStatusB\t\n" +
-	"\apayload\"\xcb\x01\n" +
+	"\rconsole_close\x18\x13 \x01(\v2\x16.agent.CmdConsoleCloseH\x00R\fconsoleClose\x12A\n" +
+	"\x10wg_sync_response\x18\x17 \x01(\v2\x15.agent.WGSyncResponseH\x00R\x0ewgSyncResponseB\t\n" +
+	"\apayloadJ\x04\b\x14\x10\x15J\x04\b\x15\x10\x16J\x04\b\x16\x10\x17\"\xcb\x01\n" +
 	"\vCmdCreateVM\x12\x13\n" +
 	"\x05vm_id\x18\x01 \x01(\tR\x04vmId\x12\x10\n" +
 	"\x03cpu\x18\x02 \x01(\x05R\x03cpu\x12\x15\n" +
@@ -2883,8 +2684,15 @@ const file_proto_agent_agent_proto_rawDesc = "" +
 	"\x04rows\x18\x03 \x01(\rR\x04rows\"0\n" +
 	"\x0fCmdConsoleClose\x12\x1d\n" +
 	"\n" +
-	"session_id\x18\x01 \x01(\tR\tsessionId\"\xae\x02\n" +
-	"\fCmdSetWGBind\x12\x13\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\".\n" +
+	"\rWGSyncRequest\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x01 \x01(\tR\trequestId\"a\n" +
+	"\x0eWGSyncResponse\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x01 \x01(\tR\trequestId\x120\n" +
+	"\bbindings\x18\x02 \x03(\v2\x14.agent.WGBindDesiredR\bbindings\"\xaf\x02\n" +
+	"\rWGBindDesired\x12\x13\n" +
 	"\x05vm_id\x18\x01 \x01(\tR\x04vmId\x12\x1f\n" +
 	"\vresource_id\x18\x02 \x01(\tR\n" +
 	"resourceId\x12\x1f\n" +
@@ -2896,29 +2704,7 @@ const file_proto_agent_agent_proto_rawDesc = "" +
 	"\bendpoint\x18\a \x01(\tR\bendpoint\x12\x1f\n" +
 	"\vallowed_ips\x18\b \x03(\tR\n" +
 	"allowedIps\x12#\n" +
-	"\rkeepalive_sec\x18\t \x01(\x05R\fkeepaliveSec\"D\n" +
-	"\fCmdDelWGBind\x12\x13\n" +
-	"\x05vm_id\x18\x01 \x01(\tR\x04vmId\x12\x1f\n" +
-	"\vresource_id\x18\x02 \x01(\tR\n" +
-	"resourceId\"%\n" +
-	"\x0eCmdGetWGStatus\x12\x13\n" +
-	"\x05vm_id\x18\x01 \x01(\tR\x04vmId\"e\n" +
-	"\x10WGBindStatusList\x12\x1d\n" +
-	"\n" +
-	"command_id\x18\x01 \x01(\tR\tcommandId\x122\n" +
-	"\aentries\x18\x02 \x03(\v2\x18.agent.WGBindStatusEntryR\aentries\"\x96\x02\n" +
-	"\x11WGBindStatusEntry\x12\x13\n" +
-	"\x05vm_id\x18\x01 \x01(\tR\x04vmId\x12\x1f\n" +
-	"\vresource_id\x18\x02 \x01(\tR\n" +
-	"resourceId\x12\x1d\n" +
-	"\n" +
-	"public_key\x18\x03 \x01(\tR\tpublicKey\x12#\n" +
-	"\rpeer_endpoint\x18\x04 \x01(\tR\fpeerEndpoint\x12%\n" +
-	"\x0elast_handshake\x18\x05 \x01(\x03R\rlastHandshake\x12\x19\n" +
-	"\brx_bytes\x18\x06 \x01(\x03R\arxBytes\x12\x19\n" +
-	"\btx_bytes\x18\a \x01(\x03R\atxBytes\x12\x14\n" +
-	"\x05state\x18\b \x01(\tR\x05state\x12\x14\n" +
-	"\x05error\x18\t \x01(\tR\x05error*\x80\x01\n" +
+	"\rkeepalive_sec\x18\t \x01(\x05R\fkeepaliveSec*\x80\x01\n" +
 	"\bVMStatus\x12\x19\n" +
 	"\x15VM_STATUS_UNSPECIFIED\x10\x00\x12\x16\n" +
 	"\x12VM_STATUS_CREATING\x10\x01\x12\x15\n" +
@@ -2950,7 +2736,7 @@ func file_proto_agent_agent_proto_rawDescGZIP() []byte {
 }
 
 var file_proto_agent_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_proto_agent_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 30)
+var file_proto_agent_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 28)
 var file_proto_agent_agent_proto_goTypes = []any{
 	(VMStatus)(0),              // 0: agent.VMStatus
 	(Protocol)(0),              // 1: agent.Protocol
@@ -2980,11 +2766,9 @@ var file_proto_agent_agent_proto_goTypes = []any{
 	(*CmdConsoleInput)(nil),    // 25: agent.CmdConsoleInput
 	(*CmdConsoleResize)(nil),   // 26: agent.CmdConsoleResize
 	(*CmdConsoleClose)(nil),    // 27: agent.CmdConsoleClose
-	(*CmdSetWGBind)(nil),       // 28: agent.CmdSetWGBind
-	(*CmdDelWGBind)(nil),       // 29: agent.CmdDelWGBind
-	(*CmdGetWGStatus)(nil),     // 30: agent.CmdGetWGStatus
-	(*WGBindStatusList)(nil),   // 31: agent.WGBindStatusList
-	(*WGBindStatusEntry)(nil),  // 32: agent.WGBindStatusEntry
+	(*WGSyncRequest)(nil),      // 28: agent.WGSyncRequest
+	(*WGSyncResponse)(nil),     // 29: agent.WGSyncResponse
+	(*WGBindDesired)(nil),      // 30: agent.WGBindDesired
 }
 var file_proto_agent_agent_proto_depIdxs = []int32{
 	4,  // 0: agent.AgentEnvelope.heartbeat:type_name -> agent.Heartbeat
@@ -2992,7 +2776,7 @@ var file_proto_agent_agent_proto_depIdxs = []int32{
 	8,  // 2: agent.AgentEnvelope.port_fwd_list:type_name -> agent.PortForwardList
 	10, // 3: agent.AgentEnvelope.console_output:type_name -> agent.ConsoleOutput
 	11, // 4: agent.AgentEnvelope.console_event:type_name -> agent.ConsoleEvent
-	31, // 5: agent.AgentEnvelope.wg_bind_status_list:type_name -> agent.WGBindStatusList
+	28, // 5: agent.AgentEnvelope.wg_sync_request:type_name -> agent.WGSyncRequest
 	6,  // 6: agent.Heartbeat.vms:type_name -> agent.VMSummary
 	5,  // 7: agent.Heartbeat.os_images:type_name -> agent.OSImageInfo
 	0,  // 8: agent.VMSummary.status:type_name -> agent.VMStatus
@@ -3014,19 +2798,17 @@ var file_proto_agent_agent_proto_depIdxs = []int32{
 	25, // 24: agent.PlatformEnvelope.console_input:type_name -> agent.CmdConsoleInput
 	26, // 25: agent.PlatformEnvelope.console_resize:type_name -> agent.CmdConsoleResize
 	27, // 26: agent.PlatformEnvelope.console_close:type_name -> agent.CmdConsoleClose
-	28, // 27: agent.PlatformEnvelope.set_wg_bind:type_name -> agent.CmdSetWGBind
-	29, // 28: agent.PlatformEnvelope.del_wg_bind:type_name -> agent.CmdDelWGBind
-	30, // 29: agent.PlatformEnvelope.get_wg_status:type_name -> agent.CmdGetWGStatus
-	1,  // 30: agent.CmdSetPortForward.protocol:type_name -> agent.Protocol
-	1,  // 31: agent.CmdDelPortForward.protocol:type_name -> agent.Protocol
-	32, // 32: agent.WGBindStatusList.entries:type_name -> agent.WGBindStatusEntry
-	3,  // 33: agent.AgentGateway.Connect:input_type -> agent.AgentEnvelope
-	12, // 34: agent.AgentGateway.Connect:output_type -> agent.PlatformEnvelope
-	34, // [34:35] is the sub-list for method output_type
-	33, // [33:34] is the sub-list for method input_type
-	33, // [33:33] is the sub-list for extension type_name
-	33, // [33:33] is the sub-list for extension extendee
-	0,  // [0:33] is the sub-list for field type_name
+	29, // 27: agent.PlatformEnvelope.wg_sync_response:type_name -> agent.WGSyncResponse
+	1,  // 28: agent.CmdSetPortForward.protocol:type_name -> agent.Protocol
+	1,  // 29: agent.CmdDelPortForward.protocol:type_name -> agent.Protocol
+	30, // 30: agent.WGSyncResponse.bindings:type_name -> agent.WGBindDesired
+	3,  // 31: agent.AgentGateway.Connect:input_type -> agent.AgentEnvelope
+	12, // 32: agent.AgentGateway.Connect:output_type -> agent.PlatformEnvelope
+	32, // [32:33] is the sub-list for method output_type
+	31, // [31:32] is the sub-list for method input_type
+	31, // [31:31] is the sub-list for extension type_name
+	31, // [31:31] is the sub-list for extension extendee
+	0,  // [0:31] is the sub-list for field type_name
 }
 
 func init() { file_proto_agent_agent_proto_init() }
@@ -3040,7 +2822,7 @@ func file_proto_agent_agent_proto_init() {
 		(*AgentEnvelope_PortFwdList)(nil),
 		(*AgentEnvelope_ConsoleOutput)(nil),
 		(*AgentEnvelope_ConsoleEvent)(nil),
-		(*AgentEnvelope_WgBindStatusList)(nil),
+		(*AgentEnvelope_WgSyncRequest)(nil),
 	}
 	file_proto_agent_agent_proto_msgTypes[9].OneofWrappers = []any{
 		(*PlatformEnvelope_CreateVm)(nil),
@@ -3058,9 +2840,7 @@ func file_proto_agent_agent_proto_init() {
 		(*PlatformEnvelope_ConsoleInput)(nil),
 		(*PlatformEnvelope_ConsoleResize)(nil),
 		(*PlatformEnvelope_ConsoleClose)(nil),
-		(*PlatformEnvelope_SetWgBind)(nil),
-		(*PlatformEnvelope_DelWgBind)(nil),
-		(*PlatformEnvelope_GetWgStatus)(nil),
+		(*PlatformEnvelope_WgSyncResponse)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -3068,7 +2848,7 @@ func file_proto_agent_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_agent_agent_proto_rawDesc), len(file_proto_agent_agent_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   30,
+			NumMessages:   28,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

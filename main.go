@@ -80,6 +80,10 @@ type Agent struct {
 	// streamMu 序列化对 gRPC 客户端流的并发 Send 调用。
 	// gRPC Go 客户端的 Send 内部可能无锁，控制台高频输出必须显式加锁。
 	streamMu sync.Mutex
+
+	// wgSyncWaiters 存储 requestID (string) → chan *agent.WGSyncResponse，
+	// 用于 syncWGBindings 同步等待平台返回 WGSyncResponse 响应。
+	wgSyncWaiters sync.Map
 }
 
 func main() {
@@ -509,6 +513,11 @@ func (a *Agent) connectAndLoop() error {
 
 	go a.heartbeatLoop(stream)
 
+	// 连接后立即做一次 WG 绑定同步，无需等待第一个 ticker
+	go a.syncWGBindings(stream)
+
+	go a.wgSyncLoop(stream)
+
 	// 启动 ping 超时检测：如果 60 秒未收到 Ping，判定连接死亡
 	go a.monitorPingTimeout(stream.Context(), cancel)
 
@@ -560,6 +569,9 @@ func (a *Agent) dispatch(stream agent.AgentGateway_ConnectClient, env *agent.Pla
 		if sess := a.getConsoleSession(p.ConsoleClose.SessionId); sess != nil {
 			sess.cancel()
 		}
+
+	case *agent.PlatformEnvelope_WgSyncResponse:
+		a.handleWGSyncResponse(p.WgSyncResponse)
 
 	default:
 		go a.handleCommand(stream, env)
@@ -745,59 +757,6 @@ func (a *Agent) handleCommand(stream agent.AgentGateway_ConnectClient, env *agen
 			return // 已单独回复，跳过末尾的 CommandResult
 		}
 
-	case *agent.PlatformEnvelope_SetWgBind:
-		cfg := db.WGBinding{
-			Name:          p.SetWgBind.ResourceId,
-			Enabled:       true,
-			PrivateKey:    p.SetWgBind.PrivateKey,
-			Address:       p.SetWgBind.Address,
-			PeerPublicKey: p.SetWgBind.PeerPublicKey,
-			PresharedKey:  p.SetWgBind.PresharedKey,
-			Endpoint:      p.SetWgBind.Endpoint,
-			AllowedIPs:    strings.Join(p.SetWgBind.AllowedIps, ", "),
-			Keepalive:     int(p.SetWgBind.KeepaliveSec),
-		}
-		if existing := a.findWGBindingByResource(p.SetWgBind.VmId, p.SetWgBind.ResourceId); existing != nil {
-			_, err = a.wg.Update(existing.ID, cfg)
-		} else {
-			_, err = a.wg.Add(p.SetWgBind.VmId, cfg)
-		}
-
-	case *agent.PlatformEnvelope_DelWgBind:
-		if existing := a.findWGBindingByResource(p.DelWgBind.VmId, p.DelWgBind.ResourceId); existing != nil {
-			err = a.wg.Remove(existing.ID)
-		}
-		// 找不到已有绑定视为已经解除，幂等删除不报错。
-
-	case *agent.PlatformEnvelope_GetWgStatus:
-		var list []wgbind.Status
-		list, err = a.wg.List(p.GetWgStatus.VmId)
-		if err == nil {
-			entries := make([]*agent.WGBindStatusEntry, 0, len(list))
-			for _, st := range list {
-				entries = append(entries, &agent.WGBindStatusEntry{
-					VmId:          st.VMID,
-					ResourceId:    st.Name,
-					PublicKey:     st.PublicKey,
-					PeerEndpoint:  st.PeerEndpoint,
-					LastHandshake: st.LastHands,
-					RxBytes:       st.RxBytes,
-					TxBytes:       st.TxBytes,
-					State:         st.State,
-					Error:         st.Error,
-				})
-			}
-			_ = a.safeSend(stream, &agent.AgentEnvelope{
-				MessageId: uuid.NewString(),
-				Payload: &agent.AgentEnvelope_WgBindStatusList{
-					WgBindStatusList: &agent.WGBindStatusList{
-						CommandId: env.CommandId,
-						Entries:   entries,
-					},
-				},
-			})
-			return // 已单独回复，跳过末尾的 CommandResult
-		}
 	}
 
 	res := &agent.CommandResult{CommandId: env.CommandId, Success: err == nil}
@@ -812,22 +771,161 @@ func (a *Agent) handleCommand(stream agent.AgentGateway_ConnectClient, env *agen
 	})
 }
 
-// findWGBindingByResource 在指定 VM 的绑定列表里，按 Name（约定存放平台的
-// resource_id）查找已有绑定。wgbind.Manager.Add 总是自己生成随机的绑定 ID，
-// 不认识平台的 resource_id；借助已经暴露给面板用的自由文本 Name 字段，
-// 使 CmdSetWGBind/CmdDelWGBind 可以按 resource_id 寻址，而不需要改动
-// wgbind 包本身。
-func (a *Agent) findWGBindingByResource(vmID, resourceID string) *wgbind.Status {
-	list, err := a.wg.List(vmID)
-	if err != nil {
-		return nil
-	}
-	for i := range list {
-		if list[i].Name == resourceID {
-			return &list[i]
+// wgSyncInterval 是主动向平台拉取 WG 绑定期望状态的周期。不需要跟心跳一样
+// 追求秒级实时性——绑定/解绑本身就是"数据库写完立即返回成功，Agent 稍后收敛"
+// 的异步语义，这个间隔就是那个"稍后"的量级。
+const wgSyncInterval = 20 * time.Second
+
+// wgSyncTimeout 是单次 WGSyncRequest 等待平台响应的超时。
+const wgSyncTimeout = 10 * time.Second
+
+// wgSyncLoop 每 wgSyncInterval 触发一次 syncWGBindings，流断开时退出。
+func (a *Agent) wgSyncLoop(stream agent.AgentGateway_ConnectClient) {
+	ticker := time.NewTicker(wgSyncInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stream.Context().Done():
+			return
+		case <-ticker.C:
+			a.syncWGBindings(stream)
 		}
 	}
-	return nil
+}
+
+// handleWGSyncResponse 把平台回传的 WGSyncResponse 投递给等待中的 syncWGBindings
+// 协程（按 request_id 匹配，同一时刻只会有一个在等，投不进去说明已经超时放弃）。
+func (a *Agent) handleWGSyncResponse(resp *agent.WGSyncResponse) {
+	if v, ok := a.wgSyncWaiters.Load(resp.RequestId); ok {
+		ch := v.(chan *agent.WGSyncResponse)
+		select {
+		case ch <- resp:
+		default:
+		}
+	}
+}
+
+// syncWGBindings 向平台请求本机当前应有的全部 WG 绑定期望状态，与本地
+// wgbind.Manager 实际持有的绑定做 diff 后增/改/删，使本地状态收敛到平台
+// 数据库记录。取代了此前平台主动下发 SetWGBind/DelWGBind、同步等待 Agent
+// 执行结果的模式：旧模式下如果 Agent 已经应用成功，但 CommandResult 没能在
+// 超时窗口内送回平台，DB 会被回滚，两侧状态永久分叉（"幽灵绑定"，需要人工
+// 介入清理）。拉取模式下平台 DB 永远是唯一事实来源，哪怕某一轮请求丢失或
+// 超时，下一轮定时轮询也会自动收敛，不存在需要人工清理的状态。
+func (a *Agent) syncWGBindings(stream agent.AgentGateway_ConnectClient) {
+	reqID := uuid.NewString()
+	ch := make(chan *agent.WGSyncResponse, 1)
+	a.wgSyncWaiters.Store(reqID, ch)
+	defer a.wgSyncWaiters.Delete(reqID)
+
+	if err := a.safeSend(stream, &agent.AgentEnvelope{
+		MessageId: uuid.NewString(),
+		Payload:   &agent.AgentEnvelope_WgSyncRequest{WgSyncRequest: &agent.WGSyncRequest{RequestId: reqID}},
+	}); err != nil {
+		return
+	}
+
+	var resp *agent.WGSyncResponse
+	select {
+	case resp = <-ch:
+	case <-time.After(wgSyncTimeout):
+		return
+	case <-stream.Context().Done():
+		return
+	}
+
+	desired := make(map[string]*agent.WGBindDesired, len(resp.Bindings))
+	for _, b := range resp.Bindings {
+		desired[b.ResourceId] = b
+	}
+
+	existing, err := a.wg.List("")
+	if err != nil {
+		log.Printf("[wgsync] list local bindings failed: %v", err)
+		return
+	}
+	existingByResource := make(map[string]wgbind.Status, len(existing))
+	for _, st := range existing {
+		if st.Name != "" {
+			existingByResource[st.Name] = st
+		}
+	}
+
+	for resourceID, want := range desired {
+		cfg := db.WGBinding{
+			Name:          want.ResourceId,
+			Enabled:       true,
+			PrivateKey:    want.PrivateKey,
+			Address:       want.Address,
+			PeerPublicKey: want.PeerPublicKey,
+			PresharedKey:  want.PresharedKey,
+			Endpoint:      want.Endpoint,
+			AllowedIPs:    strings.Join(want.AllowedIps, ", "),
+			Keepalive:     int(want.KeepaliveSec),
+		}
+
+		have, ok := existingByResource[resourceID]
+		switch {
+		case !ok:
+			if _, err := a.wg.Add(want.VmId, cfg); err != nil {
+				log.Printf("[wgsync] add binding for resource %s failed: %v", resourceID, err)
+			}
+		case have.VMID != want.VmId:
+			// 绑定改绑到了另一台 VM：wgbind.Manager.Update 会强制沿用旧记录的
+			// VMID（无法用 Update 迁移一条绑定归属的 VM），必须先删后加。
+			if err := a.wg.Remove(have.ID); err != nil {
+				log.Printf("[wgsync] remove binding for resource %s before re-adding to new vm failed: %v", resourceID, err)
+				continue
+			}
+			if _, err := a.wg.Add(want.VmId, cfg); err != nil {
+				log.Printf("[wgsync] re-add binding for resource %s under new vm failed: %v", resourceID, err)
+			}
+		case wgBindingChanged(have, want):
+			if _, err := a.wg.Update(have.ID, cfg); err != nil {
+				log.Printf("[wgsync] update binding for resource %s failed: %v", resourceID, err)
+			}
+		}
+	}
+
+	for resourceID, have := range existingByResource {
+		if _, ok := desired[resourceID]; ok {
+			continue
+		}
+		if err := a.wg.Remove(have.ID); err != nil {
+			log.Printf("[wgsync] remove stale binding for resource %s failed: %v", resourceID, err)
+		}
+	}
+}
+
+// wgBindingChanged 判断本地已有绑定是否与平台期望配置不一致，避免每轮同步
+// 都无条件调用 Update——Update 内部会先停后启整条隧道（见 wgbind.Manager.Update），
+// 不加这层判断的话每 wgSyncInterval 都会重置一次握手，产生不必要的连接抖动。
+// PrivateKey 本身不出现在本地 Status 里（wgbind 只暴露推导出的公钥），所以私钥
+// 是否变化通过比较推导公钥来判断，不需要额外持久化/传输一份"期望公钥"字段。
+func wgBindingChanged(have wgbind.Status, want *agent.WGBindDesired) bool {
+	wantPub, err := wgbind.PublicKeyOf(want.PrivateKey)
+	if err != nil || have.PublicKey != wantPub {
+		return true
+	}
+	if have.Address != want.Address {
+		return true
+	}
+	if have.PeerPublicKey != want.PeerPublicKey {
+		return true
+	}
+	if have.Endpoint != want.Endpoint {
+		return true
+	}
+	if have.AllowedIPs != strings.Join(want.AllowedIps, ", ") {
+		return true
+	}
+	if have.Keepalive != int(want.KeepaliveSec) {
+		return true
+	}
+	if have.HasPSK != (want.PresharedKey != "") {
+		return true
+	}
+	return false
 }
 
 // vmStatusString 将 proto VMStatus 枚举转为 DB 存储的状态字符串。
