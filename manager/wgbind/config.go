@@ -1,6 +1,7 @@
 package wgbind
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -10,6 +11,7 @@ import (
 	"runman-agent/db"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/curve25519"
 )
@@ -87,6 +89,46 @@ type normalized struct {
 	mtu        int
 	listenPort int
 	allowedIPs []string
+	// endpoint 是解析过的字面量 "ip:port"，供 uapiConfig 写进 WireGuard IPC 配置——
+	// wireguard-go 的 UAPI 只认字面量 IP，不会像 wg-quick 那样自己做 DNS 解析，
+	// b.Endpoint 若是域名必须我们自己先解析好。b.Endpoint 本身保留原始值（可能是
+	// 域名）落库/展示，两者故意不是同一个值，这样 DNS 记录换了 IP 之后，绑定下次
+	// 重启/重新应用时会自动解析到新地址，不需要手动改配置。
+	endpoint string
+}
+
+// resolveEndpointHost 把 Endpoint 的 host 部分解析成一个本机实际可用的字面量 IP。
+// host 本来就是字面量 IP 时直接返回；是域名时用标准解析拿到全部 A/AAAA 记录，
+// 因为母鸡自己的网络可能是纯 IPv4、纯 IPv6 或双栈，不能不看本机情况就固定挑第
+// 一个解析结果（比如母鸡只有 IPv6 出口，域名解析结果里排在前面的却是一条 A
+// 记录，直接用会导致隧道拨号地址在本机根本没有路由）。做法是挨个尝试对候选地址
+// 建一个本地 UDP "connected" socket——UDP 不会真的发包，只是走一次内核路由查找，
+// 能立刻判断"这个地址族在本机是否有路由"，不需要等对端真的响应；选第一个建得
+// 出本地路由的地址，都不行就退回第一个解析结果，把真实的失败原因交给后面
+// 真正建隧道那一步去报错。
+func resolveEndpointHost(host, portStr string) (string, error) {
+	if addr, err := netip.ParseAddr(host); err == nil {
+		return net.JoinHostPort(addr.String(), portStr), nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ipAddrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return "", fmt.Errorf("resolve endpoint host %q: %w", host, err)
+	}
+	if len(ipAddrs) == 0 {
+		return "", fmt.Errorf("endpoint host %q resolved to no addresses", host)
+	}
+
+	for _, ipAddr := range ipAddrs {
+		candidate := net.JoinHostPort(ipAddr.IP.String(), portStr)
+		if conn, derr := net.DialTimeout("udp", candidate, time.Second); derr == nil {
+			conn.Close()
+			return candidate, nil
+		}
+	}
+	return net.JoinHostPort(ipAddrs[0].IP.String(), portStr), nil
 }
 
 // validate 校验并规整一条绑定配置。b 会被就地补全默认值（MTU、AllowedIPs 等），
@@ -155,7 +197,12 @@ func validate(b *db.WGBinding) (*normalized, error) {
 		if host == "" {
 			return nil, fmt.Errorf("endpoint: host is empty")
 		}
-		b.Endpoint = ep
+		resolved, rerr := resolveEndpointHost(host, portStr)
+		if rerr != nil {
+			return nil, fmt.Errorf("endpoint: %w", rerr)
+		}
+		n.endpoint = resolved
+		b.Endpoint = ep // 落库/展示保留原始值（可能是域名），实际下发用 n.endpoint
 		// 主动方必须有 keepalive，否则永远不会发起握手，见 DefaultKeepalive 的说明。
 		if b.Keepalive == 0 {
 			b.Keepalive = DefaultKeepalive
@@ -233,8 +280,8 @@ func uapiConfig(b *db.WGBinding, n *normalized) (string, error) {
 		}
 		fmt.Fprintf(&sb, "preshared_key=%s\n", psk)
 	}
-	if b.Endpoint != "" {
-		fmt.Fprintf(&sb, "endpoint=%s\n", b.Endpoint)
+	if n.endpoint != "" {
+		fmt.Fprintf(&sb, "endpoint=%s\n", n.endpoint)
 	}
 	if b.Keepalive > 0 {
 		fmt.Fprintf(&sb, "persistent_keepalive_interval=%d\n", b.Keepalive)
