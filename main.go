@@ -13,6 +13,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"runman-agent/config"
 	"runman-agent/db"
@@ -907,7 +908,7 @@ func wgBindingChanged(have wgbind.Status, want *agent.WGBindDesired) bool {
 	if err != nil || have.PublicKey != wantPub {
 		return true
 	}
-	if have.Address != want.Address {
+	if have.Address != normalizeAddress(want.Address) {
 		return true
 	}
 	if have.PeerPublicKey != want.PeerPublicKey {
@@ -926,6 +927,24 @@ func wgBindingChanged(have wgbind.Status, want *agent.WGBindDesired) bool {
 		return true
 	}
 	return false
+}
+
+// normalizeAddress 去掉地址的 CIDR 前缀并规整格式，跟 wgbind 内部 validate()
+// 落库时对 db.WGBinding.Address 做的处理保持一致（validate 会把 "1.2.3.4/32"
+// 这样的地址去掉前缀、重新格式化成裸地址 "1.2.3.4" 再存）。平台数据库里
+// IPResource.Address 是带前缀存的，WGSyncResponse 里原样带过来；如果直接用
+// 字符串相等比较 want.Address 和本地已经去掉前缀的存量值，会永远判定"不等"，
+// 导致 wgBindingChanged 每轮都判定配置变了、每轮都触发一次不必要的隧道重建
+// （表现为连接每隔一个同步周期就断一次）。
+func normalizeAddress(s string) string {
+	if i := strings.IndexByte(s, '/'); i >= 0 {
+		s = s[:i]
+	}
+	addr, err := netip.ParseAddr(s)
+	if err != nil {
+		return s
+	}
+	return addr.String()
 }
 
 // vmStatusString 将 proto VMStatus 枚举转为 DB 存储的状态字符串。
