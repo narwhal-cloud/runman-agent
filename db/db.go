@@ -59,6 +59,26 @@ type VMIPLimit struct {
 	MaxIPs int
 }
 
+// WGBinding 持久化一条 WireGuard 绑定。每条绑定 = 一个纯用户态 WG 隧道，
+// 隧道地址（单个 IPv4 或 IPv6）上收到的全部 TCP/UDP 流量按原端口号转发到该 VM 的内网 IPv4。
+// 密钥以 base64 存储，与 wg 配置文件的书写形式一致。
+type WGBinding struct {
+	ID            string `gorm:"primaryKey"` // uuid
+	VMID          string `gorm:"index"`
+	Name          string // 面向用户的备注名
+	Enabled       bool
+	PrivateKey    string // 本端私钥
+	Address       string // 隧道地址，单个 IPv4/IPv6
+	ListenPort    int    // 本端 WG UDP 监听端口，0 = 随机（仅在配了 Endpoint 时允许）
+	MTU           int    // 0 = DefaultMTU
+	PeerPublicKey string
+	PresharedKey  string // 可空
+	Endpoint      string // 对端 host:port，可空表示被动等待对端连入
+	AllowedIPs    string // 逗号分隔，空 = 0.0.0.0/0, ::/0
+	Keepalive     int    // PersistentKeepalive 秒数，0 = 不发
+	CreatedAt     time.Time
+}
+
 // PortForward 持久化端口转发规则。(Protocol, HostPort) 联合主键保证宿主机端口唯一。
 type PortForward struct {
 	Protocol    string `gorm:"primaryKey"`
@@ -118,7 +138,7 @@ func Init(path string) (*DB, error) {
 		sqlDB.SetMaxOpenConns(1)
 	}
 
-	if err := db.AutoMigrate(&Traffic{}, &VMConfig{}, &PodmanVMConfig{}, &CloudHVVMConfig{}, &IncusVMConfig{}, &PortForward{}, &VMIPLimit{}, &System{}); err != nil {
+	if err := db.AutoMigrate(&Traffic{}, &VMConfig{}, &PodmanVMConfig{}, &CloudHVVMConfig{}, &IncusVMConfig{}, &PortForward{}, &VMIPLimit{}, &WGBinding{}, &System{}); err != nil {
 		return nil, fmt.Errorf("automigrate: %w", err)
 	}
 
@@ -285,6 +305,41 @@ func (d *DB) ListAllPortForwards() ([]*PortForward, error) {
 
 func (d *DB) DeletePortForwardsForVM(vmId string) error {
 	return d.orm.Delete(&PortForward{}, "vm_id = ?", vmId).Error
+}
+
+// WireGuard 绑定
+
+func (d *DB) SaveWGBinding(b *WGBinding) error {
+	return d.orm.Save(b).Error
+}
+
+func (d *DB) GetWGBinding(id string) (*WGBinding, error) {
+	var b WGBinding
+	err := d.orm.First(&b, "id = ?", id).Error
+	if err != nil {
+		return nil, err
+	}
+	return &b, nil
+}
+
+func (d *DB) DeleteWGBinding(id string) error {
+	return d.orm.Delete(&WGBinding{}, "id = ?", id).Error
+}
+
+func (d *DB) ListWGBindings(vmId string) ([]*WGBinding, error) {
+	var list []*WGBinding
+	err := d.orm.Where("vm_id = ?", vmId).Order("created_at").Find(&list).Error
+	return list, err
+}
+
+func (d *DB) ListAllWGBindings() ([]*WGBinding, error) {
+	var list []*WGBinding
+	err := d.orm.Order("created_at").Find(&list).Error
+	return list, err
+}
+
+func (d *DB) DeleteWGBindingsForVM(vmId string) error {
+	return d.orm.Delete(&WGBinding{}, "vm_id = ?", vmId).Error
 }
 
 // 端口转发唯一来源 IP 数限制（按 VM 覆盖）
