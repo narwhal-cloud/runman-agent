@@ -723,7 +723,7 @@
                 <h3 class="font-bold text-slate-800">Realtime Metrics</h3>
                 <p id="monitor-vmid" class="text-xs text-slate-400 font-mono mt-0.5"></p>
             </div>
-            <button onclick="closeModal('modal-monitor'); clearInterval(monitorInterval);" class="text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button>
+            <button onclick="closeMonitor();" class="text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button>
         </div>
         <div class="p-6 space-y-6 overflow-y-auto flex-1">
             <!-- CPU & RAM -->
@@ -1637,34 +1637,13 @@ function openMonitor(vmId) {
     }, 50);
 }
 
-// ─── Console TTY ──────────────────────────────────────────────────────────────
-function openConsole(vmId) {
-    activeVmId = vmId;
-    $('console-title').textContent = `console — ${vmId}`;
-    openModal('modal-console');
-
-    // Clean up previous session
-    if (termWs) { termWs.close(); termWs=null; }
-    if (term)   { term.dispose(); term=null; }
-
-    const container = $('terminal-container');
-    container.innerHTML = '';
-
-    term = new Terminal({
-        cursorBlink: true,
-        fontSize: 14,
-        fontFamily: 'Menlo, Monaco, "Courier New", monospace',
-        theme: { background:'#030712', foreground:'#e5e7eb', cursor:'#6366f1' },
-        convertEol: true,
-    });
-    fitAddon = new FitAddon.FitAddon();
-    term.loadAddon(fitAddon);
-    term.open(container);
-    setTimeout(() => { fitAddon.fit(); connectWS(vmId); }, 80);
-
-    window.addEventListener('resize', onTermResize);
+function closeMonitor() {
+    clearInterval(monitorInterval);
+    monitorInterval = null;
+    closeModal('modal-monitor');
 }
 
+// ─── Console TTY ──────────────────────────────────────────────────────────────
 function connectWS(vmId) {
     const proto = location.protocol==='https:' ? 'wss' : 'ws';
     termWs = new WebSocket(`${proto}://${location.host}/api/vms/${vmId}/tty`);
@@ -1745,6 +1724,7 @@ function openConsole(vmId) {
     // Clean up previous session
     if (termWs) { termWs.close(); termWs=null; }
     if (term)   { term.dispose(); term=null; }
+    if (consoleResizeObserver) { consoleResizeObserver.disconnect(); consoleResizeObserver = null; }
 
     const container = $('terminal-container');
     container.innerHTML = '';
@@ -1759,7 +1739,7 @@ function openConsole(vmId) {
     fitAddon = new FitAddon.FitAddon();
     term.loadAddon(fitAddon);
     term.open(container);
-    
+
     // Use ResizeObserver for manual drag-resizing
     consoleResizeObserver = new ResizeObserver(() => {
         if (fitAddon) fitAddon.fit();
@@ -1772,9 +1752,10 @@ function openConsole(vmId) {
 }
 
 // Close modal on background click (excluding console)
-['modal-create','modal-manage','modal-version','modal-monitor','modal-images-config'].forEach(id => {
+['modal-create','modal-manage','modal-version','modal-images-config'].forEach(id => {
     $(id).addEventListener('click', e => { if(e.target===e.currentTarget) closeModal(id); });
 });
+$('modal-monitor').addEventListener('click', e => { if(e.target===e.currentTarget) closeMonitor(); });
 $('modal-ports').addEventListener('click', e => { if(e.target===e.currentTarget) closePortFwdsModal(); });
 // Disabled background click for console to prevent accidental closure
 // $('modal-console').addEventListener('click', e => { if(e.target===e.currentTarget) closeConsole(); });
