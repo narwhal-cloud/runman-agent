@@ -9,6 +9,9 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"runman-agent/manager/podman/cpualloc"
 	"runtime"
 	"strings"
@@ -127,9 +130,9 @@ func lxcfsMounts() []specs.Mount {
 // 强制清理同名容器后重试一次。
 func (m *Manager) createWithRetry(spec *specgen.SpecGenerator) (entTypes.ContainerCreateResponse, error) {
 	res, err := containers.CreateWithSpec(m.timeoutCtx(), spec, nil)
-	if err != nil && strings.Contains(err.Error(), "already in use") {
+	if err != nil && (strings.Contains(err.Error(), "already in use") || strings.Contains(err.Error(), "exists") || strings.Contains(err.Error(), "conflict")) {
 		log.Printf("[Podman] create %s: name in use by stale container, force removing and retrying: %v", spec.Name, err)
-		if _, rmErr := containers.Remove(m.timeoutCtx(), spec.Name, &containers.RemoveOptions{Force: ptr(true), Ignore: ptr(true)}); rmErr != nil {
+		if rmErr := m.deleteByID(spec.Name); rmErr != nil {
 			log.Printf("[Podman] create %s: stale container removal failed: %v", spec.Name, rmErr)
 		}
 		res, err = containers.CreateWithSpec(m.timeoutCtx(), spec, nil)
@@ -374,21 +377,34 @@ func (m *Manager) execInContainer(id string, cmd []string) error {
 	return containers.ExecStart(m.timeoutCtx(), execID, nil)
 }
 
+func emptyDir(dir string) {
+	if dir == "" {
+		return
+	}
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		_ = os.RemoveAll(filepath.Join(dir, e.Name()))
+	}
+}
+
 func (m *Manager) deleteByID(id string) error {
 	name := id
-	info, err := containers.Inspect(m.timeoutCtx(), id, nil)
-	if err == nil {
+	var upperDir string
+
+	// 1. 获取容器名称、状态及 UpperDir（可写层路径）
+	if info, err := containers.Inspect(m.timeoutCtx(), id, nil); err == nil {
 		name = info.Name
-		if info.State.Running {
-			_ = containers.Stop(m.timeoutCtx(), id, nil)
+		if info.GraphDriver != nil && info.GraphDriver.Data != nil {
+			upperDir = info.GraphDriver.Data["UpperDir"]
+		}
+		if info.State != nil && info.State.Running {
+			_ = containers.Kill(m.timeoutCtx(), id, &containers.KillOptions{Signal: ptr("SIGKILL")})
 		}
 	} else {
-		// Inspect 失败不代表容器不存在：可能是仅存在于 storage 层的 "external"
-		// 容器（libpod DB 不认识），此时仍要继续走 Remove 清理 storage。
 		log.Printf("[Podman] deleteByID %s: inspect failed (%v), removing anyway in case of storage-only container", id, err)
 	}
 
-	// 删除前尝试从 DB 获取 cpuset 并释放
+	// 2. 删除前尝试从 DB 获取 cpuset 并释放
 	if conf, err := m.db.GetPodmanConfig(name); err == nil && conf.Cpuset != "" {
 		m.alloc.Release(conf.Cpuset)
 		_ = m.db.DeletePodmanConfig(name)
@@ -399,10 +415,21 @@ func (m *Manager) deleteByID(id string) error {
 		}
 	}
 
-	// Ignore=true：容器（含 storage 层）都不存在时视为删除成功，保证幂等；
-	// 名字对应 external 容器时，服务端会回退到按 storage 删除。
-	_, err = containers.Remove(m.timeoutCtx(), name, &containers.RemoveOptions{Force: ptr(true), Ignore: ptr(true)})
-	return err
+	// 3. 尝试常规删除
+	_, err := containers.Remove(m.timeoutCtx(), name, &containers.RemoveOptions{Force: ptr(true), Ignore: ptr(true)})
+	if err != nil && upperDir != "" {
+		// 4. 若删除失败（如 XFS project quota 写满导致 ENOSPC），清空 diff 目录释放配额并重试
+		log.Printf("[Podman] deleteByID %s: remove failed (%v), emptying diff to release quota: %s", name, err, upperDir)
+		emptyDir(upperDir)
+		_, err = containers.Remove(m.timeoutCtx(), name, &containers.RemoveOptions{Force: ptr(true), Ignore: ptr(true)})
+	}
+
+	// 5. 若 bindings 仍报错，使用命令行强制清除 storage 兜底
+	if err != nil {
+		log.Printf("[Podman] deleteByID %s: fallback to podman rm --storage --force", name)
+		_ = exec.Command("podman", "rm", "-f", "--storage", name).Run()
+	}
+	return nil
 }
 
 func (m *Manager) StartVM(_ context.Context, vmID string) error {
@@ -453,12 +480,30 @@ func (m *Manager) ReinstallVM(ctx context.Context, req *agent.CmdReinstallVM) er
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	log.Printf("[Podman][Reinstall] start: vmID=%s image=%s diskGb=%d", req.VmId, req.OsImage, req.DiskGb)
+
+	// 1. 强制停止旧容器
 	if err := m.stopVM(req.VmId, true); err != nil {
 		log.Printf("[Podman][Reinstall] %s: stop failed (continuing): %v", req.VmId, err)
 	}
-	if err := m.deleteVM(ctx, req.VmId); err != nil {
-		log.Printf("[Podman][Reinstall] %s: delete failed (continuing, create will retry on name conflict): %v", req.VmId, err)
+
+	// 2. 备份原有的 PodmanConfig 配置（如 IPv4, IPv6, MAC, Cpuset），重装时复用，避免产生临时容器和 IP 变动
+	savedPodmanConf, _ := m.db.GetPodmanConfig(req.VmId)
+
+	// 3. 删除旧容器实例与存储（使用具备自动解死锁的 deleteByID 进行清理）
+	if err := m.deleteByID(req.VmId); err != nil {
+		log.Printf("[Podman][Reinstall] %s: deleteByID failed (continuing, create will retry on name conflict): %v", req.VmId, err)
 	}
+
+	// 4. 如果之前有配置，恢复到 DB，确保 createVM 直接复用，无需走 tmp- 容器
+	if savedPodmanConf != nil {
+		_ = m.db.SavePodmanConfig(savedPodmanConf)
+		if savedPodmanConf.Cpuset != "" {
+			m.alloc.Restore(savedPodmanConf.Cpuset)
+		}
+	}
+
+	// 5. 调用 createVM 创建全新的容器实例
 	return m.createVM(ctx, &agent.CmdCreateVM{
 		VmId:          req.VmId,
 		OsImage:       req.OsImage,
