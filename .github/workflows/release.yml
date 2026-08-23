@@ -4,12 +4,13 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  build:
+  build-agent:
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -25,7 +26,7 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Build
+      - name: Build Agent
         env:
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}
@@ -44,8 +45,53 @@ jobs:
           path: runman-agent-linux-${{ matrix.goarch }}
           retention-days: 1
 
+  build-rfw:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            arch: amd64
+            gcc: musl-gcc
+          - target: aarch64-unknown-linux-musl
+            arch: arm64
+            gcc: aarch64-linux-gnu-gcc
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: narwhal-cloud/rfw
+          ref: dev
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools gcc-aarch64-linux-gnu
+
+      - name: Setup Rust toolchain
+        run: |
+          rustup toolchain install stable
+          rustup toolchain install nightly --component rust-src
+          rustup target add --toolchain stable ${{ matrix.target }}
+          cargo install bpf-linker --locked
+
+      - name: Build rfw
+        env:
+          CC: ${{ matrix.gcc }}
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
+        run: |
+          cargo build --package rfw --release --target ${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/rfw rfw-${{ matrix.arch }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rfw-${{ matrix.arch }}
+          path: rfw-${{ matrix.arch }}
+          retention-days: 1
+
   release:
-    needs: build
+    needs: [build-agent, build-rfw]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -62,4 +108,6 @@ jobs:
             runman-agent-linux-amd64
             runman-agent-linux-arm64
             install.sh
+            rfw-amd64
+            rfw-arm64
           generate_release_notes: true
