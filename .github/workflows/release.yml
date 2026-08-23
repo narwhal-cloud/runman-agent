@@ -52,10 +52,12 @@ jobs:
         include:
           - target: x86_64-unknown-linux-musl
             arch: amd64
-            gcc: musl-gcc
+            cc: musl-gcc
+            linker: musl-gcc
           - target: aarch64-unknown-linux-musl
             arch: arm64
-            gcc: aarch64-linux-gnu-gcc
+            cc: aarch64-linux-musl-gcc
+            linker: aarch64-linux-musl-gcc
 
     steps:
       - uses: actions/checkout@v4
@@ -66,7 +68,13 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools gcc-aarch64-linux-gnu zstd
+          sudo apt-get install -y musl-tools zstd
+
+      - name: Install aarch64 musl cross toolchain
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: |
+          curl -fsSL https://musl.cc/aarch64-linux-musl-cross.tgz | tar -xz -C /tmp
+          echo "/tmp/aarch64-linux-musl-cross/bin" >> $GITHUB_PATH
 
       - name: Setup Rust toolchain
         run: |
@@ -86,8 +94,11 @@ jobs:
 
       - name: Build rfw
         env:
-          CC: ${{ matrix.gcc }}
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
+          CC: ${{ matrix.cc }}
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: ${{ matrix.linker }}
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: ${{ matrix.linker }}
+          CC_aarch64_unknown_linux_musl: aarch64-linux-musl-gcc
+          AR_aarch64_unknown_linux_musl: aarch64-linux-musl-ar
         run: |
           cargo build --package rfw --release --target ${{ matrix.target }}
           cp target/${{ matrix.target }}/release/rfw rfw-${{ matrix.arch }}
