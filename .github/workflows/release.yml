@@ -89,8 +89,6 @@ jobs:
           CC: ${{ matrix.gcc }}
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
         run: |
-          # 兼容最新 LLVM 23 / bpf-linker 0.11.0：将废弃的 opt-level "z" 调整为 2
-          sed -i 's/opt-level = "z"/opt-level = 2/' Cargo.toml
           cargo build --package rfw --release --target ${{ matrix.target }}
           cp target/${{ matrix.target }}/release/rfw rfw-${{ matrix.arch }}
 
