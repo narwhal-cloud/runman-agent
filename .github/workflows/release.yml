@@ -73,7 +73,13 @@ jobs:
           rustup toolchain install stable
           rustup toolchain install nightly --component rust-src
           rustup target add --toolchain stable ${{ matrix.target }}
-          cargo install bpf-linker --locked
+
+      - name: Install bpf-linker
+        run: |
+          mkdir -p ~/.cargo/bin
+          curl -fsSL https://github.com/aya-rs/bpf-linker/releases/latest/download/bpf-linker-x86_64-unknown-linux-musl.tar.gz | tar -xz -C ~/.cargo/bin
+          chmod +x ~/.cargo/bin/bpf-linker
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       - name: Build rfw
         env:
