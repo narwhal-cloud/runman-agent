@@ -400,10 +400,11 @@ write_files:
 		"type":    "nic",
 		"network": IncusBridge,
 	}
-	// 纯 IPv6 容器：显式禁用 IPv4（ipv4.address=none），不启用 IPv4 过滤；
-	// 否则按常规分配静态 IPv4 并开启源地址过滤。
+	// Incus 6.x 要求 ipv4.address=none 与 security.ipv4_filtering 同时使用。
+	// 过滤也能阻止容器伪造 IPv4 源地址，确保纯 IPv6 模式不会旁路获得 IPv4。
 	if m.ipv6Only || ipv4 == "" {
 		nic["ipv4.address"] = "none"
+		nic["security.ipv4_filtering"] = "true"
 	} else {
 		nic["ipv4.address"] = ipv4
 		nic["security.ipv4_filtering"] = "true"
