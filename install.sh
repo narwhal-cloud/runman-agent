@@ -32,21 +32,107 @@ t() { [ "$LANG_CODE" = "zh" ] && echo "$2" || echo "$1"; }
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"; }
 die() { log "$1" >&2; exit 1; }
 
+# ── IPv6 配置备份 / 一键回滚 ───────────────────────────────────────────────────
+# 备份对象：内核参数(sysctl)、/etc/network/interfaces、incusbr0 网络配置、关键变量。
+# 回滚时按备份快照逐一恢复，便于本机/容器 IPv6 分配策略试错后快速还原。
+
+backup_ipv6_config() {
+    local ts; ts=$(date +%Y%m%d-%H%M%S)
+    local dir="$INCUS_IPV6_BACKUP_DIR/ipv6-$ts"
+    mkdir -p "$dir"
+    [ -f /etc/sysctl.d/99-narwhalcloud.conf ] && cp /etc/sysctl.d/99-narwhalcloud.conf "$dir/sysctl.conf"
+    [ -f /etc/network/interfaces ] && cp /etc/network/interfaces "$dir/interfaces"
+    command -v incus >/dev/null 2>&1 && incus network show incusbr0 >"$dir/incusbr0.network" 2>/dev/null
+    {
+        echo "IPV6_MODE=${IPV6_MODE:-}"
+        echo "IPV6_SUBNET=${IPV6_SUBNET:-}"
+        echo "IPV6_ADDR=${IPV6_ADDR:-}"
+        echo "IPV6_IFACE=${IPV6_IFACE:-}"
+        echo "INCUS_WG_IPV6_SUBNET=${INCUS_WG_IPV6_SUBNET:-}"
+    } > "$dir/meta.env"
+    echo "$dir" > "$INCUS_IPV6_BACKUP_DIR/latest"
+    echo "$dir"
+}
+
+restore_ipv6_config() {
+    local target="${1:-$(cat "$INCUS_IPV6_BACKUP_DIR/latest" 2>/dev/null)}"
+    [ -n "$target" ] && [ -d "$target" ] || { log "$(t "No IPv6 backup found" "未找到 IPv6 备份")"; return 1; }
+    [ -f "$target/sysctl.conf" ] && { cp "$target/sysctl.conf" /etc/sysctl.d/99-narwhalcloud.conf && sysctl -p /etc/sysctl.d/99-narwhalcloud.conf >/dev/null 2>&1; }
+    [ -f "$target/interfaces" ] && cp "$target/interfaces" /etc/network/interfaces
+    if [ -f "$target/incusbr0.network" ]; then
+        command -v incus >/dev/null 2>&1 && incus network edit incusbr0 <"$target/incusbr0.network" 2>/dev/null \
+            && log "$(t "Restored incusbr0 network" "已恢复 incusbr0 网络配置")"
+    fi
+    log "$(t "IPv6 config restored from $target" "已从 $target 回滚 IPv6 配置")"
+}
+
+# 生成独立的 IPv6 回滚脚本，供运维手动执行（无需重跑安装脚本）
+install_ipv6_rollback_helper() {
+    mkdir -p "$(dirname "$AGENT_BINARY")"
+    cat > "$AGENT_BIN_DIR/ipv6-rollback.sh" <<'EOF'
+#!/bin/bash
+# NarwhalCloud Agent — IPv6 配置一键回滚
+# 用法：
+#   ./ipv6-rollback.sh              # 回滚到最近一次备份
+#   ./ipv6-rollback.sh <备份目录>   # 回滚到指定备份（/var/lib/narwhal-agent/backups/ipv6-xxx）
+set -e
+BACKUP_DIR="${INCUS_IPV6_BACKUP_DIR:-/var/lib/narwhal-agent/backups}"
+TARGET="${1:-$(cat "$BACKUP_DIR/latest" 2>/dev/null)}"
+[ -n "$TARGET" ] && [ -d "$TARGET" ] || { echo "未找到 IPv6 备份"; exit 1; }
+[ -f "$TARGET/sysctl.conf" ] && { cp "$TARGET/sysctl.conf" /etc/sysctl.d/99-narwhalcloud.conf && sysctl -p /etc/sysctl.d/99-narwhalcloud.conf >/dev/null 2>&1; }
+[ -f "$TARGET/interfaces" ] && cp "$TARGET/interfaces" /etc/network/interfaces
+[ -f "$TARGET/incusbr0.network" ] && command -v incus >/dev/null 2>&1 && incus network edit incusbr0 <"$TARGET/incusbr0.network" 2>/dev/null
+echo "已回滚 IPv6 配置: $TARGET"
+EOF
+    chmod +x "$AGENT_BIN_DIR/ipv6-rollback.sh"
+    log "$(t "IPv6 rollback helper installed: $AGENT_BIN_DIR/ipv6-rollback.sh" "IPv6 回滚辅助脚本已安装: $AGENT_BIN_DIR/ipv6-rollback.sh")"
+}
+
 # ── Language selection ────────────────────────────────────────────────────────
 
 # Support non-interactive mode via environment variable or command line argument
 INSTALL_RFW_FORCE=0
 # 1: 忽略版本戳，强制重新下载 cloudhv / incus 预构建镜像
 FORCE_IMAGE_REFRESH="${FORCE_IMAGE_REFRESH:-0}"
+
+# 本地 incus 镜像服务 / 定制能力相关环境变量（离线/内网部署用）
+INCUS_IMAGE_MIRROR="${INCUS_IMAGE_MIRROR:-}"       # 镜像基址 URL（本地静态服务或内网镜像），覆盖 GitHub releases
+INCUS_LOCAL_IMAGE_DIR="${INCUS_LOCAL_IMAGE_DIR:-}" # 本地镜像目录（含 incus-<distro>-<arch>.tar.gz），直接离线导入
+INCUS_ALPINE_BASE="${INCUS_ALPINE_BASE:-}"         # 定制 alpine 基础镜像：本地 tar.gz 路径或已存在的 incus 别名
+INCUS_IPV6_ALLOC="${INCUS_IPV6_ALLOC:-1}"          # 每个容器分配的 IPv6 数量（非 /64 网段精细化分配）
+INCUS_WG_IPV6_SUBNET="${INCUS_WG_IPV6_SUBNET:-}"   # 供 WireGuard 隧道分配的 IPv6 池（CIDR）
+INCUS_BANNER_PRESET="${INCUS_BANNER_PRESET:-none}" # none / default / minimal / project / custom
+INCUS_BANNER_TEXT="${INCUS_BANNER_TEXT:-}"         # preset=custom 时的完整横幅文本
+INCUS_IPV6_BACKUP_DIR="${INCUS_IPV6_BACKUP_DIR:-/var/lib/narwhal-agent/backups}" # IPv6 配置备份目录
+
+# 一键模式：--backup-ipv6 / --rollback-ipv6 直接对当前主机做 IPv6 配置备份/回滚后退出
+IPV6_ONESHOT_MODE="${IPV6_ONESHOT_MODE:-}"
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         zh) LANG_CODE="zh"; shift ;;
         en) LANG_CODE="en"; shift ;;
         --install-rfw) INSTALL_RFW_FORCE=1; shift ;;
         --force-images) FORCE_IMAGE_REFRESH=1; shift ;;
+        --image-mirror) INCUS_IMAGE_MIRROR="$2"; shift 2 ;;
+        --local-image-dir) INCUS_LOCAL_IMAGE_DIR="$2"; shift 2 ;;
+        --alpine-base) INCUS_ALPINE_BASE="$2"; shift 2 ;;
+        --ipv6-alloc) INCUS_IPV6_ALLOC="$2"; shift 2 ;;
+        --wg-ipv6-subnet) INCUS_WG_IPV6_SUBNET="$2"; shift 2 ;;
+        --banner-preset) INCUS_BANNER_PRESET="$2"; shift 2 ;;
+        --banner-text) INCUS_BANNER_TEXT="$2"; shift 2 ;;
+        --backup-ipv6) IPV6_ONESHOT_MODE="backup"; shift ;;
+        --rollback-ipv6) IPV6_ONESHOT_MODE="rollback"; shift ;;
         *) shift ;;
     esac
 done
+
+# ── 一键 IPv6 备份 / 回滚（独立模式，处理完即退出）──
+if [ "$IPV6_ONESHOT_MODE" = "backup" ]; then
+    b=$(backup_ipv6_config); log "$(t "IPv6 config backed up to $b" "IPv6 配置已备份至 $b")"; exit 0
+elif [ "$IPV6_ONESHOT_MODE" = "rollback" ]; then
+    restore_ipv6_config; exit 0
+fi
 
 if [ -z "$LANG_CODE" ]; then
     printf "Select language / 选择语言:\n  1) English (default)\n  2) 中文\n"
@@ -431,6 +517,13 @@ write_config_file() {
     "ndp_iface": "$ndp_iface",
     "ndp_subnets": "$ndp_subnets",
     "ndp_network": "$ndp_network",
+    "ipv6_wg_subnet": "$INCUS_WG_IPV6_SUBNET",
+    "ipv6_backup_dir": "$INCUS_IPV6_BACKUP_DIR",
+    "incus_banner_preset": "$INCUS_BANNER_PRESET",
+    "incus_banner_text": "$INCUS_BANNER_TEXT",
+    "incus_ipv6_alloc": $INCUS_IPV6_ALLOC,
+    "incus_alpine_base": "$INCUS_ALPINE_BASE",
+    "incus_image_mirror": "$INCUS_IMAGE_MIRROR",
     "rfw_addr": "$RFW_API_ADDR"
 }
 EOF
@@ -946,7 +1039,10 @@ import_incus_images() {
     for distro in debian alpine; do
         alias=$(incus_ready_alias "$distro")
         asset="incus-${distro}-${ARCH}.tar.gz"
-        url="$VM_IMAGES_BASE/$asset"
+        # 支持通过 INCUS_IMAGE_MIRROR（本地静态服务/内网镜像）覆盖默认的 GitHub releases 基址
+        local img_base="$VM_IMAGES_BASE"
+        [ -n "$INCUS_IMAGE_MIRROR" ] && img_base="${INCUS_IMAGE_MIRROR%/}"
+        url="$img_base/$asset"
         stamp_file="$stamp_dir/$distro-$ARCH"
         present=0
         incus image alias list --format csv 2>/dev/null | grep -q "^${alias}," && present=1
@@ -993,7 +1089,64 @@ import_incus_images() {
     done
 }
 
-# 从已有配置文件读取虚拟化类型（更新流程判断需要刷新哪类镜像）
+# 从本地目录直接离线导入预构建 incus 镜像（无需任何网络）。
+# 目录内需包含 incus-<distro>-<arch>.tar.gz（文件名与远程资产一致）。
+import_local_incus_images() {
+    local dir="$INCUS_LOCAL_IMAGE_DIR"
+    [ -d "$dir" ] || { log "$(t "Local image dir not found: $dir" "本地镜像目录不存在: $dir")"; return 1; }
+    command -v incus >/dev/null 2>&1 || return 0
+    mkdir -p "$AGENT_DATA_DIR/incus-image-stamps"
+    for distro in debian alpine; do
+        local asset="incus-${distro}-${ARCH}.tar.gz"
+        local f="$dir/$asset"
+        [ -f "$f" ] || { log "$(t "Skip $asset (not in local dir)" "跳过 $asset（本地目录不存在）")"; continue; }
+        local alias; alias=$(incus_ready_alias "$distro")
+        incus image delete "$alias" >/dev/null 2>&1 || true
+        if incus image import "$f" --alias "$alias"; then
+            log "$(t "Imported local incus image: $alias" "已导入本地 incus 镜像: $alias")"
+        else
+            log "$(t "Warning: failed to import local image $asset" "警告: 本地镜像 $asset 导入失败")"
+        fi
+    done
+}
+
+# 导入定制 alpine 基础镜像（如 podcctv/alpine-base）。
+# 参数可为本地 tar.gz 路径（导入为别名 podcctv/alpine-base）或已存在的 incus 镜像别名。
+import_custom_alpine_base() {
+    [ -n "$INCUS_ALPINE_BASE" ] || return 0
+    command -v incus >/dev/null 2>&1 || return 0
+    if [ -f "$INCUS_ALPINE_BASE" ]; then
+        local alias="podcctv/alpine-base"
+        incus image delete "$alias" >/dev/null 2>&1 || true
+        if incus image import "$INCUS_ALPINE_BASE" --alias "$alias"; then
+            log "$(t "Imported custom alpine base as $alias" "已导入定制 alpine 基础镜像为 $alias")"
+            INCUS_ALPINE_BASE="$alias"
+        else
+            log "$(t "Warning: failed to import custom alpine base" "警告: 定制 alpine 基础镜像导入失败")"
+        fi
+    else
+        if incus image alias list --format csv 2>/dev/null | cut -d, -f1 | grep -qx "$INCUS_ALPINE_BASE" \
+           || incus image list --format csv 2>/dev/null | grep -q "$INCUS_ALPINE_BASE"; then
+            log "$(t "Using existing alpine base alias: $INCUS_ALPINE_BASE" "使用已存在的 alpine 基础镜像别名: $INCUS_ALPINE_BASE")"
+        else
+            log "$(t "Warning: alpine base alias not found: $INCUS_ALPINE_BASE" "警告: 未找到 alpine 基础镜像别名: $INCUS_ALPINE_BASE")"
+        fi
+    fi
+}
+
+# 交互式选择 SSH 登录横幅（欢迎页）预设；已通过参数/环境变量指定时跳过。
+prompt_banner() {
+    [ "$INCUS_BANNER_PRESET" != "none" ] && return 0
+    read -rp "$(t "Configure SSH login banner? [1=none 2=default 3=project 4=custom]: " "配置 SSH 登录横幅? [1=无 2=默认 3=项目模板 4=自定义]: ")" _b
+    case "${_b:-1}" in
+        2) INCUS_BANNER_PRESET="default" ;;
+        3) INCUS_BANNER_PRESET="project" ;;
+        4) INCUS_BANNER_PRESET="custom"; read -rp "$(t "Enter banner text: " "请输入横幅文本: ")" INCUS_BANNER_TEXT ;;
+        *) INCUS_BANNER_PRESET="none" ;;
+    esac
+}
+
+# 从已存在的配置文件读取虚拟化类型（更新流程判断需要刷新哪类镜像）
 detect_installed_virt_type() {
     [ -f "$AGENT_CONFIG_FILE" ] || return 0
     grep -o '"virt_type"[[:space:]]*:[[:space:]]*"[^"]*"' "$AGENT_CONFIG_FILE" 2>/dev/null \
@@ -1004,6 +1157,21 @@ detect_installed_virt_type() {
 
 if systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null || [ -f "$AGENT_BINARY" ]; then
     log "$(t "Existing NarwhalCloud Agent detected, updating..." "检测到已安装的 NarwhalCloud Agent，执行更新流程...")"
+
+    # 配置迁移：为旧配置补齐新增字段（保留已有值，仅补充缺省），避免升级后新功能无法生效
+    if command -v jq >/dev/null 2>&1 && [ -f "$AGENT_CONFIG_FILE" ]; then
+        jq '. + {
+               incus_banner_preset: (.incus_banner_preset // "none"),
+               incus_banner_text:   (.incus_banner_text   // ""),
+               incus_ipv6_alloc:    (.incus_ipv6_alloc    // 1),
+               incus_alpine_base:   (.incus_alpine_base   // ""),
+               incus_image_mirror:  (.incus_image_mirror  // ""),
+               ipv6_wg_subnet:      (.ipv6_wg_subnet      // ""),
+               ipv6_backup_dir:     (.ipv6_backup_dir     // "/var/lib/narwhal-agent/backups")
+             }' "$AGENT_CONFIG_FILE" > "$AGENT_CONFIG_FILE.tmp" \
+            && mv "$AGENT_CONFIG_FILE.tmp" "$AGENT_CONFIG_FILE" \
+            && chmod 600 "$AGENT_CONFIG_FILE"
+    fi
 
     ARCH=$(detect_arch)
     if command -v podman &>/dev/null; then
@@ -1044,6 +1212,12 @@ if systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null || [ -f "$AGENT_BINA
             ;;
         incus)
             log "$(t "Checking prebuilt Incus images for updates..." "检查预构建 Incus 镜像更新...")"
+            if [ -n "$INCUS_LOCAL_IMAGE_DIR" ]; then
+                import_local_incus_images || true
+            fi
+            if [ -n "$INCUS_ALPINE_BASE" ]; then
+                import_custom_alpine_base
+            fi
             INCUS_IMAGE_REFRESH=1
             import_incus_images
             ;;
@@ -1533,8 +1707,36 @@ if [ "$VIRT_TYPE" = "incus" ]; then
         incus profile device remove default eth0 >/dev/null 2>&1 || true
     fi
 
-    # 4. 导入预构建的 ready 镜像
-    import_incus_images
+    # 3.5 本地镜像服务 / 定制 alpine 基础镜像（离线 / 内网部署）
+    if [ -n "$INCUS_LOCAL_IMAGE_DIR" ]; then
+        import_local_incus_images || log "$(t "Warning: local image import had issues" "警告: 本地镜像导入存在问题")"
+    fi
+    if [ -n "$INCUS_ALPINE_BASE" ]; then
+        import_custom_alpine_base
+    fi
+
+    # 3.6 配置 SSH 登录横幅（欢迎页）
+    prompt_banner
+
+    # 3.7 WireGuard IPv6 池：subnet 模式下复用同一前缀供 WG 隧道分配
+    if [ "$IPV6_MODE" = "subnet" ] && [ -n "$IPV6_SUBNET" ] && [ -z "$INCUS_WG_IPV6_SUBNET" ]; then
+        INCUS_WG_IPV6_SUBNET="$IPV6_SUBNET"
+    fi
+
+    # 4. 导入预构建的 ready 镜像（离线目录优先；否则按镜像源 / 远程）
+    if [ -n "$INCUS_LOCAL_IMAGE_DIR" ]; then
+        log "$(t "Using local image dir, skipping remote import." "使用本地镜像目录，跳过远程导入。")"
+    else
+        import_incus_images
+    fi
+
+    # 5. 备份当前 IPv6 配置（便于试错后一键回滚），并安装回滚辅助脚本
+    if [ "$IPV6_MODE" != "none" ]; then
+        install_ipv6_rollback_helper
+        if b=$(backup_ipv6_config); then
+            log "$(t "IPv6 config backed up to $b" "IPv6 配置已备份至 $b")"
+        fi
+    fi
 fi
 
 IP=$(curl -4 -s --max-time 10 ip.sb 2>/dev/null || echo "N/A")

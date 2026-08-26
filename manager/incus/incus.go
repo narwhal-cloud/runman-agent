@@ -32,23 +32,38 @@ type Manager struct {
 	ipv6Subnet string
 	ipv6Addr   string
 	ipv6Iface  string
-	buildMu    sync.Mutex
-	mu         sync.Mutex // 全局锁，确保同一时间只有一个 VM 操作
+	// 每个容器分配的 IPv6 数量（非 /64 网段精细化分配，默认 1）
+	ipv6Alloc int
+	// 自定义 alpine 基础镜像别名（结合 podcctv/alpine-base 等定制镜像）
+	alpineBase string
+	// 欢迎页 / SSH 登录横幅
+	bannerPreset string
+	bannerText   string
+	buildMu      sync.Mutex
+	mu           sync.Mutex // 全局锁，确保同一时间只有一个 VM 操作
 }
 
-func New(database *db.DB, ipv6Mode, ipv6Subnet, ipv6Addr, ipv6Iface string) (*Manager, error) {
+func New(database *db.DB, ipv6Mode, ipv6Subnet, ipv6Addr, ipv6Iface, bannerPreset, bannerText string, ipv6Alloc int, alpineBase string) (*Manager, error) {
 	c, err := incus.ConnectIncusUnix(SocketPath, nil)
 	if err != nil {
 		return nil, fmt.Errorf("connect to incus: %w", err)
 	}
 
+	if ipv6Alloc <= 0 {
+		ipv6Alloc = 1
+	}
+
 	return &Manager{
-		client:     c,
-		db:         database,
-		ipv6Mode:   ipv6Mode,
-		ipv6Subnet: ipv6Subnet,
-		ipv6Addr:   ipv6Addr,
-		ipv6Iface:  ipv6Iface,
+		client:      c,
+		db:          database,
+		ipv6Mode:    ipv6Mode,
+		ipv6Subnet:  ipv6Subnet,
+		ipv6Addr:    ipv6Addr,
+		ipv6Iface:   ipv6Iface,
+		ipv6Alloc:   ipv6Alloc,
+		alpineBase:  alpineBase,
+		bannerPreset: bannerPreset,
+		bannerText:   bannerText,
 	}, nil
 }
 
@@ -123,7 +138,8 @@ func (m *Manager) createVM(ctx context.Context, req *agent.CmdCreateVM) error {
 		return err
 	}
 
-	ipv4, ipv6 := m.computeIPs(idx)
+	ipv4, ipv6s := m.computeIPs(idx)
+	hasV6 := len(ipv6s) > 0
 
 	// 计算掩码以便在 cloud-init 中使用
 	ipv6Mask := "64"
@@ -133,14 +149,23 @@ func (m *Manager) createVM(ctx context.Context, req *agent.CmdCreateVM) error {
 			ipv6Mask = parts[1]
 		}
 	}
+	gw6 := m.ipv6Gateway()
 
 	// 转换镜像别名
 	alias := req.OsImage
 	if alias == "debian" {
 		alias = "debian/13/cloud"
 	} else if alias == "alpine" {
-		alias = "alpine/3.23/cloud"
+		// 支持使用定制 alpine 基础镜像（如 podcctv/alpine-base）替代内置镜像
+		if m.alpineBase != "" {
+			alias = m.alpineBase
+		} else {
+			alias = "alpine/3.23/cloud"
+		}
 	}
+
+	// 自定义基础镜像（本地已导入的别名）走本地源，不走 simplestreams
+	baseIsLocal := m.alpineBase != "" && req.OsImage == "alpine"
 
 	arch := runtime.GOARCH
 	if arch == "x86_64" || arch == "amd64" {
@@ -167,7 +192,7 @@ func (m *Manager) createVM(ctx context.Context, req *agent.CmdCreateVM) error {
 		_, _, err = m.client.GetImageAlias(readyAlias)
 		if err != nil {
 			log.Printf("[Incus] Building ready image for %s...", alias)
-			if buildErr := m.ensureReadyImage(ctx, alias, readyAlias, req.OsImage); buildErr != nil {
+			if buildErr := m.ensureReadyImage(ctx, alias, readyAlias, req.OsImage, baseIsLocal); buildErr != nil {
 				m.buildMu.Unlock()
 				return fmt.Errorf("auto-build image failed: %w", buildErr)
 			}
@@ -205,16 +230,21 @@ chpasswd:
         dns-nameservers 1.1.1.1
 `, ipv4)
 
-		if ipv6 != "" {
-			gw6 := m.ipv6Addr
-			if gw6 == "" {
-				gw6 = "fd91:cafe:cafe:10::1"
-			}
-			netConf += fmt.Sprintf(`
+		if hasV6 {
+			for i, a := range ipv6s {
+				if i == 0 {
+					netConf += fmt.Sprintf(`
       iface eth0 inet6 static
         address %s/%s
         gateway %s
-`, ipv6, ipv6Mask, gw6)
+`, a, ipv6Mask, gw6)
+				} else {
+					netConf += fmt.Sprintf(`
+      iface eth0 inet6 static
+        address %s/%s
+`, a, ipv6Mask)
+				}
+			}
 		}
 
 		userData += fmt.Sprintf(`
@@ -236,18 +266,23 @@ write_files:
       Gateway=10.91.0.1
 `, ipv4)
 
-		if ipv6 != "" {
-			gw6 := m.ipv6Addr
-			if gw6 == "" {
-				gw6 = "fd91:cafe:cafe:10::1"
-			}
-			networkConf += fmt.Sprintf(`
+		if hasV6 {
+			for i, a := range ipv6s {
+				if i == 0 {
+					networkConf += fmt.Sprintf(`
       [Address]
       Address=%s/%s
 
       [Route]
       Gateway=%s
-`, ipv6, ipv6Mask, gw6)
+`, a, ipv6Mask, gw6)
+				} else {
+					networkConf += fmt.Sprintf(`
+      [Address]
+      Address=%s/%s
+`, a, ipv6Mask)
+				}
+			}
 		}
 
 		userData += fmt.Sprintf(`
@@ -260,6 +295,35 @@ write_files:
 `, networkConf)
 	}
 
+	// 自定义欢迎页 / SSH 登录横幅：写入 motd（登录后）与 issue.net（登录前），
+	// 并通过 sshd drop-in 启用 Banner；同时为所有镜像（含自定义 alpine-base）
+	// 强制开启 root 密码登录，避免定制镜像缺少该配置导致 SSH 密码登录失败。
+	banner := m.bannerContent()
+	if banner != "" {
+		bannerEsc := indentLines(banner, "      ")
+		userData += fmt.Sprintf(`
+  - path: /etc/motd
+    content: |
+%s
+  - path: /etc/issue.net
+    content: |
+%s
+  - path: /etc/ssh/sshd_config.d/99-runman.conf
+    content: |
+      PermitRootLogin yes
+      PasswordAuthentication yes
+      Banner /etc/issue.net
+`, bannerEsc, bannerEsc)
+	} else {
+		// 即便不显示横幅，也确保容器支持 SSH 用户密码登录
+		userData += `
+  - path: /etc/ssh/sshd_config.d/99-runman.conf
+    content: |
+      PermitRootLogin yes
+      PasswordAuthentication yes
+`
+	}
+
 	userData += "runcmd:\n"
 	if req.OsImage == "alpine" {
 		userData += "  - rc-update add networking boot\n"
@@ -269,6 +333,18 @@ write_files:
 		userData += "  - rm -f /etc/systemd/network/10-cloud-init-*.network /run/systemd/network/10-cloud-init-*.network || true\n"
 		userData += "  - systemctl restart systemd-networkd || true\n"
 	}
+	// 强制把密码登录策略同步进主 sshd_config（部分基础镜像未 Include drop-in 目录）
+	if banner != "" {
+		userData += `  - sed -i 's/^#\?Banner.*/Banner \/etc\/issue.net/' /etc/ssh/sshd_config
+  - sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+  - sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+`
+	} else {
+		userData += `  - sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+  - sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+`
+	}
+
 	// 本地毫秒级守护：新 ready 镜像已烤入 sshd 自启，此处仅兼容旧版构建的 ready 镜像
 	userData += `  - [ sh, -c, "rc-update add sshd default 2>/dev/null || systemctl enable ssh 2>/dev/null || true" ]
   - [ sh, -c, "rc-service sshd start 2>/dev/null || systemctl start ssh 2>/dev/null || true" ]
@@ -344,7 +420,8 @@ write_files:
 		Container: req.VmId,
 		Image:     req.OsImage,
 		IPv4:      ipv4,
-		IPv6:      ipv6,
+		IPv6:      firstOrEmpty(ipv6s),
+		IPv6s:     strings.Join(ipv6s, ","),
 	}
 	_ = m.db.SaveIncusConfig(iConf)
 
@@ -399,7 +476,7 @@ func (m *Manager) restartVM(ctx context.Context, vmID string) error {
 	return op.Wait()
 }
 
-func (m *Manager) ensureReadyImage(ctx context.Context, baseAlias, readyAlias, distro string) error {
+func (m *Manager) ensureReadyImage(ctx context.Context, baseAlias, readyAlias, distro string, baseIsLocal bool) error {
 	builderName := fmt.Sprintf("builder-%d", time.Now().Unix())
 
 	pkgSSH := "openssh-server"
@@ -450,15 +527,26 @@ runcmd:
   - [ sh, -c, "command -v sshd >/dev/null 2>&1 && touch /root/build_done" ]
 `, pkgSSH, pkgCron, aptConfig, installCmd, pkgCron, pkgCron)
 
-	op, err := m.client.CreateInstance(api.InstancesPost{
-		Name: builderName,
-		Type: api.InstanceTypeContainer,
-		Source: api.InstanceSource{
+	var builderSource api.InstanceSource
+	if baseIsLocal {
+		// 本地已导入的定制基础镜像（如 podcctv/alpine-base），不使用 simplestreams 远端
+		builderSource = api.InstanceSource{
+			Type:  "image",
+			Alias: baseAlias,
+		}
+	} else {
+		builderSource = api.InstanceSource{
 			Type:     "image",
 			Server:   "https://images.linuxcontainers.org",
 			Protocol: "simplestreams",
 			Alias:    baseAlias,
-		},
+		}
+	}
+
+	op, err := m.client.CreateInstance(api.InstancesPost{
+		Name: builderName,
+		Type: api.InstanceTypeContainer,
+		Source: builderSource,
 		InstancePut: api.InstancePut{
 			Config: map[string]string{
 				"cloud-init.user-data": builderUserData,
@@ -517,10 +605,18 @@ runcmd:
 	return op.Wait()
 }
 
-func (m *Manager) computeIPs(idx int) (ipv4, ipv6 string) {
+// computeIPs 根据索引计算静态 IPv4 以及（IPv6 模式下）一组静态 IPv6 地址。
+// 每个容器分配 m.ipv6Alloc 个 IPv6 地址，支持非 /64 网段的精细化分配
+// （例如在一个 /64 内给某容器连续分配 10 个可用地址）。
+func (m *Manager) computeIPs(idx int) (ipv4 string, ipv6s []string) {
 	host := idx & 0xff
 	subnet := (idx >> 8) & 0xf
 	ipv4 = fmt.Sprintf("10.91.%d.%d", subnet, host)
+
+	n := m.ipv6Alloc
+	if n < 1 {
+		n = 1
+	}
 
 	switch m.ipv6Mode {
 	case "subnet":
@@ -528,13 +624,92 @@ func (m *Manager) computeIPs(idx int) (ipv4, ipv6 string) {
 			parts := strings.SplitN(m.ipv6Subnet, "::/", 2)
 			if len(parts) == 2 {
 				prefix := parts[0]
-				ipv6 = fmt.Sprintf("%s::%x", prefix, idx)
+				base := idx * n
+				for k := 0; k < n; k++ {
+					ipv6s = append(ipv6s, fmt.Sprintf("%s::%x", prefix, base+k))
+				}
 			}
 		}
 	case "snat":
-		ipv6 = fmt.Sprintf("fd91:cafe:cafe:10::%x", idx)
+		base := idx * n
+		for k := 0; k < n; k++ {
+			ipv6s = append(ipv6s, fmt.Sprintf("fd91:cafe:cafe:10::%x", base+k))
+		}
 	}
 	return
+}
+
+// ipv6Gateway 返回容器 IPv6 静态地址应使用的网关。
+// subnet 模式下网关必须是 incusbr0 的桥地址（<前缀>::1），而非宿主机公网地址；
+// snat 模式使用 ULA 网关；其余回退到宿主机地址。
+func (m *Manager) ipv6Gateway() string {
+	if m.ipv6Mode == "subnet" && m.ipv6Subnet != "" {
+		if parts := strings.SplitN(m.ipv6Subnet, "::/", 2); len(parts) == 2 {
+			return parts[0] + "::1"
+		}
+	}
+	if m.ipv6Addr != "" {
+		return m.ipv6Addr
+	}
+	return "fd91:cafe:cafe:10::1"
+}
+
+// ── 自定义欢迎页 / SSH 登录横幅 ─────────────────────────────────────────────────
+
+const (
+	bannerDefault = `========================================
+ NarwhalCloud NAT VPS — 欢迎使用
+ 本实例由 NarwhalCloud Agent 管理
+ 请勿进行未授权操作，所有行为均被记录
+========================================`
+
+	bannerMinimal = `NarwhalCloud NAT VPS — Authorized access only`
+
+	// bannerProject 是面向客户的"预设项目"模板，部署方可按需替换文本。
+	bannerProject = `========================================
+  欢迎使用我们的 NAT VPS 服务
+  - 控制面板：https://host.example.com
+  - 文档中心：https://docs.example.com
+  - 技术支持：support@example.com
+  祝您使用愉快！
+========================================`
+)
+
+// bannerContent 根据预设类型返回横幅文本。
+// preset 取值：none / default / minimal / project / custom（custom 时使用 bannerText）。
+func (m *Manager) bannerContent() string {
+	switch m.bannerPreset {
+	case "none", "":
+		return ""
+	case "custom":
+		if strings.TrimSpace(m.bannerText) != "" {
+			return m.bannerText
+		}
+		return bannerDefault
+	case "minimal":
+		return bannerMinimal
+	case "project":
+		return bannerProject
+	default:
+		return bannerDefault
+	}
+}
+
+// indentLines 给文本的每一行加上统一前缀（用于嵌进 cloud-init write_files 的内容块）。
+func indentLines(s, prefix string) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	for i := range lines {
+		lines[i] = prefix + lines[i]
+	}
+	return strings.Join(lines, "\n")
+}
+
+// firstOrEmpty 返回切片首个元素，空切片返回空串。
+func firstOrEmpty(s []string) string {
+	if len(s) == 0 {
+		return ""
+	}
+	return s[0]
 }
 
 func (m *Manager) ResetPassword(_ context.Context, vmID, password string) error {

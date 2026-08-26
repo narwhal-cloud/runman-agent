@@ -6,6 +6,7 @@ import (
 	"context"
 	"net/netip"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
 
@@ -94,11 +95,18 @@ func (t *incusTracker) sync() {
 				continue
 			}
 
-			ip, err := netip.ParseAddr(ipv6)
-			if err != nil {
-				continue
+			// IPv6 字段可能是逗号分隔的多个地址（非 /64 网段精细化分配）
+			for _, entry := range strings.Split(ipv6, ",") {
+				entry = strings.TrimSpace(entry)
+				if entry == "" {
+					continue
+				}
+				ip, err := netip.ParseAddr(entry)
+				if err != nil {
+					continue
+				}
+				b.Add(ip)
 			}
-			b.Add(ip)
 
 			t.mu.RLock()
 			isNew := !t.ips.Contains(ip)
