@@ -1897,6 +1897,19 @@ if [ "$VIRT_TYPE" = "incus" ]; then
         fi
     fi
 
+    # 4.1 注册私有 simplestreams 镜像服务器为 incus remote（best-effort）。
+    #     既能让运维直接 `incus launch podcctv-mirror:alpine/3.23`，也顺带
+    #     在线验证 index.json 是否已正确（修正前 incus remote add 会失败）。
+    if [ -n "$INCUS_IMAGE_MIRROR" ] && command -v incus >/dev/null 2>&1; then
+        if incus remote list 2>/dev/null | grep -qw "podcctv-mirror"; then
+            log "$(t "Incus remote podcctv-mirror already registered." "incus remote podcctv-mirror 已注册。")"
+        elif incus remote add podcctv-mirror "$INCUS_IMAGE_MIRROR" --protocol=simplestreams --public >/dev/null 2>&1; then
+            log "$(t "✓ Registered incus remote podcctv-mirror ($INCUS_IMAGE_MIRROR)" "✓ 已注册 incus remote podcctv-mirror ($INCUS_IMAGE_MIRROR)")"
+        else
+            log "$(t "Warning: could not register podcctv-mirror (index.json missing/unreachable). Runtime build falls back to upstream." "警告: 无法注册 podcctv-mirror（index.json 缺失/不可达）。运行时构建将回退到上游源。")"
+        fi
+    fi
+
     # 5. IPv6 回滚辅助脚本（幂等）；配置备份已在“变更前”阶段完成，此处不再覆盖 latest 快照
     if [ "$IPV6_MODE" != "none" ]; then
         install_ipv6_rollback_helper

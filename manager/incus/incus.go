@@ -36,6 +36,8 @@ type Manager struct {
 	ipv6Alloc int
 	// 自定义 alpine 基础镜像别名（结合 podcctv/alpine-base 等定制镜像）
 	alpineBase string
+	// 私有镜像服务器（simplestreams）基址；非空时运行时构建镜像优先从此拉取
+	imageMirror string
 	// 欢迎页 / SSH 登录横幅
 	bannerPreset string
 	bannerText   string
@@ -45,7 +47,7 @@ type Manager struct {
 	mu       sync.Mutex // 全局锁，确保同一时间只有一个 VM 操作
 }
 
-func New(database *db.DB, ipv6Mode, ipv6Subnet, ipv6Addr, ipv6Iface, bannerPreset, bannerText string, ipv6Alloc int, alpineBase string, ipv6Only bool) (*Manager, error) {
+func New(database *db.DB, ipv6Mode, ipv6Subnet, ipv6Addr, ipv6Iface, bannerPreset, bannerText string, ipv6Alloc int, alpineBase string, ipv6Only bool, imageMirror string) (*Manager, error) {
 	c, err := incus.ConnectIncusUnix(SocketPath, nil)
 	if err != nil {
 		return nil, fmt.Errorf("connect to incus: %w", err)
@@ -64,6 +66,7 @@ func New(database *db.DB, ipv6Mode, ipv6Subnet, ipv6Addr, ipv6Iface, bannerPrese
 		ipv6Iface:   ipv6Iface,
 		ipv6Alloc:   ipv6Alloc,
 		alpineBase:  alpineBase,
+		imageMirror: imageMirror,
 		bannerPreset: bannerPreset,
 		bannerText:   bannerText,
 		ipv6Only:     ipv6Only,
@@ -577,6 +580,14 @@ runcmd:
 			Type:  "image",
 			Alias: baseAlias,
 		}
+	} else if m.imageMirror != "" && distro == "alpine" {
+		// 优先从私有 simplestreams 镜像服务器拉取 alpine 基础镜像
+		builderSource = api.InstanceSource{
+			Type:     "image",
+			Server:   m.imageMirror,
+			Protocol: "simplestreams",
+			Alias:    baseAlias,
+		}
 	} else {
 		builderSource = api.InstanceSource{
 			Type:     "image",
@@ -597,7 +608,29 @@ runcmd:
 		},
 	})
 	if err != nil {
-		return err
+		// 私有镜像服务器拉取失败（版本缺失/不可达/索引异常），回退到上游 linuxcontainers
+		if m.imageMirror != "" && builderSource.Server == m.imageMirror {
+			log.Printf("[Incus] mirror pull failed (%v), falling back to images.linuxcontainers.org", err)
+			builderSource = api.InstanceSource{
+				Type:     "image",
+				Server:   "https://images.linuxcontainers.org",
+				Protocol: "simplestreams",
+				Alias:    baseAlias,
+			}
+			op, err = m.client.CreateInstance(api.InstancesPost{
+				Name: builderName,
+				Type: api.InstanceTypeContainer,
+				Source: builderSource,
+				InstancePut: api.InstancePut{
+					Config: map[string]string{
+						"cloud-init.user-data": builderUserData,
+					},
+				},
+			})
+		}
+		if err != nil {
+			return err
+		}
 	}
 	_ = op.Wait()
 

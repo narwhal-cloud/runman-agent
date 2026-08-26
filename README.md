@@ -204,6 +204,27 @@ bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/in
 
 > **兼容性**：`--image-mirror` 同时支持最简流（simplestreams）与传统的扁平 tarball 基址——脚本会先尝试 simplestreams 元数据，失败则回退到 `<mirror>/incus-<distro>-<arch>.tar.gz`。留空（或 `--image-mirror ""`）则直接使用 GitHub Releases。
 
+> **simplestreams 端点要求 `index.json`**：要让 `incus remote add --protocol=simplestreams` 或 Agent 运行时按 simplestreams 协议拉取，服务器根下必须存在合法的 `streams/v1/index.json`（格式为 `datatype: index:1.0` / `format: simplestreams:1.0`，`index` 指针指向 `streams/v1/images.json`）。本项目配套的镜像服务器构建脚本 `podcctv/alpine-base` 的 `scripts/generate-streams.py` 已修正此前误把 image-downloads 内容写入 `index.json` 的 bug；若你的服务器返回 404 或 `incus remote add` 失败，请重新运行 `python3 scripts/generate-streams.py` 并重新部署（或直接把一份正确的 `index.json` 放到 `streams/v1/` 下）。
+
+#### 注册为 incus remote（运维便利 + 运行时验证）
+
+安装脚本会在导入镜像后 **best-effort** 执行：
+
+```bash
+incus remote add podcctv-mirror https://alpine-incus-base.428048.xyz \
+  --protocol=simplestreams --public
+```
+
+注册成功后即可直接：
+
+```bash
+incus launch podcctv-mirror:alpine/3.23 my-alpine
+```
+
+同时，该步骤也是**在线校验 `index.json` 是否生效**的手段：若返回失败，说明服务器 `index.json` 仍缺失/格式错误，Agent 后续运行时构建镜像会自动回退到上游 `images.linuxcontainers.org`，不影响既有已导入的本地 ready 镜像。
+
+> Agent 运行时（`ensureReadyImage`）在 `incus_image_mirror` 非空时，会优先以 simplestreams 协议从该服务器拉取 alpine 基础镜像，失败自动回退上游；无需本机预先 `incus remote add`。
+
 ### 2. 定制 alpine 基础镜像
 
 对于需要预装特定软件/内核参数的场景，可使用自己的 alpine-base 镜像（本地 tar.gz 或已 `incus image import` 的别名）：
