@@ -162,7 +162,7 @@ INSTALL_RFW_FORCE=0
 FORCE_IMAGE_REFRESH="${FORCE_IMAGE_REFRESH:-0}"
 
 # 本地 incus 镜像服务 / 定制能力相关环境变量（离线/内网部署用）
-INCUS_IMAGE_MIRROR="${INCUS_IMAGE_MIRROR:-}"       # 镜像基址 URL（本地静态服务或内网镜像），覆盖 GitHub releases
+INCUS_IMAGE_MIRROR="${INCUS_IMAGE_MIRROR:-https://alpine-incus-base.428048.xyz}"  # 私有 simplestreams 镜像服务器（fork 默认）；留空则使用 GitHub releases
 INCUS_LOCAL_IMAGE_DIR="${INCUS_LOCAL_IMAGE_DIR:-}" # 本地镜像目录（含 incus-<distro>-<arch>.tar.gz），直接离线导入
 INCUS_ALPINE_BASE="${INCUS_ALPINE_BASE:-}"         # 定制 alpine 基础镜像：本地 tar.gz 路径或已存在的 incus 别名
 INCUS_IPV6_ALLOC="${INCUS_IPV6_ALLOC:-1}"          # 每个容器分配的 IPv6 数量（非 /64 网段精细化分配）
@@ -1212,6 +1212,51 @@ import_custom_alpine_base() {
     fi
 }
 
+# 从私有 simplestreams 镜像服务器导入镜像（fork 默认源）。
+# 服务器以 LXD/Incus 原生格式（lxd.tar.xz + rootfs.squashfs）发布，
+# 直接按 streams/v1/images.json 中的路径下载并 incus image import，
+# 不依赖 streams/v1/index.json（部分自建服务器未提供，incus remote add 会失败）。
+# 遍历 alpine / debian，服务器提供哪些就导入哪些（fork 服务器当前仅 alpine/amd64）。
+# 返回 0 表示至少成功导入一个镜像（调用方据此决定其余发行版是否回退 GitHub）。
+import_incus_images_from_mirror() {
+    [ -n "$INCUS_IMAGE_MIRROR" ] || return 1
+    [ "$ARCH" = "amd64" ] || { log "$(t "Mirror only provides amd64 images; skipping." "镜像服务器仅提供 amd64 镜像，跳过。")"; return 1; }
+    command -v incus >/dev/null 2>&1 || return 1
+    command -v jq    >/dev/null 2>&1 || { log "$(t "jq not available; skipping mirror import." "jq 不可用，跳过镜像导入。")"; return 1; }
+
+    local base="${INCUS_IMAGE_MIRROR%/}"
+    local meta
+    meta=$(curl -fsSL --max-time 30 "$base/streams/v1/images.json" 2>/dev/null) || {
+        log "$(t "Cannot reach mirror metadata: $base" "无法访问镜像元数据: $base")"; return 1
+    }
+
+    local ok=0 distro lxd_path rootfs_path tmpd lxd_file rootfs_file local_alias
+    for distro in alpine debian; do
+        lxd_path=$(printf '%s\n' "$meta" | jq -r --arg d "$distro" '.products | to_entries[]? | select(.key | startswith($d)) | .value.versions[]?.items["lxd.tar.xz"].path // empty' 2>/dev/null | head -1)
+        [ -n "$lxd_path" ] || continue
+        rootfs_path=$(printf '%s\n' "$meta" | jq -r --arg d "$distro" '.products | to_entries[]? | select(.key | startswith($d)) | .value.versions[]?.items["rootfs.squashfs"].path // empty' 2>/dev/null | head -1)
+        [ -n "$rootfs_path" ] || continue
+
+        tmpd=$(mktemp -d)
+        lxd_file="$tmpd/lxd.tar.xz"; rootfs_file="$tmpd/rootfs.squashfs"
+        if download_with_retry "$base/$lxd_path" "$lxd_file" && download_with_retry "$base/$rootfs_path" "$rootfs_file"; then
+            if [ "$distro" = "alpine" ]; then local_alias="alpine/3.23/cloud/$ARCH/ready"; else local_alias="debian/13/cloud/$ARCH/ready"; fi
+            incus image delete "$local_alias" >/dev/null 2>&1 || true
+            if incus image import "$lxd_file" "$rootfs_file" --alias "$local_alias"; then
+                log "$(t "✓ Imported $distro from mirror as $local_alias" "✓ 已从镜像服务器导入 $distro 为 $local_alias")"
+                ok=1
+            else
+                log "$(t "Warning: incus image import from mirror failed for $distro" "警告: 从镜像服务器导入 $distro 失败")"
+            fi
+        else
+            log "$(t "Warning: failed to download $distro image from mirror" "警告: 从镜像服务器下载 $distro 镜像失败")"
+        fi
+        rm -rf "$tmpd"
+    done
+    [ "$ok" = "1" ] || { log "$(t "Mirror provided no importable images" "镜像服务器未提供可导入的镜像")"; return 1; }
+    return 0
+}
+
 # 交互式选择 SSH 登录横幅（欢迎页）预设；已通过参数/环境变量指定时跳过。
 prompt_banner() {
     [ "$INCUS_BANNER_PRESET" != "none" ] && return 0
@@ -1298,7 +1343,19 @@ if systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null || [ -f "$AGENT_BINA
                 import_custom_alpine_base
             fi
             INCUS_IMAGE_REFRESH=1
-            import_incus_images
+            _nc_mirror_ok=0
+            if [ -n "$INCUS_IMAGE_MIRROR" ] && import_incus_images_from_mirror; then
+                _nc_mirror_ok=1
+            else
+                log "$(t "Mirror import failed on update; falling back to default source." "更新时镜像导入失败；回退到默认源。")"
+            fi
+            if [ "$_nc_mirror_ok" = "1" ]; then
+                _nc_saved_mirror="$INCUS_IMAGE_MIRROR"
+                INCUS_IMAGE_MIRROR="" import_incus_images
+                INCUS_IMAGE_MIRROR="$_nc_saved_mirror"
+            else
+                import_incus_images
+            fi
             ;;
     esac
 
@@ -1816,11 +1873,28 @@ if [ "$VIRT_TYPE" = "incus" ]; then
         INCUS_WG_IPV6_SUBNET="$IPV6_SUBNET"
     fi
 
-    # 4. 导入预构建的 ready 镜像（离线目录优先；否则按镜像源 / 远程）
+    # 4. 导入预构建的 ready 镜像（离线目录优先；否则从私有镜像服务器 / 默认源）
     if [ -n "$INCUS_LOCAL_IMAGE_DIR" ]; then
         log "$(t "Using local image dir, skipping remote import." "使用本地镜像目录，跳过远程导入。")"
     else
-        import_incus_images
+        _nc_mirror_ok=0
+        if [ -n "$INCUS_IMAGE_MIRROR" ]; then
+            if import_incus_images_from_mirror; then
+                _nc_mirror_ok=1
+            else
+                log "$(t "Mirror import skipped/failed; will use configured base / default source." "镜像导入跳过/失败；将使用配置源 / 默认源。")"
+            fi
+        fi
+        if [ "$_nc_mirror_ok" = "1" ]; then
+            # 镜像服务器已提供部分发行版：其余（如 debian）从 GitHub 默认源补齐；
+            # 若镜像不可达导致前述导入均失败，则此处一并补齐 alpine
+            _nc_saved_mirror="$INCUS_IMAGE_MIRROR"
+            INCUS_IMAGE_MIRROR="" import_incus_images
+            INCUS_IMAGE_MIRROR="$_nc_saved_mirror"
+        else
+            # 镜像不可用或为非 simplestreams（flat）镜像：按原逻辑使用 --image-mirror 基址 / GitHub
+            import_incus_images
+        fi
     fi
 
     # 5. IPv6 回滚辅助脚本（幂等）；配置备份已在“变更前”阶段完成，此处不再覆盖 latest 快照

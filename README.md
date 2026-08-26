@@ -178,36 +178,47 @@ IPV6_MODE=subnet IPV6_ADDR=2001:db8::1 IPV6_SUBNET=2001:db8::/64 \
 
 以下所有能力均作用于 **`virt_type=incus`**。既可在安装时通过参数指定，也可写入 `config.json` 后由 Agent 读取。
 
-### 1. 私有镜像服务器（推荐）
+### 1. 私有镜像服务器（fork 默认源，推荐）
 
-默认内置镜像源为 **`https://alpine-incus-base.428048.xyz`**。该服务器提供与上游一致的文件布局（`incus-<distro>-<arch>.tar.gz`），可用于完全离线/内网环境部署，避免对 GitHub Releases 与 `images.linuxcontainers.org` 的网络依赖。
+本 Fork 默认内置镜像源为 **`https://alpine-incus-base.428048.xyz`**，是一个 **LXD/Incus simplestreams 镜像服务器**（原生格式 `lxd.tar.xz` + `rootfs.squashfs`），而非扁平 tarball 服务。安装脚本会自动：
+
+1. 读取 `https://alpine-incus-base.428048.xyz/streams/v1/images.json`；
+2. 按其中声明的路径下载对应发行版的 `lxd.tar.xz` 与 `rootfs.squashfs`；
+3. 执行 `incus image import` 并自动别名化为 Agent 期望的 `alpine/3.23/cloud/amd64/ready`。
+
+> 该服务器当前发布 **Alpine（amd64）**。Debian 等未发布的发行版会自动从 GitHub Releases 默认源补齐；因此纯离线部署请配合 `--local-image-dir` 预置全部发行版镜像。
 
 ```bash
-# 方式 A：通过 --image-mirror 覆盖镜像基址（脚本会从 <mirror>/incus-debian-amd64.tar.gz 拉取）
+# fork 默认即使用私有镜像服务器，以下显式写法等价
 bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh) \
   --image-mirror https://alpine-incus-base.428048.xyz
 
-# 方式 B：本地目录离线导入（目录内放置 incus-<distro>-<arch>.tar.gz，无需任何网络）
+# 用你自己的 simplestreams 镜像服务器（任意实现了 streams/v1/images.json 的服务）
+bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh) \
+  --image-mirror https://your-mirror.example.com
+
+# 完全离线：本地目录预置 incus-<distro>-<arch>.tar.gz（无需任何网络）
 bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh) \
   --local-image-dir /root/incus-images
 ```
 
-> 若你的私有服务器路径不同，只需保证其根目录下存在 `incus-debian-amd64.tar.gz`、`incus-alpine-amd64.tar.gz` 等文件即可被 `--image-mirror` 正确解析。
+> **兼容性**：`--image-mirror` 同时支持最简流（simplestreams）与传统的扁平 tarball 基址——脚本会先尝试 simplestreams 元数据，失败则回退到 `<mirror>/incus-<distro>-<arch>.tar.gz`。留空（或 `--image-mirror ""`）则直接使用 GitHub Releases。
 
 ### 2. 定制 alpine 基础镜像
 
-对于需要预装特定软件/内核参数的场景，可使用自己的 alpine-base 镜像：
+对于需要预装特定软件/内核参数的场景，可使用自己的 alpine-base 镜像（本地 tar.gz 或已 `incus image import` 的别名）：
 
 ```bash
-# 从私有镜像服务器下载定制 alpine base
-curl -O https://alpine-incus-base.428048.xyz/alpine-base.tar.gz
-
-# 安装时指定本地文件（会导入为 incus 别名 podcctv/alpine-base 并用于所有 alpine 容器）
+# 安装时指定本地文件（导入为 incus 别名 podcctv/alpine-base，用于所有 alpine 容器）
 bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh) \
   --alpine-base ./alpine-base.tar.gz
+
+# 或直接传已存在的 incus 镜像别名
+bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh) \
+  --alpine-base my-alpine
 ```
 
-> 若镜像已提前 `incus image import` 并命名别名（如 `my-alpine`），可直接传别名：`--alpine-base my-alpine`。
+> 定制 alpine-base 由你自行构建/托管（例如基于 https://github.com/podcctv/alpine-base ），与上面的 simplestreams 镜像服务器是两套独立资源。
 
 ### 3. SSH 登录欢迎页 / 横幅
 
