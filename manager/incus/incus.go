@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/netip"
 	"runtime"
 	"strings"
 	"sync"
@@ -56,17 +57,20 @@ func New(database *db.DB, ipv6Mode, ipv6Subnet, ipv6Addr, ipv6Iface, bannerPrese
 	if ipv6Alloc <= 0 {
 		ipv6Alloc = 1
 	}
+	if ipv6Alloc > 15 {
+		return nil, fmt.Errorf("incus_ipv6_alloc must be between 1 and 15")
+	}
 
 	return &Manager{
-		client:      c,
-		db:          database,
-		ipv6Mode:    ipv6Mode,
-		ipv6Subnet:  ipv6Subnet,
-		ipv6Addr:    ipv6Addr,
-		ipv6Iface:   ipv6Iface,
-		ipv6Alloc:   ipv6Alloc,
-		alpineBase:  alpineBase,
-		imageMirror: imageMirror,
+		client:       c,
+		db:           database,
+		ipv6Mode:     ipv6Mode,
+		ipv6Subnet:   ipv6Subnet,
+		ipv6Addr:     ipv6Addr,
+		ipv6Iface:    ipv6Iface,
+		ipv6Alloc:    ipv6Alloc,
+		alpineBase:   alpineBase,
+		imageMirror:  imageMirror,
 		bannerPreset: bannerPreset,
 		bannerText:   bannerText,
 		ipv6Only:     ipv6Only,
@@ -157,11 +161,8 @@ func (m *Manager) createVM(ctx context.Context, req *agent.CmdCreateVM) error {
 
 	// 计算掩码以便在 cloud-init 中使用
 	ipv6Mask := "64"
-	if m.ipv6Mode == "subnet" && m.ipv6Subnet != "" {
-		parts := strings.SplitN(m.ipv6Subnet, "::/", 2)
-		if len(parts) == 2 {
-			ipv6Mask = parts[1]
-		}
+	if prefix, err := netip.ParsePrefix(m.ipv6Subnet); err == nil {
+		ipv6Mask = fmt.Sprintf("%d", prefix.Bits())
 	}
 	gw6 := m.ipv6Gateway()
 
@@ -598,8 +599,8 @@ runcmd:
 	}
 
 	op, err := m.client.CreateInstance(api.InstancesPost{
-		Name: builderName,
-		Type: api.InstanceTypeContainer,
+		Name:   builderName,
+		Type:   api.InstanceTypeContainer,
 		Source: builderSource,
 		InstancePut: api.InstancePut{
 			Config: map[string]string{
@@ -618,8 +619,8 @@ runcmd:
 				Alias:    baseAlias,
 			}
 			op, err = m.client.CreateInstance(api.InstancesPost{
-				Name: builderName,
-				Type: api.InstanceTypeContainer,
+				Name:   builderName,
+				Type:   api.InstanceTypeContainer,
 				Source: builderSource,
 				InstancePut: api.InstancePut{
 					Config: map[string]string{
@@ -696,14 +697,18 @@ func (m *Manager) computeIPs(idx int) (ipv4 string, ipv6s []string) {
 
 	switch m.ipv6Mode {
 	case "subnet":
-		if m.ipv6Subnet != "" {
-			parts := strings.SplitN(m.ipv6Subnet, "::/", 2)
-			if len(parts) == 2 {
-				prefix := parts[0]
-				base := idx * n
-				for k := 0; k < n; k++ {
-					ipv6s = append(ipv6s, fmt.Sprintf("%s::%x", prefix, base+k))
+		prefix, err := netip.ParsePrefix(m.ipv6Subnet)
+		if err == nil && prefix.Addr().Is6() {
+			prefix = prefix.Masked()
+			// idx starts at 2. Reserve offset 0 and 1, then pack each VM's
+			// allocation contiguously within the first /112.
+			base := uint64(2 + (idx-2)*n)
+			for k := 0; k < n; k++ {
+				addr, ok := addIPv6Offset(prefix.Addr(), base+uint64(k))
+				if !ok || !prefix.Contains(addr) {
+					return ipv4, nil
 				}
+				ipv6s = append(ipv6s, addr.String())
 			}
 		}
 	case "snat":
@@ -720,14 +725,38 @@ func (m *Manager) computeIPs(idx int) (ipv4 string, ipv6s []string) {
 // snat 模式使用 ULA 网关；其余回退到宿主机地址。
 func (m *Manager) ipv6Gateway() string {
 	if m.ipv6Mode == "subnet" && m.ipv6Subnet != "" {
-		if parts := strings.SplitN(m.ipv6Subnet, "::/", 2); len(parts) == 2 {
-			return parts[0] + "::1"
+		if prefix, err := netip.ParsePrefix(m.ipv6Subnet); err == nil && prefix.Addr().Is6() {
+			// The installer assigns the last address of the first /112 to
+			// incusbr0. This avoids colliding with routed-prefix host ::1/128.
+			if addr, ok := addIPv6Offset(prefix.Masked().Addr(), 0xffff); ok && prefix.Contains(addr) {
+				return addr.String()
+			}
 		}
 	}
 	if m.ipv6Addr != "" {
 		return m.ipv6Addr
 	}
 	return "fd91:cafe:cafe:10::1"
+}
+
+// addIPv6Offset adds a small allocation offset to an IPv6 address without
+// relying on textual `::` placement. It therefore works for every valid CIDR
+// spelling, including fully expanded and non-/64 prefixes.
+func addIPv6Offset(addr netip.Addr, offset uint64) (netip.Addr, bool) {
+	if !addr.Is6() {
+		return netip.Addr{}, false
+	}
+	b := addr.As16()
+	carry := offset
+	for i := len(b) - 1; i >= 0 && carry > 0; i-- {
+		sum := uint64(b[i]) + (carry & 0xff)
+		b[i] = byte(sum)
+		carry = (carry >> 8) + (sum >> 8)
+	}
+	if carry != 0 {
+		return netip.Addr{}, false
+	}
+	return netip.AddrFrom16(b), true
 }
 
 // ── 自定义欢迎页 / SSH 登录横幅 ─────────────────────────────────────────────────

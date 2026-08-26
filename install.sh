@@ -18,7 +18,8 @@ RFW_BIN_DIR="$AGENT_BIN_DIR"   # rfw 与 agent 放在同一目录，匹配面板
 RFW_API_ADDR="127.0.0.1:7734"  # rfw 仅监听本地，由 agent 面板反代
 PODMAN_NETWORK="narwhal-net"
 
-DOWNLOAD_BASE="https://github.com/narwhal-cloud/runman-agent/releases/latest/download"
+AGENT_RELEASE_TAG="${AGENT_RELEASE_TAG:-continuous}"
+DOWNLOAD_BASE="${RUNMAN_AGENT_DOWNLOAD_BASE:-https://github.com/podcctv/runman-agent/releases/download/$AGENT_RELEASE_TAG}"
 CLOUD_HYPERVISOR_BASE="https://github.com/cloud-hypervisor/cloud-hypervisor/releases/latest/download"
 # 预构建系统镜像（cloudhv/incus），由 narwhal-cloud/images 仓库 CI 每月构建
 VM_IMAGES_BASE="https://github.com/narwhal-cloud/images/releases/download/vm-latest"
@@ -33,7 +34,7 @@ log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"; }
 die() { log "$1" >&2; exit 1; }
 
 # ── IPv6 配置备份 / 一键回滚 ───────────────────────────────────────────────────
-# 备份对象：内核参数(sysctl)、/etc/network/interfaces、incusbr0 网络配置、关键变量。
+# 备份对象：内核参数、网卡、journald/zram、Incus 网络及本安装器的 systemd 文件。
 # 回滚时按备份快照逐一恢复，便于本机/容器 IPv6 分配策略试错后快速还原。
 
 backup_ipv6_config() {
@@ -46,6 +47,11 @@ backup_ipv6_config() {
     [ -f /etc/network/interfaces ] && cp /etc/network/interfaces "$dir/interfaces"
     command -v incus >/dev/null 2>&1 && incus network show incusbr0 >"$dir/incusbr0.network" 2>/dev/null
     [ -f /etc/modules-load.d/runman-incus.conf ] && cp /etc/modules-load.d/runman-incus.conf "$dir/runman-incus.conf"
+    [ -f /etc/systemd/journald.conf ] && cp /etc/systemd/journald.conf "$dir/journald.conf"
+    [ -f /etc/systemd/zram-generator.conf ] && cp /etc/systemd/zram-generator.conf "$dir/zram-generator.conf"
+    [ -f /etc/udev/rules.d/99-loop-directio.rules ] && cp /etc/udev/rules.d/99-loop-directio.rules "$dir/loop-directio.rules"
+    [ -f /etc/containers/storage.conf ] && cp /etc/containers/storage.conf "$dir/containers-storage.conf"
+    [ -f /etc/systemd/system/rfw.service ] && cp /etc/systemd/system/rfw.service "$dir/rfw.service"
     {
         echo "IPV6_MODE=${IPV6_MODE:-}"
         echo "IPV6_SUBNET=${IPV6_SUBNET:-}"
@@ -56,6 +62,11 @@ backup_ipv6_config() {
         echo "HAD_SYSCTL=$( [ -f /etc/sysctl.d/99-narwhalcloud.conf ] && echo 1 || echo 0 )"
         echo "HAD_MODULES=$( [ -f /etc/modules-load.d/runman-incus.conf ] && echo 1 || echo 0 )"
         echo "HAD_INCUSBR0=$( command -v incus >/dev/null 2>&1 && incus network show incusbr0 >/dev/null 2>&1 && echo 1 || echo 0 )"
+        echo "HAD_JOURNALD=$( [ -f /etc/systemd/journald.conf ] && echo 1 || echo 0 )"
+        echo "HAD_ZRAM=$( [ -f /etc/systemd/zram-generator.conf ] && echo 1 || echo 0 )"
+        echo "HAD_LOOP_RULE=$( [ -f /etc/udev/rules.d/99-loop-directio.rules ] && echo 1 || echo 0 )"
+        echo "HAD_STORAGE_CONF=$( [ -f /etc/containers/storage.conf ] && echo 1 || echo 0 )"
+        echo "HAD_RFW_SERVICE=$( [ -f /etc/systemd/system/rfw.service ] && echo 1 || echo 0 )"
     } > "$dir/meta.env"
     echo "$dir" > "$INCUS_IPV6_BACKUP_DIR/latest"
     echo "$dir"
@@ -64,8 +75,20 @@ backup_ipv6_config() {
 restore_ipv6_config() {
     local target="${1:-$(cat "$INCUS_IPV6_BACKUP_DIR/latest" 2>/dev/null)}"
     [ -n "$target" ] && [ -d "$target" ] || { log "$(t "No IPv6 backup found" "未找到 IPv6 备份")"; return 1; }
-    # 载入备份元数据（含 HAD_* 标记）
-    [ -f "$target/meta.env" ] && . "$target/meta.env"
+    # 元数据只读取固定的 0/1 标记，不 source 文件，避免环境值被当成 shell 执行。
+    meta_flag() {
+        local name="$1" value
+        value=$(sed -n "s/^${name}=\([01]\)$/\1/p" "$target/meta.env" 2>/dev/null | head -1)
+        echo "${value:-0}"
+    }
+    HAD_SYSCTL=$(meta_flag HAD_SYSCTL)
+    HAD_MODULES=$(meta_flag HAD_MODULES)
+    HAD_INCUSBR0=$(meta_flag HAD_INCUSBR0)
+    HAD_JOURNALD=$(meta_flag HAD_JOURNALD)
+    HAD_ZRAM=$(meta_flag HAD_ZRAM)
+    HAD_LOOP_RULE=$(meta_flag HAD_LOOP_RULE)
+    HAD_STORAGE_CONF=$(meta_flag HAD_STORAGE_CONF)
+    HAD_RFW_SERVICE=$(meta_flag HAD_RFW_SERVICE)
     # sysctl：有原文件则恢复；无原文件（安装时新建）则直接删除
     if [ -f "$target/sysctl.conf" ]; then
         cp "$target/sysctl.conf" /etc/sysctl.d/99-narwhalcloud.conf && sysctl -p /etc/sysctl.d/99-narwhalcloud.conf >/dev/null 2>&1
@@ -121,16 +144,29 @@ EOF
 do_uninstall() {
     [ "$(id -u)" = "0" ] || die "$(t "Uninstall requires root." "卸载需要 root 权限。")"
     log "$(t "=== NarwhalCloud Agent uninstall ===" "=== NarwhalCloud Agent 卸载 ===")"
+    local install_origin_restored=0
 
     # 0. 最先恢复 IPv6 / 网卡配置（最关键：避免遗留错误路由/转发影响业务）
     if [ -d "$INCUS_IPV6_BACKUP_DIR" ]; then
-        restore_ipv6_config || log "$(t "IPv6 restore skipped (no backup)." "IPv6 恢复跳过（无备份）。")"
+        local origin
+        origin=$(cat "$INCUS_IPV6_BACKUP_DIR/install-origin" 2>/dev/null || true)
+        if [ -n "$origin" ] && restore_ipv6_config "$origin"; then
+            install_origin_restored=1
+        else
+            log "$(t "System config restore skipped (no install-origin backup)." "系统配置恢复跳过（无安装前基线备份）。")"
+        fi
     fi
 
     # 1. 停止并禁用服务（仅本 agent，不动其它业务服务）
     if command -v systemctl >/dev/null 2>&1; then
         systemctl stop "$AGENT_SERVICE" 2>/dev/null || true
         systemctl disable "$AGENT_SERVICE" 2>/dev/null || true
+        # rfw 是本安装器的可选组件；安装前若已存在，其 service 文件已在上一步恢复。
+        if [ "$install_origin_restored" = "1" ] && [ "${HAD_RFW_SERVICE:-0}" = "0" ]; then
+            systemctl stop rfw 2>/dev/null || true
+            systemctl disable rfw 2>/dev/null || true
+            rm -f /etc/systemd/system/rfw.service
+        fi
     fi
     rm -f "/etc/systemd/system/${AGENT_SERVICE}.service"
     systemctl daemon-reload 2>/dev/null || true
@@ -150,7 +186,7 @@ do_uninstall() {
     fi
 
     log "$(t "Uninstall complete. Incus containers/images and other services are preserved." "卸载完成。已保留 incus 容器/镜像及其它业务服务。")"
-    log "$(t "IPv6 backups kept at: $INCUS_IPV6_BACKUP_DIR (use ipv6-rollback.sh or --rollback-ipv6 to restore)" "IPv6 备份保留于: $INCUS_IPV6_BACKUP_DIR（可用 ipv6-rollback.sh 或 --rollback-ipv6 恢复）")"
+    log "$(t "Backups kept at: $INCUS_IPV6_BACKUP_DIR (rerun install.sh --rollback-ipv6 if needed)" "备份保留于: $INCUS_IPV6_BACKUP_DIR（如有需要可重新运行 install.sh --rollback-ipv6）")"
     log "$(t "To also remove incus artifacts: incus network delete incusbr0 ; incus image delete <alias>" "如需同时清理 incus：incus network delete incusbr0；incus image delete <别名>")"
 }
 
@@ -171,8 +207,11 @@ INCUS_BANNER_PRESET="${INCUS_BANNER_PRESET:-none}" # none / default / minimal / 
 INCUS_BANNER_TEXT="${INCUS_BANNER_TEXT:-}"         # preset=custom 时的完整横幅文本
 INCUS_IPV6_BACKUP_DIR="${INCUS_IPV6_BACKUP_DIR:-/var/lib/narwhal-agent/backups}" # IPv6 配置备份目录
 INCUS_IPV6_ONLY="${INCUS_IPV6_ONLY:-}" # 设为 1 时新建容器为纯 IPv6（不分配 IPv4），需 IPv6 模式为 subnet/snat
+IPV6_ROUTED="${IPV6_ROUTED:-0}"         # 1=独立 routed prefix（6in4/WireGuard 等），无需上游 NDP
+VIRT_TYPE_REQUESTED="${VIRT_TYPE_REQUESTED:-}"
+NON_INTERACTIVE="${NON_INTERACTIVE:-0}"
 
-# 一键模式：--backup-ipv6 / --rollback-ipv6 直接对当前主机做 IPv6 配置备份/回滚后退出
+# 一键模式：IPv6 探测 / 备份 / 回滚，处理后退出
 IPV6_ONESHOT_MODE="${IPV6_ONESHOT_MODE:-}"
 # 一键卸载模式：--uninstall 撤销本安装器引入的全部变更（含 IPv6 / 网卡恢复）后退出
 UNINSTALL="${UNINSTALL:-}"
@@ -181,22 +220,44 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         zh) LANG_CODE="zh"; shift ;;
         en) LANG_CODE="en"; shift ;;
+        --virt) [ $# -ge 2 ] || die "--virt requires a value"; VIRT_TYPE_REQUESTED="$2"; shift 2 ;;
         --install-rfw) INSTALL_RFW_FORCE=1; shift ;;
         --force-images) FORCE_IMAGE_REFRESH=1; shift ;;
-        --image-mirror) INCUS_IMAGE_MIRROR="$2"; shift 2 ;;
-        --local-image-dir) INCUS_LOCAL_IMAGE_DIR="$2"; shift 2 ;;
-        --alpine-base) INCUS_ALPINE_BASE="$2"; shift 2 ;;
-        --ipv6-alloc) INCUS_IPV6_ALLOC="$2"; shift 2 ;;
-        --wg-ipv6-subnet) INCUS_WG_IPV6_SUBNET="$2"; shift 2 ;;
-        --banner-preset) INCUS_BANNER_PRESET="$2"; shift 2 ;;
-        --banner-text) INCUS_BANNER_TEXT="$2"; shift 2 ;;
+        --image-mirror) [ $# -ge 2 ] || die "--image-mirror requires a value"; INCUS_IMAGE_MIRROR="$2"; shift 2 ;;
+        --local-image-dir) [ $# -ge 2 ] || die "--local-image-dir requires a value"; INCUS_LOCAL_IMAGE_DIR="$2"; shift 2 ;;
+        --alpine-base) [ $# -ge 2 ] || die "--alpine-base requires a value"; INCUS_ALPINE_BASE="$2"; shift 2 ;;
+        --ipv6-alloc) [ $# -ge 2 ] || die "--ipv6-alloc requires a value"; INCUS_IPV6_ALLOC="$2"; shift 2 ;;
+        --wg-ipv6-subnet) [ $# -ge 2 ] || die "--wg-ipv6-subnet requires a value"; INCUS_WG_IPV6_SUBNET="$2"; shift 2 ;;
+        --ipv6-mode) [ $# -ge 2 ] || die "--ipv6-mode requires a value"; IPV6_MODE="$2"; shift 2 ;;
+        --ipv6-addr) [ $# -ge 2 ] || die "--ipv6-addr requires a value"; IPV6_ADDR="$2"; shift 2 ;;
+        --ipv6-subnet) [ $# -ge 2 ] || die "--ipv6-subnet requires a value"; IPV6_SUBNET="$2"; shift 2 ;;
+        --ipv6-iface) [ $# -ge 2 ] || die "--ipv6-iface requires a value"; IPV6_IFACE="$2"; shift 2 ;;
+        --ipv6-routed) IPV6_ROUTED=1; shift ;;
+        --banner-preset) [ $# -ge 2 ] || die "--banner-preset requires a value"; INCUS_BANNER_PRESET="$2"; shift 2 ;;
+        --banner-text) [ $# -ge 2 ] || die "--banner-text requires a value"; INCUS_BANNER_TEXT="$2"; shift 2 ;;
         --ipv6-only) INCUS_IPV6_ONLY=1; shift ;;
+        -y|--yes|--non-interactive) NON_INTERACTIVE=1; shift ;;
+        --detect-ipv6) IPV6_ONESHOT_MODE="detect"; shift ;;
         --backup-ipv6) IPV6_ONESHOT_MODE="backup"; shift ;;
         --rollback-ipv6) IPV6_ONESHOT_MODE="rollback"; shift ;;
         --uninstall) UNINSTALL=1; shift ;;
-        *) shift ;;
+        *) die "Unknown option: $1" ;;
     esac
 done
+
+case "$VIRT_TYPE_REQUESTED" in
+    ""|podman|cloudhv|incus) ;;
+    *) die "Invalid --virt value '$VIRT_TYPE_REQUESTED' (expected podman, cloudhv, or incus)" ;;
+esac
+case "${IPV6_MODE:-}" in
+    ""|none|snat|subnet) ;;
+    *) die "Invalid IPv6 mode '${IPV6_MODE}' (expected none, snat, or subnet)" ;;
+esac
+case "$INCUS_IPV6_ALLOC" in
+    ''|*[!0-9]*) die "--ipv6-alloc must be an integer from 1 to 15" ;;
+esac
+[ "$INCUS_IPV6_ALLOC" -ge 1 ] && [ "$INCUS_IPV6_ALLOC" -le 15 ] \
+    || die "--ipv6-alloc must be an integer from 1 to 15"
 
 # ── 一键 IPv6 备份 / 回滚（独立模式，处理完即退出）──
 if [ "$IPV6_ONESHOT_MODE" = "backup" ]; then
@@ -316,9 +377,64 @@ ipv6_plus_one() {
     python3 -c "import ipaddress; print(str(ipaddress.IPv6Address('$1') + 1))" 2>/dev/null
 }
 
-# Returns "none" or "IFACE|ADDR|PREFIX"
+# Detect a separately routed prefix commonly used by HE 6in4/WireGuard setups.
+# Such hosts have the tunnel link address on the default interface and one
+# address from the routed prefix (often /128 on lo) on another interface.  A
+# temporary source-address probe proves the candidate before it is selected.
+# Returns "SUBNET|HOST_ADDR" or an empty string.
+detect_routed_ipv6_subnet() {
+    local uplink_iface="$1" uplink_addr="$2"
+    local rec cand_iface cand_cidr candidate host_addr test_addr connected
+
+    while IFS='|' read -r cand_iface cand_cidr; do
+        [ -n "$cand_iface" ] && [ "$cand_iface" != "$uplink_iface" ] || continue
+        rec=$(python3 - "$cand_cidr" "$uplink_addr" <<'PY' 2>/dev/null || true
+import ipaddress
+import sys
+
+iface = ipaddress.IPv6Interface(sys.argv[1])
+uplink = ipaddress.IPv6Address(sys.argv[2])
+# A /128 on lo is the usual routed-prefix gateway marker.  Derive /64 and
+# prove it below; false candidates fail the independent-source probe.
+prefix = min(iface.network.prefixlen, 64)
+network = ipaddress.IPv6Network((iface.ip, prefix), strict=False)
+if uplink in network:
+    raise SystemExit(0)
+test = network.network_address + 0xfffe
+print(f"{network}|{iface.ip}|{test}")
+PY
+)
+        [ -n "$rec" ] || continue
+        candidate=$(echo "$rec" | cut -d'|' -f1)
+        host_addr=$(echo "$rec" | cut -d'|' -f2)
+        test_addr=$(echo "$rec" | cut -d'|' -f3)
+
+        connected=0
+        if ip -6 addr add "$test_addr/128" dev lo 2>/dev/null; then
+            for endpoint in ip.sb ipv6.icanhazip.com www.cloudflare.com; do
+                if curl -6 --interface "$test_addr" -s --max-time 8 "$endpoint" >/dev/null 2>&1; then
+                    connected=1
+                    break
+                fi
+            done
+            ip -6 addr del "$test_addr/128" dev lo 2>/dev/null || true
+        fi
+        if [ "$connected" = "1" ]; then
+            echo "$candidate|$host_addr"
+            return 0
+        fi
+    done < <(ip -o -6 addr show scope global 2>/dev/null | awk '{print $2 "|" $4}')
+    return 0
+}
+
+# Returns "none" or "IFACE|ADDR|PREFIX|SUBNET|ROUTED".
 detect_and_configure_ipv6() {
     log "$(t "Detecting public IPv6..." "开始检测公网 IPv6...")" >&2
+    command -v python3 >/dev/null 2>&1 || {
+        log "$(t "python3 is required for safe IPv6 prefix arithmetic." "安全计算 IPv6 前缀需要 python3。")" >&2
+        echo "none"
+        return 1
+    }
     # 多厂商：ip.sb 在境内或某些时段不可达，依次尝试多个公共端点；
     # 全部失败但默认路由存在时，仍按"内部 IPv6 可用"继续，避免误判。
     local connected=0 endpoint
@@ -388,6 +504,37 @@ detect_and_configure_ipv6() {
     prefix_len=$(echo "$ipv6_full" | cut -d'/' -f2)
     log "$(t "IPv6 address: $ipv6_addr/$prefix_len" "IPv6 地址: $ipv6_addr/$prefix_len")" >&2
 
+    # Prefer a separately routed prefix over the point-to-point/tunnel link
+    # prefix.  No NDP is needed for a routed prefix and the uplink address must
+    # keep its original mask so the tunnel gateway remains reachable.
+    local routed routed_subnet routed_host routed_prefix
+    routed=$(detect_routed_ipv6_subnet "$iface" "$ipv6_addr")
+    if [ -n "$routed" ]; then
+        routed_subnet=$(echo "$routed" | cut -d'|' -f1)
+        routed_host=$(echo "$routed" | cut -d'|' -f2)
+        routed_prefix=$(echo "$routed_subnet" | cut -d'/' -f2)
+        log "$(t "✓ Routed IPv6 prefix confirmed: $routed_subnet (uplink $iface)." \
+            "✓ 已验证独立路由 IPv6 前缀: $routed_subnet（上行 $iface）。")" >&2
+        echo "$iface|$routed_host|$routed_prefix|$routed_subnet|1"
+        return 0
+    fi
+    restore_managed_file() {
+        local backup="$1" destination="$2" existed="$3"
+        if [ -f "$target/$backup" ]; then
+            mkdir -p "$(dirname "$destination")"
+            cp "$target/$backup" "$destination"
+        elif [ "$existed" = "0" ]; then
+            rm -f "$destination"
+        fi
+    }
+    restore_managed_file journald.conf /etc/systemd/journald.conf "$HAD_JOURNALD"
+    restore_managed_file zram-generator.conf /etc/systemd/zram-generator.conf "$HAD_ZRAM"
+    restore_managed_file loop-directio.rules /etc/udev/rules.d/99-loop-directio.rules "$HAD_LOOP_RULE"
+    restore_managed_file containers-storage.conf /etc/containers/storage.conf "$HAD_STORAGE_CONF"
+    restore_managed_file rfw.service /etc/systemd/system/rfw.service "$HAD_RFW_SERVICE"
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl restart systemd-journald 2>/dev/null || true
+
     # subnet 模式要求前缀 ≤ /64，且 ISP 必须真正允许子网内多个 IP 出站。
     # 有些 ISP 接口显示 /64 但做了严格 uRPF，只允许分配的单个 /128 出站。
     # /65-/127 前缀太小，/128 单地址，均使用 SNAT 模式。
@@ -409,20 +556,25 @@ detect_and_configure_ipv6() {
         fi
         if [ "$subnet_ok" = "1" ]; then
             log "$(t "✓ Subnet mode confirmed (/$prefix_len), additional IPs are routable." "✓ 子网模式验证通过 (/$prefix_len)，子网内多 IP 可独立出站。")" >&2
-            echo "$iface|$ipv6_addr|$prefix_len"
+            echo "$iface|$ipv6_addr|$prefix_len||0"
         else
             log "$(t "⚠ ISP blocks non-assigned source IPs (strict uRPF), falling back to SNAT mode." "⚠ ISP 严格过滤非分配源 IP（strict uRPF），回退到 SNAT 模式。")" >&2
-            echo "$iface|$ipv6_addr|128"
+            echo "$iface|$ipv6_addr|128||0"
         fi
     elif [ "$prefix_len" -eq 128 ]; then
         log "$(t "✓ Public IPv6 single address (/128) detected, SNAT mode." "✓ 检测到公网 IPv6 单地址 (/128)，使用 SNAT 模式。")" >&2
-        echo "$iface|$ipv6_addr|128"
+        echo "$iface|$ipv6_addr|128||0"
     else
         # /65-/127：前缀不足以划分子网，回退到 SNAT
         log "$(t "IPv6 prefix /$prefix_len is too small for subnet mode (need ≤/64), falling back to SNAT." "IPv6 前缀 /$prefix_len 不足以用于子网模式（需 ≤/64），回退到 SNAT 模式。")" >&2
-        echo "$iface|$ipv6_addr|128"
+        echo "$iface|$ipv6_addr|128||0"
     fi
 }
+
+if [ "$IPV6_ONESHOT_MODE" = "detect" ]; then
+    detect_and_configure_ipv6
+    exit 0
+fi
 
 enable_bbr() {
     log "$(t "Configuring kernel parameters (BBR + forwarding)..." "配置内核参数 (BBR + 转发)...")"
@@ -1259,6 +1411,7 @@ import_incus_images_from_mirror() {
 
 # 交互式选择 SSH 登录横幅（欢迎页）预设；已通过参数/环境变量指定时跳过。
 prompt_banner() {
+    [ "$NON_INTERACTIVE" = "1" ] && return 0
     [ "$INCUS_BANNER_PRESET" != "none" ] && return 0
     read -rp "$(t "Configure SSH login banner? [1=none 2=default 3=project 4=custom]: " "配置 SSH 登录横幅? [1=无 2=默认 3=项目模板 4=自定义]: ")" _b
     case "${_b:-1}" in
@@ -1382,33 +1535,40 @@ log "$(t "Starting fresh installation..." "开始全新安装流程...")"
 
 # ── Virtualization type selection ──────────────────────────────────────────────
 
-printf "$(t "Select virtualization type:" "选择虚拟化类型：")\n"
-printf "  1) Podman container ($(t "recommended" "推荐"))\n"
-printf "  2) cloud-hypervisor VM ($(t "experimental, requires /dev/kvm" "实验性，需要 /dev/kvm"))\n"
-printf "  3) Incus (LXC) ($(t "experimental" "实验性"))\n"
-log "$(t "WARNING: Types 2 and 3 are currently experimental and may not be stable." "警告：选项 2 和 3 目前处于实验阶段，稳定性可能不足。")"
-read -rp "> " _virt_choice
-case "${_virt_choice}" in
-    2)
-        VIRT_TYPE="cloudhv"
-        # 检查 KVM 支持
-        if [ ! -e "/dev/kvm" ]; then
-            log "$(t "ERROR: /dev/kvm not found. KVM is required for cloud-hypervisor." "错误: 未找到 /dev/kvm。cloud-hypervisor 需要 KVM 支持。")"
-            log "$(t "Please enable KVM in BIOS or use nested virtualization if running in a VM." "请在 BIOS 中启用 KVM，或在虚拟机中启用嵌套虚拟化。")"
-            exit 1
-        fi
-        log "$(t "✓ KVM support detected." "✓ 检测到 KVM 支持。")"
-        ;;
-    3)
-        VIRT_TYPE="incus"
-        ;;
-    *) VIRT_TYPE="podman" ;;
-esac
+if [ -n "$VIRT_TYPE_REQUESTED" ]; then
+    VIRT_TYPE="$VIRT_TYPE_REQUESTED"
+else
+    printf "$(t "Select virtualization type:" "选择虚拟化类型：")\n"
+    printf "  1) Podman container ($(t "recommended" "推荐"))\n"
+    printf "  2) cloud-hypervisor VM ($(t "experimental, requires /dev/kvm" "实验性，需要 /dev/kvm"))\n"
+    printf "  3) Incus (LXC) ($(t "experimental" "实验性"))\n"
+    log "$(t "WARNING: Types 2 and 3 are currently experimental and may not be stable." "警告：选项 2 和 3 目前处于实验阶段，稳定性可能不足。")"
+    read -rp "> " _virt_choice
+    case "${_virt_choice}" in
+        2) VIRT_TYPE="cloudhv" ;;
+        3) VIRT_TYPE="incus" ;;
+        *) VIRT_TYPE="podman" ;;
+    esac
+fi
+if [ "$VIRT_TYPE" = "cloudhv" ]; then
+    if [ ! -e "/dev/kvm" ]; then
+        die "$(t "ERROR: /dev/kvm not found. KVM is required for cloud-hypervisor." "错误: 未找到 /dev/kvm。cloud-hypervisor 需要 KVM 支持。")"
+    fi
+    log "$(t "✓ KVM support detected." "✓ 检测到 KVM 支持。")"
+fi
 log "$(t "Selected virtualization type: $VIRT_TYPE" "选择的虚拟化类型: $VIRT_TYPE")"
 
 # ── Installation ───────────────────────────────────────────────────────────────
 
 install_packages "$VIRT_TYPE"
+# 在任何受管系统文件变更之前保存唯一的安装基线。后续手工 --backup-ipv6
+# 只更新 latest，不覆盖 install-origin，确保 --uninstall 永远恢复到安装前。
+if [ ! -s "$INCUS_IPV6_BACKUP_DIR/install-origin" ]; then
+    if b=$(backup_ipv6_config); then
+        echo "$b" > "$INCUS_IPV6_BACKUP_DIR/install-origin"
+        log "$(t "System config baseline saved to $b" "系统配置安装前基线已保存至 $b")"
+    fi
+fi
 if [ "$VIRT_TYPE" = "podman" ]; then
     check_podman_version
 fi
@@ -1524,14 +1684,6 @@ configure_host_ipv6_routing() {
 _USER_IPV6_MODE="${IPV6_MODE:-}"
 IPV6_MODE="none"
 
-# ── 在任何 IPv6 / 网卡修改之前，先做“变更前”完整备份（供卸载/回滚恢复）──
-if [ "$_USER_IPV6_MODE" != "none" ]; then
-    install_ipv6_rollback_helper 2>/dev/null || true
-    if b=$(backup_ipv6_config); then
-        log "$(t "IPv6 config backed up (pre-change) to $b" "IPv6 配置已备份（变更前）至 $b")"
-    fi
-fi
-
 IPV6_CONFIG="none"
 
 if [ "$_USER_IPV6_MODE" = "none" ]; then
@@ -1546,7 +1698,11 @@ elif [ -n "$_USER_IPV6_MODE" ]; then
     log "$(t "IPv6 mode pre-set to '$_USER_IPV6_MODE', auto-detecting IPv6..." "IPv6 模式已预设为 '$_USER_IPV6_MODE'，自动检测 IPv6...")"
     IPV6_CONFIG=$(detect_and_configure_ipv6)
 else
-    read -rp "$(t "Enable public IPv6 detection? [Y/n]: " "是否进行公网 IPv6 检测? [Y/n]: ")" _ipv6
+    if [ "$NON_INTERACTIVE" = "1" ]; then
+        _ipv6=Y
+    else
+        read -rp "$(t "Enable public IPv6 detection? [Y/n]: " "是否进行公网 IPv6 检测? [Y/n]: ")" _ipv6
+    fi
     if [[ "${_ipv6:-Y}" =~ ^[Yy]$ ]]; then
         IPV6_CONFIG=$(detect_and_configure_ipv6)
         if [ "$IPV6_CONFIG" = "none" ]; then
@@ -1568,6 +1724,8 @@ if [ "$IPV6_CONFIG" != "none" ]; then
     [ -z "$IPV6_IFACE" ] && IPV6_IFACE=$(echo "$IPV6_CONFIG" | cut -d'|' -f1)
     [ -z "$IPV6_ADDR"  ] && IPV6_ADDR=$(echo  "$IPV6_CONFIG" | cut -d'|' -f2)
     IPV6_PREFIX=$(echo "$IPV6_CONFIG" | cut -d'|' -f3)
+    [ -z "$IPV6_SUBNET" ] && IPV6_SUBNET=$(echo "$IPV6_CONFIG" | cut -d'|' -f4)
+    [ "$IPV6_ROUTED" = "1" ] || IPV6_ROUTED=$(echo "$IPV6_CONFIG" | cut -d'|' -f5)
 fi
 
 # 从 IPV6_SUBNET 提取前缀长度（当检测未运行或用户自定义子网时）
@@ -1632,7 +1790,7 @@ if [ "$VIRT_TYPE" = "cloudhv" ] || [ "$VIRT_TYPE" = "incus" ]; then
     if [ "$IPV6_MODE" = "none" ]; then
         log "$(t "No public IPv6, IPv6 will not be configured." "无公网 IPv6，将不配置 IPv6。")"
     elif [ "$IPV6_MODE" = "subnet" ]; then
-        if [ -n "$IPV6_IFACE" ]; then
+        if [ -n "$IPV6_IFACE" ] && [ "$IPV6_ROUTED" != "1" ]; then
             configure_host_ipv6_routing "$IPV6_IFACE" "$IPV6_ADDR"
         fi
         log "$(t "✓ IPv6 subnet mode: $IPV6_SUBNET, VMs will get independent addresses." "✓ IPv6 子网模式: $IPV6_SUBNET，VM 将获得独立地址。")"
@@ -1644,7 +1802,11 @@ if [ "$VIRT_TYPE" = "cloudhv" ] || [ "$VIRT_TYPE" = "incus" ]; then
     log "$(t "✓ $VIRT_TYPE network configured." "✓ $VIRT_TYPE 网络配置完成。")"
 
     if [ "$IPV6_MODE" = "subnet" ] && [ -n "$IPV6_SUBNET" ] && [ -n "$IPV6_IFACE" ]; then
-        log "$(t "✓ NDP responder will be enabled for IPv6 subnet mode." "✓ NDP 响应器将在 IPv6 子网模式下启用。")"
+        if [ "$IPV6_ROUTED" = "1" ]; then
+            log "$(t "✓ Routed prefix mode: upstream NDP is not required." "✓ 独立路由前缀模式：无需上游 NDP 应答。")"
+        else
+            log "$(t "✓ NDP responder will be enabled for IPv6 subnet mode." "✓ NDP 响应器将在 IPv6 子网模式下启用。")"
+        fi
     fi
 elif [ "$VIRT_TYPE" = "podman" ]; then
     # 先安装自定义 netavark（支持 snat_ipv6 选项），再操作网络
@@ -1692,7 +1854,7 @@ PYEOF
 )"
     log "$(t "Container subnet: ${CONTAINER_BASE}/112  gateway: ${CONTAINER_GW}" "容器子网: ${CONTAINER_BASE}/112  网关: ${CONTAINER_GW}")"
 
-    if [ -n "$IPV6_IFACE" ]; then
+    if [ -n "$IPV6_IFACE" ] && [ "$IPV6_ROUTED" != "1" ]; then
         configure_host_ipv6_routing "$IPV6_IFACE" "$IPV6_ADDR"
     fi
 
@@ -1792,7 +1954,7 @@ download_agent "$ARCH"
 NDP_IFACE="${NDP_IFACE:-}"
 NDP_SUBNETS="${NDP_SUBNETS:-}"
 NDP_NETWORK="${NDP_NETWORK:-}"
-if [ "$IPV6_MODE" = "subnet" ]; then
+if [ "$IPV6_MODE" = "subnet" ] && [ "$IPV6_ROUTED" != "1" ]; then
     if [ "$VIRT_TYPE" = "cloudhv" ] || [ "$VIRT_TYPE" = "incus" ]; then
         NDP_IFACE="$IPV6_IFACE"
         NDP_SUBNETS="$IPV6_SUBNET"
@@ -1813,6 +1975,8 @@ start_service "$AGENT_SERVICE"
 
 if [ "$INSTALL_RFW_FORCE" = "1" ]; then
     install_rfw 1
+elif [ "$NON_INTERACTIVE" = "1" ]; then
+    log "$(t "Non-interactive mode: skipping optional rfw installation." "非交互模式：跳过可选 rfw 安装。")"
 else
     install_rfw 0
 fi
@@ -1836,9 +2000,17 @@ if [ "$VIRT_TYPE" = "incus" ]; then
         if [ "$IPV6_MODE" = "snat" ]; then
             INCUS_IPV6="fd91:cafe:cafe:10::1/64"
         elif [ "$IPV6_MODE" = "subnet" ] && [ -n "$IPV6_SUBNET" ]; then
-            # 提取前缀并设置为 ::1/112 网关
-            _prefix=$(echo "$IPV6_SUBNET" | sed 's/::\/.*//')
-            INCUS_IPV6="${_prefix}::1/112"
+            # 使用所分配前缀第一个 /112 的末地址作为网关，避免与常见的
+            # routed-prefix 宿主机地址 ::1/128 冲突；容器地址从 ::2 起分配。
+            INCUS_IPV6=$(python3 - "$IPV6_SUBNET" <<'PY'
+import ipaddress
+import sys
+net = ipaddress.IPv6Network(sys.argv[1], strict=False)
+bridge_prefix = max(net.prefixlen, 112)
+bridge = next(net.subnets(new_prefix=bridge_prefix)) if net.prefixlen < bridge_prefix else net
+print(f"{bridge.broadcast_address}/{bridge_prefix}")
+PY
+)
         fi
         # IPV6_MODE="none" 时 INCUS_IPV6 保持 "none"，Incus 不配置 IPv6
 

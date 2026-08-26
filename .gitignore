@@ -3,4 +3,5 @@
 agent.db
 runman-agent-linux-amd64
 runman-agent-linux-arm64
+*.test
 

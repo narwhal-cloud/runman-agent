@@ -87,11 +87,16 @@ bash reinstall.sh debian 13
 
 ## 第二步 — 执行安装脚本
 
-> 本 Fork 直接从仓库 `main` 分支拉取安装脚本（fork 未发布 release）：
+> 本 Fork 直接从仓库 `main` 分支拉取安装脚本，并从 `continuous` Release 获取匹配的二进制：
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh)
 ```
+
+`main` 每次更新都会由 CI 生成 `continuous` Release；安装器默认从该 Release 下载
+`podcctv` Fork 自己的 Agent 与 rfw 二进制，确保 Incus/IPv6 增强代码与安装脚本版本一致。
+需要固定版本时可设置 `AGENT_RELEASE_TAG=vX.Y.Z`，私有镜像或自建下载源可设置
+`RUNMAN_AGENT_DOWNLOAD_BASE=https://...`。
 
 安装脚本为交互式，过程中会依次询问：
 
@@ -110,10 +115,15 @@ bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/in
 bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh) \
   --image-mirror https://alpine-incus-base.428048.xyz
 
-# 强制使用 Incus 后端 + 子网模式 IPv6 + 纯 IPv6 容器
-IPV6_MODE=subnet IPV6_ADDR=2001:db8::1 IPV6_SUBNET=2001:db8::/64 \
-  bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh) \
-  --virt incus --ipv6-only
+# 全非交互：Incus + 自动探测 IPv6 + 纯 IPv6 容器（不安装可选 rfw）
+bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh) \
+  --virt incus --ipv6-only --non-interactive
+
+# 显式指定 routed /64（6in4 / WireGuard 等隧道场景）
+bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh) \
+  --virt incus --ipv6-only --non-interactive \
+  --ipv6-mode subnet --ipv6-addr 2001:db8:100::1 \
+  --ipv6-subnet 2001:db8:100::/64 --ipv6-iface wg6 --ipv6-routed
 
 # 使用定制 alpine 基础镜像 + SSH 欢迎页
 bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh) \
@@ -139,7 +149,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/in
 | 私有 / 本地镜像服务 | 用私有镜像服务器或本地目录替代 GitHub Releases 拉取镜像，离线/内网可部署 | `--image-mirror`、`--local-image-dir` |
 | 定制 alpine 基础镜像 | 使用自己的 alpine-base（本地 tar.gz 或已导入的 incus 别名） | `--alpine-base` |
 | SSH 欢迎页 / 横幅 | 容器登录前/后展示自定义横幅（预设或完全自定义文本） | `--banner-preset`、`--banner-text` |
-| IPv6 精细化分配 | 每个容器可分配 N 个公网 IPv6（非 /64 网段也可） | `--ipv6-alloc` |
+| IPv6 精细化分配 | 每个容器可分配 1–15 个公网 IPv6（非 /64 网段也可） | `--ipv6-alloc` |
 | 纯 IPv6 容器 | 容器仅分配 IPv6、不分配 IPv4 | `--ipv6-only` |
 | 强制 SSH 密码登录 | 无论基础镜像如何，均确保容器内 root 密码登录可用 | （默认开启） |
 | IPv6 备份 / 回滚 | 改动前完整备份 sysctl/网卡/incusbr0，支持一键回滚 | `--backup-ipv6`、`--rollback-ipv6` |
@@ -159,6 +169,19 @@ bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/in
 | `snat`   | 单个 `/128` 地址，或前缀 `/65`–`/127` | 容器/VM 通过 SNAT/MASQUERADE 共享宿主机 IPv6 |
 | `subnet` | 前缀 ≤ `/64`（至少 `/64` 子网）       | 每个容器/VM 获得独立的公网 IPv6 地址             |
 
+探测器会区分“隧道链路前缀”和“独立 routed prefix”。例如 HE 6in4、WireGuard
+常把默认路由放在 `he-ipv6`/`wg6`，并把 routed `/64` 中的一个 `/128` 地址放在 `lo`
+或另一接口；脚本会临时绑定一个测试地址做独立源地址连通性验证，通过后选择 routed
+前缀供容器使用。routed 模式不会改写隧道接口掩码，也不会启动不需要的上游 NDP 应答。
+
+安装前可做只读为主的独立探测（仅临时绑定测试地址，探测结束立即删除，不安装软件）：
+
+```bash
+apt-get install -y python3 curl iproute2   # 极简系统仅需首次安装
+bash install.sh en --detect-ipv6 --non-interactive
+# 输出：IFACE|ADDR|PREFIX|SUBNET|ROUTED
+```
+
 > **子网模式要求至少分配到 `/64` 段。** 前缀 `/65`–`/127` 地址空间不足以为每个容器/VM 分配独立地址，会自动回退到 SNAT 模式。
 
 也可通过环境变量强制指定模式及网络参数：
@@ -167,10 +190,14 @@ bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/in
 # 强制使用 SNAT 模式
 IPV6_MODE=snat bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh)
 
-# 强制使用子网模式并指定 IP 和子网
-IPV6_MODE=subnet IPV6_ADDR=2001:db8::1 IPV6_SUBNET=2001:db8::/64 \
-  bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh)
+# 强制使用子网模式并指定 IP、子网和上行接口
+bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh) \
+  --ipv6-mode subnet --ipv6-addr 2001:db8::1 \
+  --ipv6-subnet 2001:db8::/64 --ipv6-iface eth0
 ```
+
+环境变量 `IPV6_MODE`、`IPV6_ADDR`、`IPV6_SUBNET`、`IPV6_IFACE` 仍兼容；命令行参数
+优先用于一键部署。独立路由前缀可额外传 `--ipv6-routed`，避免修改隧道链路配置。
 
 ---
 
@@ -259,7 +286,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/in
 
 ### 4. IPv6 精细化分配
 
-默认每个容器分配 1 个 IPv6；通过 `--ipv6-alloc N` 可分配多个（例如出口需要多个独立 IPv6 的爬虫/代理场景）。
+默认每个容器分配 1 个 IPv6；通过 `--ipv6-alloc N` 可分配 1–15 个（例如出口需要多个独立 IPv6 的爬虫/代理场景）。
 
 ```bash
 # 每个容器分配 10 个公网 IPv6 地址
@@ -275,9 +302,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/in
 
 ```bash
 # 要求 IPv6 模式为 subnet 或 snat（none 模式下会直接报错退出）
-IPV6_MODE=subnet IPV6_ADDR=2001:db8::1 IPV6_SUBNET=2001:db8::/64 \
-  bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh) \
-  --ipv6-only
+bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh) \
+  --virt incus --ipv6-only --non-interactive
 ```
 
 > 纯 IPv6 容器仅经 IPv6 可达，IPv4 NAT 端口转发不适用；请确认上游已正确路由该 IPv6 段到宿主机。
@@ -292,7 +318,7 @@ IPV6_MODE=subnet IPV6_ADDR=2001:db8::1 IPV6_SUBNET=2001:db8::/64 \
 
 涉及网卡 / sysctl / incusbr0 的改动风险较高，本 Fork 提供**完备的备份—恢复—卸载恢复**机制：
 
-- **变更前自动备份**：安装脚本在修改任何 IPv6/网卡配置**之前**，自动快照 `/etc/sysctl.d/99-narwhalcloud.conf`、`/etc/network/interfaces`、`incus network show incusbr0` 等到 `/var/lib/narwhal-agent/backups/ipv6-<时间戳>/`，并记录受管文件安装前是否已存在（`HAD_*` 标记）。
+- **变更前自动备份**：安装脚本在修改任何受管系统配置**之前**，自动快照 sysctl、网卡、journald、zram、Incus 网络及本项目 systemd 文件到 `/var/lib/narwhal-agent/backups/ipv6-<时间戳>/`，并把首次快照固定为 `install-origin`。后续手工备份只更新 `latest`，不会覆盖卸载基线。
 - **一键回滚**：
 
 ```bash
@@ -320,9 +346,9 @@ bash install.sh --uninstall
 卸载流程严格有序：
 
 1. **先恢复 IPv6 / 网卡配置**（基于安装前完整备份，最关键）；
-2. `systemctl stop/disable` **仅本 Agent 服务**，不动其它业务服务；
+2. `systemctl stop/disable` 本 Agent 及由本安装器新增的可选 rfw 服务，不动其它业务服务；
 3. 删除安装时新增的受管文件（`runman-incus.conf`、`ipv6-rollback.sh`）；
-4. 清理 Agent 程序/配置目录，**保留 IPv6 备份目录**；
+4. 清理 Agent 程序/配置目录，**保留系统配置备份目录**；
 5. 日志明确提示：incus 容器/镜像及其它服务已保留。
 
 > 如需同时清理 incus 制品，按日志提示显式执行：`incus network delete incusbr0`、`incus image delete <别名>`。
