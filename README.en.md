@@ -2,7 +2,7 @@
 
 > **Turn your idle server into a NAT VPS shared-hosting node. Amortize your costs. Earn revenue per day, per tenant.**
 
-[中文](README.md) | [Dashboard](https://dash.fuckip.me) | [Website](https://fuckip.me)
+[中文](README.md) | [Dashboard](https://dash.fuckip.me) | [Website](https://fuckip.me) | **[Fork (podcctv)](https://github.com/podcctv/runman-agent)**
 
 ---
 
@@ -68,8 +68,10 @@ The script will reboot the server and install Debian 13 automatically. Once the 
 
 ## Step 2 — Run the Installer
 
+> This fork pulls the installer directly from the `main` branch (the fork does not publish releases):
+
 ```bash
-bash <(curl -fsSL https://github.com/narwhal-cloud/runman-agent/releases/latest/download/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh)
 ```
 
 The installer is interactive. It will ask you:
@@ -86,9 +88,24 @@ The installer is interactive. It will ask you:
 |---|---------------------------------------|-----------------------------------------------------------------------------------------|
 | 1 | **Podman** *(recommended)*            | OCI containers via Podman. Lightweight, no KVM needed. Uses XFS loop-mounted data disk. |
 | 2 | **cloud-hypervisor** *(experimental)* | Full KVM virtual machines. Requires `/dev/kvm`. Downloads Debian/Alpine VM images.      |
-| 3 | **Incus (LXC)** *(experimental)*      | System containers via Incus. Lightweight alternative to VMs.                            |
+| 3 | **Incus (LXC)** *(enhanced in this fork)* | System containers via Incus. Lightweight alternative to VMs. This fork adds image mirroring, banners, fine-grained IPv6, pure-IPv6, password-login fallback, backup/rollback, and one-click uninstall. |
 
-> Types 2 and 3 are experimental and may not be stable in production.
+> Type 2 is experimental. Type 3 (Incus) is production-ready in this fork.
+
+## Fork Enhancements (podcctv)
+
+This fork of `narwhal-cloud/runman-agent` significantly enhances the **Incus (LXC)** backend and offline/intranet deployment. Highlights:
+
+- **Private image server** — built-in default `https://alpine-incus-base.428048.xyz`; override with `--image-mirror <url>` or use a fully offline local directory via `--local-image-dir <dir>`.
+- **Custom alpine base** — `--alpine-base <local.tar.gz | incus-alias>`.
+- **SSH login banner** — `--banner-preset none|default|minimal|project|custom` (+ `--banner-text`).
+- **Fine-grained IPv6 allocation** — `--ipv6-alloc N` (N addresses per container).
+- **Pure IPv6 containers** — `--ipv6-only` (no IPv4 assigned).
+- **Forced SSH password login** — injected into every container regardless of base image.
+- **IPv6 backup / rollback** — pre-change backup of sysctl/network/incusbr0; `--backup-ipv6` / `--rollback-ipv6`.
+- **One-click uninstall** — `--uninstall` restores IPv6/network first, then removes only agent-managed changes (incus containers/images and other services are preserved).
+
+Detailed design and code review: [`INCU_S_OPTIMIZATION_REPORT.md`](INCU_S_OPTIMIZATION_REPORT.md).
 
 ## IPv6 Support
 
@@ -148,7 +165,7 @@ After installation completes, the terminal displays your server's IP and the web
 Run the same install command on an already-installed host — it automatically detects the existing installation and performs an in-place update (agent + netavark + rfw):
 
 ```bash
-bash <(curl -fsSL https://github.com/narwhal-cloud/runman-agent/releases/latest/download/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh)
 ```
 
 ## Service Management
@@ -183,6 +200,12 @@ systemctl restart narwhal-agent
 | `monitor_nic`      | NIC to monitor for traffic stats (leave empty to auto-detect) |
 | `ipv6_mode`        | `none` / `snat` / `subnet`                                    |
 | `max_port_forward` | Maximum port-forward rules per container (default `20`)       |
+| `incus_image_mirror` | Private/local image base URL overriding GitHub Releases, e.g. `https://alpine-incus-base.428048.xyz` |
+| `incus_alpine_base`  | Custom alpine base image: local tar.gz path or an existing incus alias |
+| `incus_ipv6_alloc`  | Number of IPv6 addresses allocated per container (default `1`) |
+| `incus_ipv6_only`   | `true` → new containers are pure-IPv6 (no IPv4)               |
+| `incus_banner_preset` | Login banner preset: `none`/`default`/`minimal`/`project`/`custom` |
+| `incus_banner_text` | Banner text when `preset=custom`                              |
 
 ## Troubleshooting
 
