@@ -40,15 +40,22 @@ backup_ipv6_config() {
     local ts; ts=$(date +%Y%m%d-%H%M%S)
     local dir="$INCUS_IPV6_BACKUP_DIR/ipv6-$ts"
     mkdir -p "$dir"
+    # 仅在“变更前”调用：复制当前（原始）状态，并记录受管文件安装前是否已存在，
+    # 供卸载/回滚时区分“恢复原始文件”还是“删除安装时新建的文件”。
     [ -f /etc/sysctl.d/99-narwhalcloud.conf ] && cp /etc/sysctl.d/99-narwhalcloud.conf "$dir/sysctl.conf"
     [ -f /etc/network/interfaces ] && cp /etc/network/interfaces "$dir/interfaces"
     command -v incus >/dev/null 2>&1 && incus network show incusbr0 >"$dir/incusbr0.network" 2>/dev/null
+    [ -f /etc/modules-load.d/runman-incus.conf ] && cp /etc/modules-load.d/runman-incus.conf "$dir/runman-incus.conf"
     {
         echo "IPV6_MODE=${IPV6_MODE:-}"
         echo "IPV6_SUBNET=${IPV6_SUBNET:-}"
         echo "IPV6_ADDR=${IPV6_ADDR:-}"
         echo "IPV6_IFACE=${IPV6_IFACE:-}"
         echo "INCUS_WG_IPV6_SUBNET=${INCUS_WG_IPV6_SUBNET:-}"
+        # 关键：记录受管文件/网络在安装前是否已存在（1=已存在需恢复，0=安装时新建需删除）
+        echo "HAD_SYSCTL=$( [ -f /etc/sysctl.d/99-narwhalcloud.conf ] && echo 1 || echo 0 )"
+        echo "HAD_MODULES=$( [ -f /etc/modules-load.d/runman-incus.conf ] && echo 1 || echo 0 )"
+        echo "HAD_INCUSBR0=$( command -v incus >/dev/null 2>&1 && incus network show incusbr0 >/dev/null 2>&1 && echo 1 || echo 0 )"
     } > "$dir/meta.env"
     echo "$dir" > "$INCUS_IPV6_BACKUP_DIR/latest"
     echo "$dir"
@@ -57,11 +64,31 @@ backup_ipv6_config() {
 restore_ipv6_config() {
     local target="${1:-$(cat "$INCUS_IPV6_BACKUP_DIR/latest" 2>/dev/null)}"
     [ -n "$target" ] && [ -d "$target" ] || { log "$(t "No IPv6 backup found" "未找到 IPv6 备份")"; return 1; }
-    [ -f "$target/sysctl.conf" ] && { cp "$target/sysctl.conf" /etc/sysctl.d/99-narwhalcloud.conf && sysctl -p /etc/sysctl.d/99-narwhalcloud.conf >/dev/null 2>&1; }
+    # 载入备份元数据（含 HAD_* 标记）
+    [ -f "$target/meta.env" ] && . "$target/meta.env"
+    # sysctl：有原文件则恢复；无原文件（安装时新建）则直接删除
+    if [ -f "$target/sysctl.conf" ]; then
+        cp "$target/sysctl.conf" /etc/sysctl.d/99-narwhalcloud.conf && sysctl -p /etc/sysctl.d/99-narwhalcloud.conf >/dev/null 2>&1
+    elif [ "${HAD_SYSCTL:-0}" = "0" ] && [ -f /etc/sysctl.d/99-narwhalcloud.conf ]; then
+        rm -f /etc/sysctl.d/99-narwhalcloud.conf && sysctl --system >/dev/null 2>&1
+        log "$(t "Removed install-created sysctl file" "已删除安装时新建的 sysctl 配置文件")"
+    fi
+    # interfaces：仅当备份存在时恢复（避免误删用户原有配置）
     [ -f "$target/interfaces" ] && cp "$target/interfaces" /etc/network/interfaces
-    if [ -f "$target/incusbr0.network" ]; then
-        command -v incus >/dev/null 2>&1 && incus network edit incusbr0 <"$target/incusbr0.network" 2>/dev/null \
-            && log "$(t "Restored incusbr0 network" "已恢复 incusbr0 网络配置")"
+    # incusbr0 网络：原存在则恢复，否则（安装时新建）删除
+    if command -v incus >/dev/null 2>&1; then
+        if [ "${HAD_INCUSBR0:-1}" = "1" ] && [ -f "$target/incusbr0.network" ]; then
+            incus network edit incusbr0 <"$target/incusbr0.network" 2>/dev/null \
+                && log "$(t "Restored incusbr0 network" "已恢复 incusbr0 网络配置")"
+        elif [ "${HAD_INCUSBR0:-1}" = "0" ]; then
+            incus network delete incusbr0 2>/dev/null \
+                && log "$(t "Removed incusbr0 (created by installer)" "已删除安装时创建的 incusbr0")"
+        fi
+    fi
+    # modules-load（安装时新建则删除）
+    if [ "${HAD_MODULES:-0}" = "0" ] && [ -f /etc/modules-load.d/runman-incus.conf ]; then
+        rm -f /etc/modules-load.d/runman-incus.conf
+        log "$(t "Removed runman-incus modules config" "已删除 runman-incus 内核模块配置")"
     fi
     log "$(t "IPv6 config restored from $target" "已从 $target 回滚 IPv6 配置")"
 }
@@ -88,6 +115,45 @@ EOF
     log "$(t "IPv6 rollback helper installed: $AGENT_BIN_DIR/ipv6-rollback.sh" "IPv6 回滚辅助脚本已安装: $AGENT_BIN_DIR/ipv6-rollback.sh")"
 }
 
+# ── 一键卸载 ────────────────────────────────────────────────────────────────
+# 仅撤销本安装器引入的变更，不影响既有业务（其它服务、incus 容器/镜像默认保留）。
+# 最关键的是先恢复 IPv6 / 网卡配置（基于安装前的完整备份），再停止服务、清理文件。
+do_uninstall() {
+    [ "$(id -u)" = "0" ] || die "$(t "Uninstall requires root." "卸载需要 root 权限。")"
+    log "$(t "=== NarwhalCloud Agent uninstall ===" "=== NarwhalCloud Agent 卸载 ===")"
+
+    # 0. 最先恢复 IPv6 / 网卡配置（最关键：避免遗留错误路由/转发影响业务）
+    if [ -d "$INCUS_IPV6_BACKUP_DIR" ]; then
+        restore_ipv6_config || log "$(t "IPv6 restore skipped (no backup)." "IPv6 恢复跳过（无备份）。")"
+    fi
+
+    # 1. 停止并禁用服务（仅本 agent，不动其它业务服务）
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl stop "$AGENT_SERVICE" 2>/dev/null || true
+        systemctl disable "$AGENT_SERVICE" 2>/dev/null || true
+    fi
+    rm -f "/etc/systemd/system/${AGENT_SERVICE}.service"
+    systemctl daemon-reload 2>/dev/null || true
+
+    # 2. 删除安装时新增/修改的受管文件（restore 已按备份删除新建项，这里兜底）
+    rm -f /etc/modules-load.d/runman-incus.conf
+    rm -f "$AGENT_BIN_DIR/ipv6-rollback.sh"
+
+    # 3. 删除 agent 程序/配置目录，但保留 IPv6 备份（便于事后人工恢复）
+    rm -rf "$AGENT_BIN_DIR" "$AGENT_CONFIG_DIR"
+    if [ -d "$AGENT_DATA_DIR" ]; then
+        for f in "$AGENT_DATA_DIR"/*; do
+            [ -e "$f" ] || continue
+            [ "$f" = "$INCUS_IPV6_BACKUP_DIR" ] && continue
+            rm -rf "$f"
+        done
+    fi
+
+    log "$(t "Uninstall complete. Incus containers/images and other services are preserved." "卸载完成。已保留 incus 容器/镜像及其它业务服务。")"
+    log "$(t "IPv6 backups kept at: $INCUS_IPV6_BACKUP_DIR (use ipv6-rollback.sh or --rollback-ipv6 to restore)" "IPv6 备份保留于: $INCUS_IPV6_BACKUP_DIR（可用 ipv6-rollback.sh 或 --rollback-ipv6 恢复）")"
+    log "$(t "To also remove incus artifacts: incus network delete incusbr0 ; incus image delete <alias>" "如需同时清理 incus：incus network delete incusbr0；incus image delete <别名>")"
+}
+
 # ── Language selection ────────────────────────────────────────────────────────
 
 # Support non-interactive mode via environment variable or command line argument
@@ -107,6 +173,8 @@ INCUS_IPV6_BACKUP_DIR="${INCUS_IPV6_BACKUP_DIR:-/var/lib/narwhal-agent/backups}"
 
 # 一键模式：--backup-ipv6 / --rollback-ipv6 直接对当前主机做 IPv6 配置备份/回滚后退出
 IPV6_ONESHOT_MODE="${IPV6_ONESHOT_MODE:-}"
+# 一键卸载模式：--uninstall 撤销本安装器引入的全部变更（含 IPv6 / 网卡恢复）后退出
+UNINSTALL="${UNINSTALL:-}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -123,6 +191,7 @@ while [[ $# -gt 0 ]]; do
         --banner-text) INCUS_BANNER_TEXT="$2"; shift 2 ;;
         --backup-ipv6) IPV6_ONESHOT_MODE="backup"; shift ;;
         --rollback-ipv6) IPV6_ONESHOT_MODE="rollback"; shift ;;
+        --uninstall) UNINSTALL=1; shift ;;
         *) shift ;;
     esac
 done
@@ -132,6 +201,12 @@ if [ "$IPV6_ONESHOT_MODE" = "backup" ]; then
     b=$(backup_ipv6_config); log "$(t "IPv6 config backed up to $b" "IPv6 配置已备份至 $b")"; exit 0
 elif [ "$IPV6_ONESHOT_MODE" = "rollback" ]; then
     restore_ipv6_config; exit 0
+fi
+
+# ── 一键卸载（独立模式，处理完即退出）──
+if [ "$UNINSTALL" = "1" ]; then
+    do_uninstall
+    exit 0
 fi
 
 if [ -z "$LANG_CODE" ]; then
@@ -1388,6 +1463,14 @@ configure_host_ipv6_routing() {
 _USER_IPV6_MODE="${IPV6_MODE:-}"
 IPV6_MODE="none"
 
+# ── 在任何 IPv6 / 网卡修改之前，先做“变更前”完整备份（供卸载/回滚恢复）──
+if [ "$_USER_IPV6_MODE" != "none" ]; then
+    install_ipv6_rollback_helper 2>/dev/null || true
+    if b=$(backup_ipv6_config); then
+        log "$(t "IPv6 config backed up (pre-change) to $b" "IPv6 配置已备份（变更前）至 $b")"
+    fi
+fi
+
 IPV6_CONFIG="none"
 
 if [ "$_USER_IPV6_MODE" = "none" ]; then
@@ -1730,12 +1813,9 @@ if [ "$VIRT_TYPE" = "incus" ]; then
         import_incus_images
     fi
 
-    # 5. 备份当前 IPv6 配置（便于试错后一键回滚），并安装回滚辅助脚本
+    # 5. IPv6 回滚辅助脚本（幂等）；配置备份已在“变更前”阶段完成，此处不再覆盖 latest 快照
     if [ "$IPV6_MODE" != "none" ]; then
         install_ipv6_rollback_helper
-        if b=$(backup_ipv6_config); then
-            log "$(t "IPv6 config backed up to $b" "IPv6 配置已备份至 $b")"
-        fi
     fi
 fi
 

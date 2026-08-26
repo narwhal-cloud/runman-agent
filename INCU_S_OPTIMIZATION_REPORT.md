@@ -63,9 +63,9 @@
 ### 2.3 Incus 容器 IPv6 探测 + 精细化分配 + 备份回滚（优化点 3）
 - **多地址分配**：`computeIPs` 现按 `incus_ipv6_alloc`（默认 1，可配 10 等）返回一组 IPv6；cloud-init 为 Alpine（interfaces）与 Debian（systemd-networkd）写入多个静态地址，网关改算为 incusbr0 桥地址 `<prefix>::1`（修正了原代码误用宿主机公网地址作网关的隐患）。
 - **WireGuard IPv6 池**：`config.json` 新增 `ipv6_wg_subnet`，subnet 模式下由安装脚本自动复用 `IPV6_SUBNET` 写入，供 wgbind 后续为隧道分配 IPv6（见 §4 说明）。
-- **备份 / 一键回滚**：
-  - `backup_ipv6_config()` 快照 `/etc/sysctl.d/99-narwhalcloud.conf`、`/etc/network/interfaces`、`incus network show incusbr0` 及关键变量到 `/var/lib/narwhal-agent/backups/ipv6-<时间戳>/`。
-  - `restore_ipv6_config()` 按快照还原。
+- **备份 / 一键回滚（详见 §2.6）**：
+  - `backup_ipv6_config()` 在**一切网卡/sysctl 修改之前**快照 `/etc/sysctl.d/99-narwhalcloud.conf`、`/etc/network/interfaces`、`incus network show incusbr0` 及关键变量到 `/var/lib/narwhal-agent/backups/ipv6-<时间戳>/`，并用 `HAD_*` 标记记录受管对象安装前是否已存在。
+  - `restore_ipv6_config()` 据此区分"恢复原始文件"还是"删除安装时新建的文件"。
   - 安装脚本支持 **`--backup-ipv6` / `--rollback-ipv6`** 独立模式；并安装常驻辅助脚本 `/opt/narwhal-agent/ipv6-rollback.sh`。
 - `ndp/incus.go` 的 `incusTracker` 现按逗号拆分 `IncusVMConfig.IPv6s`，对分配的**每一个** IPv6 都应答 NDP，保证多地址可达。
 
@@ -78,6 +78,34 @@
 - `db/db.go`：`IncusVMConfig` 新增 `IPv6s`（逗号分隔多地址），`IPv6` 保留首个用于兼容。
 - `main.go`：`incus.New` 调用透传新参数。
 - `install.sh` 更新流程新增 **配置迁移**（jq 补齐旧配置的缺省字段），避免升级后新功能不生效。
+
+### 2.6 一键安装 / 卸载 + IPv6 / 网卡完备备份恢复（运维安全，优化点 3 加固）
+
+> 用户诉求：脚本需支持**一键安装**、**一键卸载**；卸载**不能影响既有业务**（其它服务、既有 incus 容器/镜像默认保留）；尤其"给 incus 配置 IPv6"涉及网卡/sysctl 改动，必须有**完备的备份 — 恢复 — 卸载恢复**方案，且脚本须提供一键卸载选项。
+
+**A. 备份时机修正（关键 bug 修复）**
+- 原实现在 `configure_host_ipv6_routing`（已改写 sysctl/网卡）**之后**才调用 `backup_ipv6_config`，导致"备份"捕获的是已修改状态，恢复成 no-op。
+- 现改为在一切 IPv6/网卡修改**之前**（line 1466-1472，`_USER_IPV6_MODE != none` 时）即调用 `backup_ipv6_config`，确保快照是**原始状态**。
+
+**B. `HAD_*` 标记区分"恢复" vs "删除"**
+- `backup_ipv6_config` 在 `meta.env` 记录三个受管对象**安装前是否已存在**：`HAD_SYSCTL`（`/etc/sysctl.d/99-narwhalcloud.conf`）、`HAD_MODULES`（`/etc/modules-load.d/runman-incus.conf`）、`HAD_INCUSBR0`（`incus network show incusbr0`）。
+- `restore_ipv6_config` 据此决策：原文件存在 → 恢复原始文件；安装时新建 → 直接删除。避免误删用户原有配置，也避免残留安装器文件。
+
+**C. 一键卸载 `--uninstall`**
+- 新增独立模式（line 207-210 早退），由 `do_uninstall()`（line 121）执行，流程严谨有序：
+  1. **最先恢复 IPv6 / 网卡配置**（基于安装前完整备份，最关键——避免遗留错误路由/转发影响业务）；
+  2. `systemctl stop/disable` **仅本 agent 服务**、删 service 文件、`daemon-reload`（**不动其它业务服务**）；
+  3. 删安装时新增的受管文件（`runman-incus.conf`、`ipv6-rollback.sh`）；
+  4. `rm -rf` agent 程序/配置目录，但**保留 IPv6 备份目录**（便于事后人工恢复）；
+  5. 日志明确提示：incus 容器/镜像及其它服务已保留；如需彻底清理 incus 制品，给出 `incus network delete incusbr0` / `incus image delete <别名>` 显式提示。
+
+**D. 独立 IPv6 备份 / 回滚**
+- `--backup-ipv6` / `--rollback-ipv6`（line 200-204 早退），可脱离安装流程单独对当前主机做备份/回滚；
+- 常驻辅助脚本 `ipv6-rollback.sh` 同样可独立执行（`./ipv6-rollback.sh [备份目录]`）。
+
+**E. 安全边界（卸载的"不影响业务"保证）**
+- 卸载**不**删除既有 incus 容器/镜像、**不**停止无关 systemd 服务、**不**清理用户原有 `/etc/network/interfaces`、`/etc/sysctl.d/99-narwhalcloud.conf`（若安装前已存在则恢复原状）；
+- 仅撤销本安装器引入的变更；彻底清理 incus 制品由运维按日志提示显式决定。
 
 ---
 
@@ -118,7 +146,7 @@
 
 | 文件 | 改动 |
 |---|---|
-| `install.sh` | 镜像源/本地目录/定制 alpine 导入、横幅交互、IPv6 备份回滚与独立模式、配置迁移 |
+| `install.sh` | 镜像源/本地目录/定制 alpine 导入、横幅交互、IPv6 变更前备份 + `HAD_*` 恢复/删除逻辑、IPv6 备份/回滚独立模式、`--uninstall` 一键卸载（含先恢复 IPv6/网卡）、配置迁移 |
 | `config/config.go` | 新增 7 个配置字段 + 默认值 |
 | `db/db.go` | `IncusVMConfig.IPv6s` 多地址字段 |
 | `manager/incus/incus.go` | banner 注入、多 IPv6 分配、网关修正、定制 alpine 别名、sshd 兜底、`ensureReadyImage` 本地源 |
@@ -130,4 +158,4 @@
 > - **`manager/incus`（本次主要改动包）不依赖 `proglottis/gpgme`**（已用 `go list -deps` 确认）；`gpgme` 仅由 `ndp` 经预置的 cgo 链路引入——这是 Incus SDK 的既有构建依赖（需宿主机的 `libgpgme-dev`），**非本次改动引入**。
 > - **本机沙箱（Windows 交叉编译宿主机、无 `libgpgme`、且 Go 编译子进程无法在沙箱内执行）无法跑通完整 `go build`**：`go build` 在此环境以退出码 1 且无输出挂死，属工具链/沙箱限制，与代码无关。
 > - **推荐在 Debian 13 构建宿主机（已装 `libgpgme-dev`、有 incus 运行时）验证**：`GOOS=linux go build ./...`，随后端到端验证镜像导入/横幅/多 IPv6 行为（本机沙箱无 incus，无法实跑）。
-> - install.sh 已通过 `bash -n` 语法检查，新增函数 `backup_ipv6_config` / `restore_ipv6_config` / `install_ipv6_rollback_helper` / `import_local_incus_images` / `import_custom_alpine_base` / `prompt_banner` 均已就绪。
+> - install.sh 已通过 `bash -n` 语法检查，新增函数 `backup_ipv6_config` / `restore_ipv6_config` / `install_ipv6_rollback_helper` / `import_local_incus_images` / `import_custom_alpine_base` / `prompt_banner` / `do_uninstall` 均已就绪；`--uninstall` / `--backup-ipv6` / `--rollback-ipv6` 接线经 grep 校验（flag 194 / one-shot 200-204 / 卸载早退 207-210 / `do_uninstall` 121 / `backup_ipv6_config` 仅 1469 与 201 两处调用）；`HAD_*` 标记在 backup（56-58）与 restore（72-89）中一致。
