@@ -107,6 +107,20 @@
 - 卸载**不**删除既有 incus 容器/镜像、**不**停止无关 systemd 服务、**不**清理用户原有 `/etc/network/interfaces`、`/etc/sysctl.d/99-narwhalcloud.conf`（若安装前已存在则恢复原状）；
 - 仅撤销本安装器引入的变更；彻底清理 incus 制品由运维按日志提示显式决定。
 
+### 2.7 纯 IPv6 容器支持（优化点延伸）
+
+> 用户诉求：需要支持配置**纯 IPv6 容器**——容器只分配 IPv6、不分配 IPv4。
+
+- **全局开关**：`config.json` 新增 `incus_ipv6_only`（bool）；安装参数 **`--ipv6-only`** / 环境变量 `INCUS_IPV6_ONLY=1`。
+- `incus.New` 新增 `ipv6Only` 形参；`createVM` 在 `ipv6Only` 时：
+  - **前置校验**：当前 IPv6 模式为 `none`（无可分配 IPv6 子网）时直接报错退出，避免造出无网络容器；安装脚本在 IPv6 模式判定后同样校验——`IPV6_MODE=none` 下带 `--ipv6-only` 会 `die`。
+  - **不分配 IPv4**：`computeIPs` 之后将 `ipv4` 置空。
+  - **cloud-init 仅写 IPv6**：Alpine（`/etc/network/interfaces`）与 Debian（systemd-networkd）均跳过 IPv4 的 `inet static` / `[Address]`+`[Route]`，只写入一组 `inet6 static` 静态地址；DNS 改用 IPv6 公共解析器 `2606:4700:4700::1111`。
+  - **incus nic 设备**：设 `ipv4.address=none`（显式禁用该实例 IPv4），且不再添加 `security.ipv4_filtering`（无 IPv4 可过滤）。
+  - **持久化**：`IncusVMConfig.IPv6Only` 字段记录该实例是否为纯 IPv6，便于运维查询。
+- **兼容性**：开关关闭时行为完全不变，既有容器与新建双栈容器不受影响；纯 IPv6 容器仍由 NDP 应答器保证多地址可达（既有逻辑已按逗号拆分 `IPv6s` 应答）。
+- **注意**：纯 IPv6 容器仅经 IPv6 可达，IPv4 NAT 端口转发（wgbind 入站）不适用；WireGuard IPv6 运行时分配仍属 §4 已知边界，建议作为独立子任务排期。
+
 ---
 
 ## 3. 额外优化建议（代码评审延伸）
@@ -146,12 +160,12 @@
 
 | 文件 | 改动 |
 |---|---|
-| `install.sh` | 镜像源/本地目录/定制 alpine 导入、横幅交互、IPv6 变更前备份 + `HAD_*` 恢复/删除逻辑、IPv6 备份/回滚独立模式、`--uninstall` 一键卸载（含先恢复 IPv6/网卡）、配置迁移 |
-| `config/config.go` | 新增 7 个配置字段 + 默认值 |
-| `db/db.go` | `IncusVMConfig.IPv6s` 多地址字段 |
-| `manager/incus/incus.go` | banner 注入、多 IPv6 分配、网关修正、定制 alpine 别名、sshd 兜底、`ensureReadyImage` 本地源 |
+| `install.sh` | 镜像源/本地目录/定制 alpine 导入、横幅交互、IPv6 变更前备份 + `HAD_*` 恢复/删除逻辑、IPv6 备份/回滚独立模式、`--uninstall` 一键卸载（含先恢复 IPv6/网卡）、`--ipv6-only` 纯 IPv6 容器开关、配置迁移 |
+| `config/config.go` | 新增 8 个配置字段（含 `incus_ipv6_only`）+ 默认值 |
+| `db/db.go` | `IncusVMConfig.IPv6s` 多地址字段、`IPv6Only` 纯 IPv6 标记 |
+| `manager/incus/incus.go` | banner 注入、多 IPv6 分配、网关修正、定制 alpine 别名、sshd 兜底、`ensureReadyItemImage` 本地源、纯 IPv6 容器（不分配 IPv4、nic `ipv4.address=none`、cloud-init 仅 IPv6） |
 | `ndp/incus.go` | 逗号分隔多 IPv6 的 NDP 应答 |
-| `main.go` | `incus.New` 透传新参数 |
+| `main.go` | `incus.New` 透传新参数（含 `ipv6Only`） |
 
 > **编译验证状态（重要）**
 > - Go 改动已通过 `gofmt -e` 解析校验（无语法错误）；`go list -deps ./manager/incus` 可离线解析完整模块图且**无缺失模块**，证明所有 import/跨文件引用有效。
@@ -159,3 +173,4 @@
 > - **本机沙箱（Windows 交叉编译宿主机、无 `libgpgme`、且 Go 编译子进程无法在沙箱内执行）无法跑通完整 `go build`**：`go build` 在此环境以退出码 1 且无输出挂死，属工具链/沙箱限制，与代码无关。
 > - **推荐在 Debian 13 构建宿主机（已装 `libgpgme-dev`、有 incus 运行时）验证**：`GOOS=linux go build ./...`，随后端到端验证镜像导入/横幅/多 IPv6 行为（本机沙箱无 incus，无法实跑）。
 > - install.sh 已通过 `bash -n` 语法检查，新增函数 `backup_ipv6_config` / `restore_ipv6_config` / `install_ipv6_rollback_helper` / `import_local_incus_images` / `import_custom_alpine_base` / `prompt_banner` / `do_uninstall` 均已就绪；`--uninstall` / `--backup-ipv6` / `--rollback-ipv6` 接线经 grep 校验（flag 194 / one-shot 200-204 / 卸载早退 207-210 / `do_uninstall` 121 / `backup_ipv6_config` 仅 1469 与 201 两处调用）；`HAD_*` 标记在 backup（56-58）与 restore（72-89）中一致。
+> - **纯 IPv6 容器（§2.7）校验**：`config.go` / `db/db.go` / `manager/incus/incus.go` / `main.go` 均通过 `gofmt -e`；`incus.New` 签名与 `main.go` 调用参数个数/顺序一致（`ipv6Only` 末位 bool）；`grep` 确认 `incus.New` 仅 `main.go` 一处调用且已透传 `conf.IncusIPv6Only`；`install.sh` 的 `--ipv6-only` 接线经校验（env 173 / flag 193 / config 生成 604 / 校验 1544 / 迁移 1247）；`bash -n` 通过。

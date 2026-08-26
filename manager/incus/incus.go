@@ -39,11 +39,13 @@ type Manager struct {
 	// 欢迎页 / SSH 登录横幅
 	bannerPreset string
 	bannerText   string
-	buildMu      sync.Mutex
-	mu           sync.Mutex // 全局锁，确保同一时间只有一个 VM 操作
+	// 纯 IPv6 容器开关：开启后容器不分配 IPv4，仅配置静态 IPv6
+	ipv6Only bool
+	buildMu  sync.Mutex
+	mu       sync.Mutex // 全局锁，确保同一时间只有一个 VM 操作
 }
 
-func New(database *db.DB, ipv6Mode, ipv6Subnet, ipv6Addr, ipv6Iface, bannerPreset, bannerText string, ipv6Alloc int, alpineBase string) (*Manager, error) {
+func New(database *db.DB, ipv6Mode, ipv6Subnet, ipv6Addr, ipv6Iface, bannerPreset, bannerText string, ipv6Alloc int, alpineBase string, ipv6Only bool) (*Manager, error) {
 	c, err := incus.ConnectIncusUnix(SocketPath, nil)
 	if err != nil {
 		return nil, fmt.Errorf("connect to incus: %w", err)
@@ -64,6 +66,7 @@ func New(database *db.DB, ipv6Mode, ipv6Subnet, ipv6Addr, ipv6Iface, bannerPrese
 		alpineBase:  alpineBase,
 		bannerPreset: bannerPreset,
 		bannerText:   bannerText,
+		ipv6Only:     ipv6Only,
 	}, nil
 }
 
@@ -140,6 +143,14 @@ func (m *Manager) createVM(ctx context.Context, req *agent.CmdCreateVM) error {
 
 	ipv4, ipv6s := m.computeIPs(idx)
 	hasV6 := len(ipv6s) > 0
+
+	// 纯 IPv6 容器：必须已具备可用 IPv6 子网，且不分配 IPv4
+	if m.ipv6Only {
+		if !hasV6 {
+			return fmt.Errorf("IPv6-only containers require an IPv6 subnet (set IPV6_MODE=subnet/snat); current ipv6_mode=%q", m.ipv6Mode)
+		}
+		ipv4 = "" // 不分配 IPv4
+	}
 
 	// 计算掩码以便在 cloud-init 中使用
 	ipv6Mask := "64"
@@ -219,16 +230,28 @@ chpasswd:
 `, req.RootPassword)
 
 	if req.OsImage == "alpine" {
-		netConf := fmt.Sprintf(`      auto lo
+		netConf := `      auto lo
       iface lo inet loopback
 
       auto eth0
-      iface eth0 inet static
+`
+		if ipv4 != "" {
+			// 纯 IPv6 容器无 IPv4，DNS 改用 IPv6 公共解析器
+			dns := "1.1.1.1"
+			if m.ipv6Only {
+				dns = "2606:4700:4700::1111"
+			}
+			netConf += fmt.Sprintf(`      iface eth0 inet static
         address %s
         netmask 255.255.240.0
         gateway 10.91.0.1
-        dns-nameservers 1.1.1.1
-`, ipv4)
+        dns-nameservers %s
+`, ipv4, dns)
+		} else {
+			// 纯 IPv6 容器：仅保留 loopback 与 eth0 声明，不配置 IPv4
+			netConf += `      # IPv6-only container: no IPv4 configured
+`
+		}
 
 		if hasV6 {
 			for i, a := range ipv6s {
@@ -253,18 +276,31 @@ write_files:
     content: |
 %s`, netConf)
 	} else {
-		networkConf := fmt.Sprintf(`      [Match]
+		networkConf := `      [Match]
       Name=eth0
 
       [Network]
-      DNS=1.1.1.1
+`
+		if ipv4 != "" {
+			// 纯 IPv6 容器无 IPv4，DNS 改用 IPv6 公共解析器
+			dns := "1.1.1.1"
+			if m.ipv6Only {
+				dns = "2606:4700:4700::1111"
+			}
+			networkConf += fmt.Sprintf(`      DNS=%s
 
       [Address]
       Address=%s/20
 
       [Route]
       Gateway=10.91.0.1
-`, ipv4)
+`, dns, ipv4)
+		} else {
+			// 纯 IPv6 容器：仅配置 IPv6 DNS，不配置 IPv4 地址与网关
+			networkConf += `      DNS=2606:4700:4700::1111
+
+`
+		}
 
 		if hasV6 {
 			for i, a := range ipv6s {
@@ -357,10 +393,16 @@ write_files:
 	}
 
 	nic := map[string]string{
-		"type":                    "nic",
-		"network":                 IncusBridge,
-		"ipv4.address":            ipv4,
-		"security.ipv4_filtering": "true",
+		"type":    "nic",
+		"network": IncusBridge,
+	}
+	// 纯 IPv6 容器：显式禁用 IPv4（ipv4.address=none），不启用 IPv4 过滤；
+	// 否则按常规分配静态 IPv4 并开启源地址过滤。
+	if m.ipv6Only || ipv4 == "" {
+		nic["ipv4.address"] = "none"
+	} else {
+		nic["ipv4.address"] = ipv4
+		nic["security.ipv4_filtering"] = "true"
 	}
 
 	// 应用带宽限速
@@ -422,6 +464,7 @@ write_files:
 		IPv4:      ipv4,
 		IPv6:      firstOrEmpty(ipv6s),
 		IPv6s:     strings.Join(ipv6s, ","),
+		IPv6Only:  m.ipv6Only,
 	}
 	_ = m.db.SaveIncusConfig(iConf)
 

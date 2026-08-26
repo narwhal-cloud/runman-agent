@@ -48,9 +48,10 @@ type IncusVMConfig struct {
 	Idx       int    // IP 索引，用于计算静态 IP
 	Container string // 容器名
 	Image     string // 镜像名
-	IPv4      string // 静态 IPv4
+	IPv4      string // 静态 IPv4（纯 IPv6 容器时为空）
 	IPv6      string // 静态 IPv6（多地址时取首个，便于兼容旧逻辑/NDP 主地址）
 	IPv6s     string // 静态 IPv6 列表，逗号分隔（多地址精细化分配时 >1 个）
+	IPv6Only  bool   `gorm:"default:false"` // 是否为纯 IPv6 容器（不分配 IPv4）
 }
 
 // VMIPLimit 按 VM 覆盖端口转发唯一来源 IP 数上限。

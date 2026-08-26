@@ -135,7 +135,7 @@ func main() {
 		rawMgr, err = cloudhv.New(database, conf.IPv6Mode, conf.IPv6Subnet, conf.IPv6Addr, conf.IPv6Iface)
 	case "incus":
 		rawMgr, err = incus.New(database, conf.IPv6Mode, conf.IPv6Subnet, conf.IPv6Addr, conf.IPv6Iface,
-			conf.IncusBannerPreset, conf.IncusBannerText, int(conf.IncusIPv6Alloc), conf.IncusAlpineBase)
+			conf.IncusBannerPreset, conf.IncusBannerText, int(conf.IncusIPv6Alloc), conf.IncusAlpineBase, conf.IncusIPv6Only)
 	default:
 		log.Fatalf("unsupported virt type: %q (supported: podman, cloudhv, incus)", conf.VirtType)
 	}

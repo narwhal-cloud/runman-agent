@@ -170,6 +170,7 @@ INCUS_WG_IPV6_SUBNET="${INCUS_WG_IPV6_SUBNET:-}"   # 供 WireGuard 隧道分配�
 INCUS_BANNER_PRESET="${INCUS_BANNER_PRESET:-none}" # none / default / minimal / project / custom
 INCUS_BANNER_TEXT="${INCUS_BANNER_TEXT:-}"         # preset=custom 时的完整横幅文本
 INCUS_IPV6_BACKUP_DIR="${INCUS_IPV6_BACKUP_DIR:-/var/lib/narwhal-agent/backups}" # IPv6 配置备份目录
+INCUS_IPV6_ONLY="${INCUS_IPV6_ONLY:-}" # 设为 1 时新建容器为纯 IPv6（不分配 IPv4），需 IPv6 模式为 subnet/snat
 
 # 一键模式：--backup-ipv6 / --rollback-ipv6 直接对当前主机做 IPv6 配置备份/回滚后退出
 IPV6_ONESHOT_MODE="${IPV6_ONESHOT_MODE:-}"
@@ -189,6 +190,7 @@ while [[ $# -gt 0 ]]; do
         --wg-ipv6-subnet) INCUS_WG_IPV6_SUBNET="$2"; shift 2 ;;
         --banner-preset) INCUS_BANNER_PRESET="$2"; shift 2 ;;
         --banner-text) INCUS_BANNER_TEXT="$2"; shift 2 ;;
+        --ipv6-only) INCUS_IPV6_ONLY=1; shift ;;
         --backup-ipv6) IPV6_ONESHOT_MODE="backup"; shift ;;
         --rollback-ipv6) IPV6_ONESHOT_MODE="rollback"; shift ;;
         --uninstall) UNINSTALL=1; shift ;;
@@ -599,6 +601,7 @@ write_config_file() {
     "incus_ipv6_alloc": $INCUS_IPV6_ALLOC,
     "incus_alpine_base": "$INCUS_ALPINE_BASE",
     "incus_image_mirror": "$INCUS_IMAGE_MIRROR",
+    "incus_ipv6_only": $([ "${INCUS_IPV6_ONLY:-}" = "1" ] && echo true || echo false),
     "rfw_addr": "$RFW_API_ADDR"
 }
 EOF
@@ -1241,6 +1244,7 @@ if systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null || [ -f "$AGENT_BINA
                incus_ipv6_alloc:    (.incus_ipv6_alloc    // 1),
                incus_alpine_base:   (.incus_alpine_base   // ""),
                incus_image_mirror:  (.incus_image_mirror  // ""),
+               incus_ipv6_only:     (.incus_ipv6_only     // false),
                ipv6_wg_subnet:      (.ipv6_wg_subnet      // ""),
                ipv6_backup_dir:     (.ipv6_backup_dir     // "/var/lib/narwhal-agent/backups")
              }' "$AGENT_CONFIG_FILE" > "$AGENT_CONFIG_FILE.tmp" \
@@ -1535,6 +1539,12 @@ elif [ -n "$IPV6_PREFIX" ]; then
     IPV6_MODE="snat"
 fi
 # IPV6_PREFIX 为空（无任何 IPv6）时 IPV6_MODE 保持 "none"
+
+# 纯 IPv6 容器要求已具备 IPv6（subnet/snat），否则无法创建仅 IPv6 的实例
+if [ "${INCUS_IPV6_ONLY:-}" = "1" ] && [ "$IPV6_MODE" = "none" ]; then
+    die "$(t "IPv6-only containers require an IPv6 subnet (IPV6_MODE=subnet/snat); current mode is 'none'." \
+        "纯 IPv6 容器需要可用的 IPv6 子网（IPV6_MODE=subnet/snat）；当前模式为 'none'。")"
+fi
 
 # 健壮性校验：subnet 模式必须有可用子网信息，否则降级
 if [ "$IPV6_MODE" = "subnet" ] && [ -z "$IPV6_SUBNET" ]; then

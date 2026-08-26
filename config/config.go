@@ -84,6 +84,10 @@ type Config struct {
 	// 本地/内网 incus 镜像服务基址（覆盖 GitHub releases）。
 	// 可填 http(s) URL（如 http://192.168.10.9:8080）或本地目录路径。
 	IncusImageMirror string `json:"incus_image_mirror"`
+
+	// 纯 IPv6 容器开关：开启后新建 incus 容器不分配 IPv4，仅配置静态 IPv6
+	// （依赖 IPv6 模式 subnet/snat）。要求宿主机已具备可用 IPv6 子网。
+	IncusIPv6Only bool `json:"incus_ipv6_only"`
 }
 
 // Manager 持有配置文件路径和内存副本，提供并发安全的读写。
