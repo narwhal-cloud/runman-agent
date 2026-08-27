@@ -653,7 +653,11 @@ func (m *Manager) stopVM(ctx context.Context, vmID string, force bool) error {
 }
 
 func (m *Manager) restartVM(ctx context.Context, vmID string) error {
-	op, err := m.client.UpdateInstanceState(vmID, api.InstanceStatePut{Action: "restart", Timeout: -1}, "")
+	// An infinite graceful timeout can leave the API request and Incus operation
+	// stuck forever when a minimal OpenRC guest doesn't handle the reboot signal.
+	// Force makes restart deterministic while the finite timeout remains useful
+	// to Incus implementations that attempt a graceful shutdown first.
+	op, err := m.client.UpdateInstanceState(vmID, api.InstanceStatePut{Action: "restart", Timeout: 10, Force: true}, "")
 	if err != nil {
 		return err
 	}
