@@ -294,11 +294,11 @@ bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/in
   --ipv6-alloc 10
 ```
 
-> 多地址以静态方式写入容器网络配置，并由宿主机 NDP 应答器逐一应答，保证每个地址均可达。
+> 多地址以静态方式写入容器网络配置。普通二层网段使用 NDP 应答；HE/WireGuard 等已路由到宿主机的前缀则直接路由，不启动上游 NDP 代理。
 
 ### 5. 纯 IPv6 容器
 
-开启后，新建容器**不分配 IPv4、仅分配 IPv6**（nic 设 `ipv4.address=none`，cloud-init 仅写 `inet6`，DNS 改用 IPv6 解析器）。
+开启后，新建容器**不分配 IPv4、仅分配 IPv6**（nic 设 `ipv4.address=none` 并启用 IPv4 源地址过滤，容器内仅写 `inet6`，DNS 改用 IPv6 解析器）。
 
 ```bash
 # 要求 IPv6 模式为 subnet 或 snat（none 模式下会直接报错退出）
@@ -307,6 +307,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/in
 ```
 
 > 纯 IPv6 容器仅经 IPv6 可达，IPv4 NAT 端口转发不适用；请确认上游已正确路由该 IPv6 段到宿主机。
+
+> Agent 同时写入 cloud-init 配置并通过 Incus agent 执行运行时配置。即使是没有 cloud-init/OpenRC 的轻量 Alpine 镜像，静态 IPv6、root 密码和 sshd 也会被正确配置；BusyBox `ifup` 镜像使用独立 `netmask` 字段。
 
 ### 6. 强制 SSH 密码登录
 

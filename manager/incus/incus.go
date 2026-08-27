@@ -262,13 +262,15 @@ chpasswd:
 				if i == 0 {
 					netConf += fmt.Sprintf(`
       iface eth0 inet6 static
-        address %s/%s
+        address %s
+        netmask %s
         gateway %s
 `, a, ipv6Mask, gw6)
 				} else {
 					netConf += fmt.Sprintf(`
       iface eth0 inet6 static
-        address %s/%s
+        address %s
+        netmask %s
 `, a, ipv6Mask)
 				}
 			}
@@ -448,6 +450,14 @@ write_files:
 	if err := m.startVM(ctx, req.VmId); err != nil {
 		return err
 	}
+	// Not every custom Incus image ships cloud-init (including lightweight
+	// Alpine images). Apply the same credentials and network configuration
+	// through the Incus agent after boot so IPv6-only instances are usable
+	// regardless of image cloud-init support.
+	if err := m.configureRunningInstance(ctx, req.VmId, req.OsImage, req.RootPassword, ipv4, ipv6s, ipv6Mask, gw6); err != nil {
+		_ = m.deleteVM(ctx, req.VmId)
+		return fmt.Errorf("configure running instance: %w", err)
+	}
 
 	bizConf, _ := m.db.GetVMConfig(req.VmId)
 	if bizConf == nil {
@@ -506,6 +516,103 @@ func (m *Manager) startVM(ctx context.Context, vmID string) error {
 		return err
 	}
 	return op.Wait()
+}
+
+func (m *Manager) configureRunningInstance(ctx context.Context, vmID, distro, rootPassword, ipv4 string, ipv6s []string, ipv6Mask, gw6 string) error {
+	if err := m.execInstanceWithRetry(ctx, vmID, []string{"/bin/sh", "-c", "mkdir -p /etc/network /etc/systemd/network /etc/ssh/sshd_config.d /run/sshd"}); err != nil {
+		return fmt.Errorf("prepare configuration directories: %w", err)
+	}
+
+	if err := m.putInstanceFile(vmID, "/run/runman-root-password", "root:"+rootPassword+"\n", 0o600); err != nil {
+		return fmt.Errorf("stage root password: %w", err)
+	}
+	defer func() { _ = m.client.DeleteInstanceFile(vmID, "/run/runman-root-password") }()
+
+	sshConfig := "PermitRootLogin yes\nPasswordAuthentication yes\n"
+	banner := m.bannerContent()
+	if banner != "" {
+		sshConfig += "Banner /etc/issue.net\n"
+		if err := m.putInstanceFile(vmID, "/etc/motd", banner+"\n", 0o644); err != nil {
+			return fmt.Errorf("write motd: %w", err)
+		}
+		if err := m.putInstanceFile(vmID, "/etc/issue.net", banner+"\n", 0o644); err != nil {
+			return fmt.Errorf("write SSH banner: %w", err)
+		}
+	}
+	if err := m.putInstanceFile(vmID, "/etc/ssh/sshd_config.d/99-runman.conf", sshConfig, 0o644); err != nil {
+		return fmt.Errorf("write SSH policy: %w", err)
+	}
+
+	var networkPath, networkConfig, activate string
+	if distro == "alpine" {
+		networkPath = "/etc/network/interfaces"
+		networkConfig = "auto lo\niface lo inet loopback\n\nauto eth0\n"
+		if ipv4 != "" {
+			networkConfig += fmt.Sprintf("iface eth0 inet static\n  address %s\n  netmask 255.255.240.0\n  gateway 10.91.0.1\n", ipv4)
+		} else {
+			networkConfig += "# IPv6-only container: no IPv4 configured\n"
+		}
+		for i, addr := range ipv6s {
+			networkConfig += fmt.Sprintf("\niface eth0 inet6 static\n  address %s\n  netmask %s\n", addr, ipv6Mask)
+			if i == 0 {
+				networkConfig += fmt.Sprintf("  gateway %s\n  dns-nameservers 2606:4700:4700::1111\n", gw6)
+			}
+		}
+		activate = "if command -v rc-service >/dev/null 2>&1; then rc-update add networking boot >/dev/null 2>&1 || true; rc-update add sshd default >/dev/null 2>&1 || true; rc-service networking restart; ssh-keygen -A; rc-service sshd restart; else ifdown eth0 >/dev/null 2>&1 || true; ifup eth0; ssh-keygen -A; grep -qF '::respawn:/usr/sbin/sshd -D -e' /etc/inittab || echo '::respawn:/usr/sbin/sshd -D -e' >> /etc/inittab; pkill sshd >/dev/null 2>&1 || true; /usr/sbin/sshd; fi"
+	} else {
+		networkPath = "/etc/systemd/network/10-eth0.network"
+		networkConfig = "[Match]\nName=eth0\n\n[Network]\nDNS=2606:4700:4700::1111\n"
+		if ipv4 != "" {
+			networkConfig += fmt.Sprintf("\n[Address]\nAddress=%s/20\n\n[Route]\nGateway=10.91.0.1\n", ipv4)
+		}
+		for i, addr := range ipv6s {
+			networkConfig += fmt.Sprintf("\n[Address]\nAddress=%s/%s\n", addr, ipv6Mask)
+			if i == 0 {
+				networkConfig += fmt.Sprintf("\n[Route]\nGateway=%s\n", gw6)
+			}
+		}
+		activate = "rm -f /etc/systemd/network/10-cloud-init-*.network /run/systemd/network/10-cloud-init-*.network; systemctl restart systemd-networkd; ssh-keygen -A; systemctl enable --now ssh"
+	}
+	if err := m.putInstanceFile(vmID, networkPath, networkConfig, 0o644); err != nil {
+		return fmt.Errorf("write network configuration: %w", err)
+	}
+
+	command := "chpasswd < /run/runman-root-password; rm -f /run/runman-root-password; " +
+		"grep -q '^Include /etc/ssh/sshd_config.d/\\*.conf' /etc/ssh/sshd_config 2>/dev/null || echo 'Include /etc/ssh/sshd_config.d/*.conf' >> /etc/ssh/sshd_config; " + activate
+	if err := m.execInstanceWithRetry(ctx, vmID, []string{"/bin/sh", "-c", command}); err != nil {
+		return fmt.Errorf("activate instance configuration: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) putInstanceFile(vmID, path, content string, mode int) error {
+	return m.client.CreateInstanceFile(vmID, path, incus.InstanceFileArgs{
+		Content:   strings.NewReader(content),
+		UID:       0,
+		GID:       0,
+		Mode:      mode,
+		Type:      "file",
+		WriteMode: "overwrite",
+	})
+}
+
+func (m *Manager) execInstanceWithRetry(ctx context.Context, vmID string, command []string) error {
+	var lastErr error
+	for attempt := 0; attempt < 20; attempt++ {
+		op, err := m.client.ExecInstance(vmID, api.InstanceExecPost{Command: command}, nil)
+		if err == nil {
+			if err = op.Wait(); err == nil {
+				return nil
+			}
+		}
+		lastErr = err
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+	return lastErr
 }
 
 func (m *Manager) stopVM(ctx context.Context, vmID string, force bool) error {
