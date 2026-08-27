@@ -26,6 +26,8 @@ VM_IMAGES_BASE="https://github.com/narwhal-cloud/images/releases/download/vm-lat
 NETAVARK_BASE="https://github.com/narwhal-cloud/netavark/releases/latest/download"
 # rfw v2 随 agent 同仓库发布，资产名为 rfw-amd64 / rfw-arm64
 RFW_BASE="$DOWNLOAD_BASE"
+DEFAULT_INCUS_IMAGE_MIRROR="https://alpine-incus-base.428048.xyz"
+DEFAULT_INCUS_ALPINE_VERSION="3.24"
 
 # t EN ZH — returns the string for current language
 t() { [ "$LANG_CODE" = "zh" ] && echo "$2" || echo "$1"; }
@@ -113,6 +115,24 @@ restore_ipv6_config() {
         rm -f /etc/modules-load.d/runman-incus.conf
         log "$(t "Removed runman-incus modules config" "已删除 runman-incus 内核模块配置")"
     fi
+
+    # 其它受管文件：安装前存在则恢复原文件；安装时新建则删除。
+    restore_managed_file() {
+        local backup="$1" destination="$2" existed="$3"
+        if [ -f "$target/$backup" ]; then
+            mkdir -p "$(dirname "$destination")"
+            cp "$target/$backup" "$destination"
+        elif [ "$existed" = "0" ]; then
+            rm -f "$destination"
+        fi
+    }
+    restore_managed_file journald.conf /etc/systemd/journald.conf "$HAD_JOURNALD"
+    restore_managed_file zram-generator.conf /etc/systemd/zram-generator.conf "$HAD_ZRAM"
+    restore_managed_file loop-directio.rules /etc/udev/rules.d/99-loop-directio.rules "$HAD_LOOP_RULE"
+    restore_managed_file containers-storage.conf /etc/containers/storage.conf "$HAD_STORAGE_CONF"
+    restore_managed_file rfw.service /etc/systemd/system/rfw.service "$HAD_RFW_SERVICE"
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl restart systemd-journald 2>/dev/null || true
     log "$(t "IPv6 config restored from $target" "已从 $target 回滚 IPv6 配置")"
 }
 
@@ -138,6 +158,105 @@ EOF
     log "$(t "IPv6 rollback helper installed: $AGENT_BIN_DIR/ipv6-rollback.sh" "IPv6 回滚辅助脚本已安装: $AGENT_BIN_DIR/ipv6-rollback.sh")"
 }
 
+# ── Token 管理 ──────────────────────────────────────────────────────────────
+
+generate_agent_token() {
+    if command -v openssl >/dev/null 2>&1; then
+        openssl rand -hex 24
+    else
+        tr -dc 'A-Za-z0-9' </dev/urandom | head -c 48
+        echo
+    fi
+}
+
+validate_agent_token() {
+    local value="$1" length=${#1}
+    [ "$length" -ge 16 ] && [ "$length" -le 512 ] || {
+        log "$(t "Token must contain 16-512 characters." "Token 长度必须为 16-512 个字符。")" >&2
+        return 1
+    }
+    case "$value" in
+        *$'\n'*|*$'\r'*|*$'\t'*)
+            log "$(t "Token must not contain control characters." "Token 不能包含换行或制表符。")" >&2
+            return 1
+            ;;
+    esac
+}
+
+read_agent_token() {
+    [ -f "$AGENT_CONFIG_FILE" ] || return 1
+    jq -r '.token // empty' "$AGENT_CONFIG_FILE" 2>/dev/null
+}
+
+write_agent_token() {
+    local value="$1"
+    [ "$(id -u)" = "0" ] || die "$(t "Token management requires root." "Token 管理需要 root 权限。")"
+    [ -f "$AGENT_CONFIG_FILE" ] || die "$(t "Agent config not found: $AGENT_CONFIG_FILE" "未找到 Agent 配置: $AGENT_CONFIG_FILE")"
+    command -v jq >/dev/null 2>&1 || die "jq is required"
+    validate_agent_token "$value" || exit 1
+    jq --arg token "$value" '.token = $token' "$AGENT_CONFIG_FILE" > "$AGENT_CONFIG_FILE.tmp"
+    chmod 600 "$AGENT_CONFIG_FILE.tmp"
+    mv "$AGENT_CONFIG_FILE.tmp" "$AGENT_CONFIG_FILE"
+    systemctl restart "$AGENT_SERVICE" 2>/dev/null || true
+}
+
+show_agent_token() {
+    [ "$(id -u)" = "0" ] || die "$(t "Showing the Token requires root." "查看 Token 需要 root 权限。")"
+    local value
+    value=$(read_agent_token) || die "$(t "Agent config not found." "未找到 Agent 配置。")"
+    [ -n "$value" ] || die "$(t "The integration Token is empty." "对接 Token 尚未设置。")"
+    printf 'NARWHAL_AGENT_TOKEN=%s\n' "$value"
+}
+
+rotate_agent_token() {
+    local value="${TOKEN_VALUE:-${NARWHAL_AGENT_TOKEN:-}}"
+    if [ -z "$value" ] && [ "$NON_INTERACTIVE" != "1" ] && [ -t 0 ]; then
+        read -rsp "$(t "New Token (leave blank to generate): " "新 Token（留空自动生成）: ")" value
+        echo
+    fi
+    [ -n "$value" ] || value=$(generate_agent_token)
+    write_agent_token "$value"
+    log "$(t "✓ Integration Token rotated; agent restarted." "✓ 对接 Token 已轮换，Agent 已重启。")"
+    printf 'NARWHAL_AGENT_TOKEN=%s\n' "$value"
+    log "$(t "Rotate again: bash install.sh --rotate-token" "再次轮换: bash install.sh --rotate-token")"
+}
+
+# ── Incus 制品清理 ──────────────────────────────────────────────────────────
+
+purge_incus_artifacts() {
+    command -v incus >/dev/null 2>&1 || {
+        log "$(t "Incus is not installed; nothing to purge." "未安装 Incus，无需清理。")"
+        return 0
+    }
+
+    local names name alias answer purge_arch
+    case "$(uname -m)" in
+        aarch64|arm64) purge_arch="arm64" ;;
+        *) purge_arch="amd64" ;;
+    esac
+    names=$(incus list --format csv -c n 2>/dev/null || true)
+    log "$(t "Incus instances to delete:" "将删除的 Incus 实例:") ${names:-<none>}"
+    log "$(t "Managed image aliases to delete:" "将删除的受管镜像别名:") alpine/3.24/cloud/$purge_arch/ready, alpine/3.23/cloud/$purge_arch/ready, debian/13/cloud/$purge_arch/ready"
+    log "$(t "Managed network/remote to delete:" "将删除的受管网络/远端:") incusbr0, podcctv-mirror"
+
+    if [ "$NON_INTERACTIVE" != "1" ] && [ -t 0 ]; then
+        read -rp "$(t "Type PURGE to continue: " "输入 PURGE 继续: ")" answer
+        [ "$answer" = "PURGE" ] || die "$(t "Purge cancelled." "已取消彻底清理。")"
+    fi
+
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        incus delete "$name" --force >/dev/null 2>&1 || true
+    done <<< "$names"
+
+    for alias in "alpine/3.24/cloud/$purge_arch/ready" "alpine/3.23/cloud/$purge_arch/ready" "debian/13/cloud/$purge_arch/ready" podcctv/alpine-base; do
+        incus image delete "$alias" >/dev/null 2>&1 || true
+    done
+    incus remote remove podcctv-mirror >/dev/null 2>&1 || true
+    incus network delete incusbr0 >/dev/null 2>&1 || true
+    log "$(t "✓ Managed Incus instances, images, network and remote removed." "✓ 已删除受管 Incus 实例、镜像、网络和远端。")"
+}
+
 # ── 一键卸载 ────────────────────────────────────────────────────────────────
 # 仅撤销本安装器引入的变更，不影响既有业务（其它服务、incus 容器/镜像默认保留）。
 # 最关键的是先恢复 IPv6 / 网卡配置（基于安装前的完整备份），再停止服务、清理文件。
@@ -145,6 +264,9 @@ do_uninstall() {
     [ "$(id -u)" = "0" ] || die "$(t "Uninstall requires root." "卸载需要 root 权限。")"
     log "$(t "=== NarwhalCloud Agent uninstall ===" "=== NarwhalCloud Agent 卸载 ===")"
     local install_origin_restored=0
+
+    # 完整重装模式先删实例，避免恢复/删除网桥时仍被实例引用。
+    [ "${PURGE_INCUS:-0}" = "1" ] && purge_incus_artifacts
 
     # 0. 最先恢复 IPv6 / 网卡配置（最关键：避免遗留错误路由/转发影响业务）
     if [ -d "$INCUS_IPV6_BACKUP_DIR" ]; then
@@ -185,9 +307,13 @@ do_uninstall() {
         done
     fi
 
-    log "$(t "Uninstall complete. Incus containers/images and other services are preserved." "卸载完成。已保留 incus 容器/镜像及其它业务服务。")"
+    if [ "${PURGE_INCUS:-0}" = "1" ]; then
+        log "$(t "Full uninstall complete; managed Incus artifacts were removed." "完整卸载完成；受管 Incus 制品已删除。")"
+    else
+        log "$(t "Uninstall complete. Incus containers/images and other services are preserved." "卸载完成。已保留 incus 容器/镜像及其它业务服务。")"
+    fi
     log "$(t "Backups kept at: $INCUS_IPV6_BACKUP_DIR (rerun install.sh --rollback-ipv6 if needed)" "备份保留于: $INCUS_IPV6_BACKUP_DIR（如有需要可重新运行 install.sh --rollback-ipv6）")"
-    log "$(t "To also remove incus artifacts: incus network delete incusbr0 ; incus image delete <alias>" "如需同时清理 incus：incus network delete incusbr0；incus image delete <别名>")"
+    [ "${PURGE_INCUS:-0}" = "1" ] || log "$(t "For a clean reinstall, use: bash install.sh --uninstall --purge-incus" "如需彻底清理后重装: bash install.sh --uninstall --purge-incus")"
 }
 
 # ── Language selection ────────────────────────────────────────────────────────
@@ -198,7 +324,7 @@ INSTALL_RFW_FORCE=0
 FORCE_IMAGE_REFRESH="${FORCE_IMAGE_REFRESH:-0}"
 
 # 本地 incus 镜像服务 / 定制能力相关环境变量（离线/内网部署用）
-INCUS_IMAGE_MIRROR="${INCUS_IMAGE_MIRROR:-https://alpine-incus-base.428048.xyz}"  # 私有 simplestreams 镜像服务器（fork 默认）；留空则使用 GitHub releases
+INCUS_IMAGE_MIRROR="${INCUS_IMAGE_MIRROR:-$DEFAULT_INCUS_IMAGE_MIRROR}"  # 私有 simplestreams 镜像服务器（fork 默认）；留空则使用 GitHub releases
 INCUS_LOCAL_IMAGE_DIR="${INCUS_LOCAL_IMAGE_DIR:-}" # 本地镜像目录（含 incus-<distro>-<arch>.tar.gz），直接离线导入
 INCUS_ALPINE_BASE="${INCUS_ALPINE_BASE:-}"         # 定制 alpine 基础镜像：本地 tar.gz 路径或已存在的 incus 别名
 INCUS_IPV6_ALLOC="${INCUS_IPV6_ALLOC:-1}"          # 每个容器分配的 IPv6 数量（非 /64 网段精细化分配）
@@ -210,11 +336,69 @@ INCUS_IPV6_ONLY="${INCUS_IPV6_ONLY:-}" # 设为 1 时新建容器为纯 IPv6（�
 IPV6_ROUTED="${IPV6_ROUTED:-0}"         # 1=独立 routed prefix（6in4/WireGuard 等），无需上游 NDP
 VIRT_TYPE_REQUESTED="${VIRT_TYPE_REQUESTED:-}"
 NON_INTERACTIVE="${NON_INTERACTIVE:-0}"
+ORIGINAL_ARGC=$#
+FORCE_MENU=0
+GUIDED_INSTALL=0
+PURGE_INCUS="${PURGE_INCUS:-0}"
+TOKEN_ACTION=""
+TOKEN_VALUE="${TOKEN_VALUE:-}"
+INITIAL_TOKEN="${NARWHAL_AGENT_TOKEN:-}"
+GENERATE_TOKEN=0
+SKIP_IPV6_PROBE="${SKIP_IPV6_PROBE:-0}"
 
 # 一键模式：IPv6 探测 / 备份 / 回滚，处理后退出
 IPV6_ONESHOT_MODE="${IPV6_ONESHOT_MODE:-}"
 # 一键卸载模式：--uninstall 撤销本安装器引入的全部变更（含 IPv6 / 网卡恢复）后退出
 UNINSTALL="${UNINSTALL:-}"
+
+show_help() {
+    cat <<'EOF'
+Runman Agent installer
+
+  bash install.sh                         Guided menu
+  bash install.sh --virt incus            Install/update Incus backend
+  bash install.sh --detect-ipv6            Detect native/tunnel IPv6 and routed prefix
+  bash install.sh --validate-ipv6 ...      Validate manually supplied IPv6 values
+  bash install.sh --show-token             Print current integration Token
+  bash install.sh --rotate-token           Generate, store and print a new Token
+  bash install.sh --rotate-token --token X Store and print a custom Token
+  bash install.sh --uninstall              Remove Agent, preserve Incus artifacts
+  bash install.sh --uninstall --purge-incus
+                                           Remove Agent and managed Incus artifacts
+
+IPv6: --ipv6-mode none|snat|subnet --ipv6-addr ADDR
+      --ipv6-subnet CIDR --ipv6-iface IFACE --ipv6-routed
+      --ipv6-only | --nat4 --skip-ipv6-probe
+EOF
+}
+
+show_main_menu() {
+    printf '\n%s\n' "$(t "Runman Agent guided operations" "Runman Agent 菜单引导")"
+    printf '  1) %s\n' "$(t "Install/update (guided network setup)" "安装/更新（网络引导配置）")"
+    printf '  2) %s\n' "$(t "Detect IPv6 only" "仅探测 IPv6")"
+    printf '  3) %s\n' "$(t "Validate a manual IPv6 /64" "验证手工 IPv6 /64")"
+    printf '  4) %s\n' "$(t "Show integration Token" "显示对接 Token")"
+    printf '  5) %s\n' "$(t "Rotate integration Token" "轮换对接 Token")"
+    printf '  6) %s\n' "$(t "Back up IPv6 configuration" "备份 IPv6 配置")"
+    printf '  7) %s\n' "$(t "Roll back IPv6 configuration" "回滚 IPv6 配置")"
+    printf '  8) %s\n' "$(t "Uninstall Agent (keep Incus artifacts)" "卸载 Agent（保留 Incus 制品）")"
+    printf '  9) %s\n' "$(t "Full uninstall (delete managed Incus artifacts)" "完整卸载（删除受管 Incus 制品）")"
+    printf '  0) %s\n' "$(t "Exit" "退出")"
+    read -rp '> ' _menu_choice
+    case "${_menu_choice}" in
+        1) GUIDED_INSTALL=1 ;;
+        2) IPV6_ONESHOT_MODE="detect" ;;
+        3) IPV6_ONESHOT_MODE="validate" ;;
+        4) TOKEN_ACTION="show" ;;
+        5) TOKEN_ACTION="rotate" ;;
+        6) IPV6_ONESHOT_MODE="backup" ;;
+        7) IPV6_ONESHOT_MODE="rollback" ;;
+        8) UNINSTALL=1 ;;
+        9) UNINSTALL=1; PURGE_INCUS=1 ;;
+        0) exit 0 ;;
+        *) die "$(t "Invalid menu selection." "无效的菜单选项。")" ;;
+    esac
+}
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -233,14 +417,24 @@ while [[ $# -gt 0 ]]; do
         --ipv6-subnet) [ $# -ge 2 ] || die "--ipv6-subnet requires a value"; IPV6_SUBNET="$2"; shift 2 ;;
         --ipv6-iface) [ $# -ge 2 ] || die "--ipv6-iface requires a value"; IPV6_IFACE="$2"; shift 2 ;;
         --ipv6-routed) IPV6_ROUTED=1; shift ;;
+        --skip-ipv6-probe) SKIP_IPV6_PROBE=1; shift ;;
         --banner-preset) [ $# -ge 2 ] || die "--banner-preset requires a value"; INCUS_BANNER_PRESET="$2"; shift 2 ;;
         --banner-text) [ $# -ge 2 ] || die "--banner-text requires a value"; INCUS_BANNER_TEXT="$2"; shift 2 ;;
         --ipv6-only) INCUS_IPV6_ONLY=1; shift ;;
+        --nat4) INCUS_IPV6_ONLY=0; shift ;;
+        --token) [ $# -ge 2 ] || die "--token requires a value"; INITIAL_TOKEN="$2"; TOKEN_VALUE="$2"; shift 2 ;;
+        --generate-token) GENERATE_TOKEN=1; shift ;;
         -y|--yes|--non-interactive) NON_INTERACTIVE=1; shift ;;
+        --menu) FORCE_MENU=1; shift ;;
         --detect-ipv6) IPV6_ONESHOT_MODE="detect"; shift ;;
+        --validate-ipv6) IPV6_ONESHOT_MODE="validate"; shift ;;
         --backup-ipv6) IPV6_ONESHOT_MODE="backup"; shift ;;
         --rollback-ipv6) IPV6_ONESHOT_MODE="rollback"; shift ;;
+        --show-token) TOKEN_ACTION="show"; shift ;;
+        --rotate-token) TOKEN_ACTION="rotate"; shift ;;
         --uninstall) UNINSTALL=1; shift ;;
+        --purge-incus) PURGE_INCUS=1; UNINSTALL=1; shift ;;
+        -h|--help) show_help; exit 0 ;;
         *) die "Unknown option: $1" ;;
     esac
 done
@@ -259,26 +453,37 @@ esac
 [ "$INCUS_IPV6_ALLOC" -ge 1 ] && [ "$INCUS_IPV6_ALLOC" -le 15 ] \
     || die "--ipv6-alloc must be an integer from 1 to 15"
 
-# ── 一键 IPv6 备份 / 回滚（独立模式，处理完即退出）──
+if [ -z "$LANG_CODE" ]; then
+    printf "Select language / 选择语言:\n  1) English (default)\n  2) 中文\n"
+    if [ -t 0 ]; then
+        read -t 10 -rp "> " _lang_choice || _lang_choice=1
+    else
+        _lang_choice=1
+    fi
+    case "${_lang_choice}" in
+        2) LANG_CODE="zh" ;;
+        *) LANG_CODE="en" ;;
+    esac
+fi
+
+# 无参数且有终端时默认打开总菜单；--menu 可显式打开。
+if [ "$FORCE_MENU" = "1" ] || { [ "$ORIGINAL_ARGC" -eq 0 ] && [ -t 0 ]; }; then
+    show_main_menu
+fi
+
+# ── 一键 Token / 备份 / 回滚 / 卸载（处理完即退出）──
+case "$TOKEN_ACTION" in
+    show) show_agent_token; exit 0 ;;
+    rotate) rotate_agent_token; exit 0 ;;
+esac
 if [ "$IPV6_ONESHOT_MODE" = "backup" ]; then
     b=$(backup_ipv6_config); log "$(t "IPv6 config backed up to $b" "IPv6 配置已备份至 $b")"; exit 0
 elif [ "$IPV6_ONESHOT_MODE" = "rollback" ]; then
     restore_ipv6_config; exit 0
 fi
-
-# ── 一键卸载（独立模式，处理完即退出）──
 if [ "$UNINSTALL" = "1" ]; then
     do_uninstall
     exit 0
-fi
-
-if [ -z "$LANG_CODE" ]; then
-    printf "Select language / 选择语言:\n  1) English (default)\n  2) 中文\n"
-    read -t 5 -rp "> " _lang_choice || _lang_choice=1
-    case "${_lang_choice}" in
-        2) LANG_CODE="zh" ;;
-        *) LANG_CODE="en" ;;
-    esac
 fi
 
 log "$(t "Recommended OS: Debian 13 (Trixie) for best compatibility." "推荐操作系统：使用 Debian 13 (Trixie) 以获得最佳兼容性。")"
@@ -375,6 +580,133 @@ detect_arch() {
 
 ipv6_plus_one() {
     python3 -c "import ipaddress; print(str(ipaddress.IPv6Address('$1') + 1))" 2>/dev/null
+}
+
+validate_ipv6_values() {
+    local mode="$1" addr="$2" subnet="$3" iface="$4"
+    case "$mode" in
+        none) return 0 ;;
+        snat|subnet) ;;
+        *) log "$(t "Invalid IPv6 mode: $mode" "无效 IPv6 模式: $mode")" >&2; return 1 ;;
+    esac
+    [ -n "$addr" ] || { log "$(t "IPv6 address is required." "必须填写 IPv6 地址。")" >&2; return 1; }
+    [ -n "$iface" ] || { log "$(t "IPv6 interface is required." "必须填写 IPv6 网卡。")" >&2; return 1; }
+    case "$iface" in
+        *[!A-Za-z0-9_.:@-]*) log "$(t "Invalid interface name: $iface" "无效网卡名: $iface")" >&2; return 1 ;;
+    esac
+    ip link show dev "$iface" >/dev/null 2>&1 || {
+        log "$(t "Interface does not exist: $iface" "网卡不存在: $iface")" >&2
+        return 1
+    }
+    python3 - "$mode" "$addr" "$subnet" <<'PY'
+import ipaddress
+import sys
+
+mode, address, subnet = sys.argv[1:]
+addr = ipaddress.IPv6Address(address)
+if mode == "subnet":
+    if not subnet:
+        raise SystemExit("IPv6 subnet is required for subnet mode")
+    net = ipaddress.IPv6Network(subnet, strict=False)
+    if net.prefixlen > 64:
+        raise SystemExit(f"subnet mode requires /64 or larger allocation, got /{net.prefixlen}")
+    if addr not in net:
+        raise SystemExit(f"host address {addr} is not inside {net}")
+PY
+}
+
+# 临时绑定一个子网地址并以该地址访问公网，完成后立即清理。
+probe_ipv6_values() {
+    local mode="$1" addr="$2" subnet="$3" iface="$4" routed="$5"
+    [ "$SKIP_IPV6_PROBE" = "1" ] && {
+        log "$(t "IPv6 online probe skipped by request." "已按要求跳过 IPv6 在线探测。")"
+        return 0
+    }
+
+    local source_addr bind_cidr bind_iface connected=0 endpoint
+    if [ "$mode" = "snat" ]; then
+        source_addr="$addr"
+        for endpoint in ip.sb ipv6.icanhazip.com www.cloudflare.com; do
+            curl -6 --interface "$source_addr" -fsS --max-time 8 "$endpoint" >/dev/null 2>&1 && connected=1 && break
+        done
+    else
+        source_addr=$(python3 - "$subnet" <<'PY'
+import ipaddress
+import sys
+net = ipaddress.IPv6Network(sys.argv[1], strict=False)
+candidate = net.network_address + min(0xfffe, net.num_addresses - 2)
+print(candidate)
+PY
+)
+        if ip -6 addr show | grep -Fq " $source_addr/"; then
+            source_addr=$(ipv6_plus_one "$source_addr")
+        fi
+        if [ "$routed" = "1" ]; then
+            bind_iface="lo"
+            bind_cidr="$source_addr/128"
+        else
+            bind_iface="$iface"
+            bind_cidr="$source_addr/$(echo "$subnet" | cut -d/ -f2)"
+        fi
+        if ip -6 addr add "$bind_cidr" dev "$bind_iface" 2>/dev/null; then
+            sleep 2
+            for endpoint in ip.sb ipv6.icanhazip.com www.cloudflare.com; do
+                curl -6 --interface "$source_addr" -fsS --max-time 8 "$endpoint" >/dev/null 2>&1 && connected=1 && break
+            done
+            ip -6 addr del "$bind_cidr" dev "$bind_iface" 2>/dev/null || true
+        fi
+    fi
+    [ "$connected" = "1" ] || {
+        log "$(t "IPv6 source-address connectivity probe failed." "IPv6 独立源地址连通性验证失败。")" >&2
+        return 1
+    }
+    log "$(t "✓ IPv6 values and source-address connectivity verified." "✓ IPv6 参数及独立源地址连通性验证通过。")"
+}
+
+prompt_manual_ipv6() {
+    local default_iface default_addr default_subnet default_kind answer
+    default_iface=$(ip -6 route show default 2>/dev/null | head -1 | awk '{print $5}')
+    read -rp "$(t "IPv6 uplink interface [$default_iface]: " "IPv6 上行网卡 [$default_iface]: ")" answer
+    IPV6_IFACE="${answer:-$default_iface}"
+    default_addr=$(ip -o -6 addr show dev "$IPV6_IFACE" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
+    read -rp "$(t "Host/gateway address from the usable prefix [$default_addr]: " "可用前缀内的宿主机/网关地址 [$default_addr]: ")" answer
+    IPV6_ADDR="${answer:-$default_addr}"
+    default_subnet=$(python3 - "$IPV6_ADDR" 2>/dev/null <<'PY' || true
+import ipaddress, sys
+print(ipaddress.IPv6Network((ipaddress.IPv6Address(sys.argv[1]), 64), strict=False))
+PY
+)
+    read -rp "$(t "Usable IPv6 subnet CIDR [$default_subnet]: " "可用 IPv6 子网 CIDR [$default_subnet]: ")" answer
+    IPV6_SUBNET="${answer:-$default_subnet}"
+    case "$IPV6_IFACE" in he-*|wg*|tun*) default_kind=1 ;; *) default_kind=2 ;; esac
+    printf '%s\n  1) %s\n  2) %s\n' \
+        "$(t "Prefix delivery type:" "前缀下发类型:")" \
+        "$(t "Routed/tunnel prefix (HE, WireGuard, provider route)" "路由/隧道前缀（HE、WireGuard、供应商静态路由）")" \
+        "$(t "Native on-link /64 (requires NDP)" "原生二层 /64（需要 NDP）")"
+    read -rp "[$default_kind] > " answer
+    [ "${answer:-$default_kind}" = "1" ] && IPV6_ROUTED=1 || IPV6_ROUTED=0
+    IPV6_MODE="subnet"
+}
+
+prompt_ipv6_strategy() {
+    local choice
+    printf '\n%s\n' "$(t "Container network mode:" "容器网络模式:")"
+    printf '  1) %s\n' "$(t "NAT4 + public IPv6 (auto detect; recommended)" "NAT4 + 公网 IPv6（自动探测，推荐）")"
+    printf '  2) %s\n' "$(t "IPv6-only (auto detect)" "纯 IPv6（自动探测）")"
+    printf '  3) %s\n' "$(t "NAT4 + manual routed/native /64" "NAT4 + 手工路由/原生 /64")"
+    printf '  4) %s\n' "$(t "IPv6-only + manual routed/native /64" "纯 IPv6 + 手工路由/原生 /64")"
+    printf '  5) %s\n' "$(t "IPv4 NAT only" "仅 IPv4 NAT")"
+    printf '  6) %s\n' "$(t "NAT4 + IPv6 SNAT (auto-detect host address)" "NAT4 + IPv6 SNAT（自动探测宿主机地址）")"
+    read -rp '[1] > ' choice
+    case "${choice:-1}" in
+        1) INCUS_IPV6_ONLY=0; IPV6_DETECT_CONFIRMED=1 ;;
+        2) INCUS_IPV6_ONLY=1; IPV6_DETECT_CONFIRMED=1 ;;
+        3) INCUS_IPV6_ONLY=0; prompt_manual_ipv6 ;;
+        4) INCUS_IPV6_ONLY=1; prompt_manual_ipv6 ;;
+        5) INCUS_IPV6_ONLY=0; IPV6_MODE="none" ;;
+        6) INCUS_IPV6_ONLY=0; IPV6_MODE="snat"; IPV6_DETECT_CONFIRMED=1 ;;
+        *) die "$(t "Invalid network mode." "无效网络模式。")" ;;
+    esac
 }
 
 # Detect a separately routed prefix commonly used by HE 6in4/WireGuard setups.
@@ -518,23 +850,6 @@ detect_and_configure_ipv6() {
         echo "$iface|$routed_host|$routed_prefix|$routed_subnet|1"
         return 0
     fi
-    restore_managed_file() {
-        local backup="$1" destination="$2" existed="$3"
-        if [ -f "$target/$backup" ]; then
-            mkdir -p "$(dirname "$destination")"
-            cp "$target/$backup" "$destination"
-        elif [ "$existed" = "0" ]; then
-            rm -f "$destination"
-        fi
-    }
-    restore_managed_file journald.conf /etc/systemd/journald.conf "$HAD_JOURNALD"
-    restore_managed_file zram-generator.conf /etc/systemd/zram-generator.conf "$HAD_ZRAM"
-    restore_managed_file loop-directio.rules /etc/udev/rules.d/99-loop-directio.rules "$HAD_LOOP_RULE"
-    restore_managed_file containers-storage.conf /etc/containers/storage.conf "$HAD_STORAGE_CONF"
-    restore_managed_file rfw.service /etc/systemd/system/rfw.service "$HAD_RFW_SERVICE"
-    systemctl daemon-reload 2>/dev/null || true
-    systemctl restart systemd-journald 2>/dev/null || true
-
     # subnet 模式要求前缀 ≤ /64，且 ISP 必须真正允许子网内多个 IP 出站。
     # 有些 ISP 接口显示 /64 但做了严格 uRPF，只允许分配的单个 /128 出站。
     # /65-/127 前缀太小，/128 单地址，均使用 SNAT 模式。
@@ -573,6 +888,15 @@ detect_and_configure_ipv6() {
 
 if [ "$IPV6_ONESHOT_MODE" = "detect" ]; then
     detect_and_configure_ipv6
+    exit 0
+elif [ "$IPV6_ONESHOT_MODE" = "validate" ]; then
+    if { [ -z "${IPV6_ADDR:-}" ] || [ -z "${IPV6_SUBNET:-}" ] || [ -z "${IPV6_IFACE:-}" ]; } && [ -t 0 ]; then
+        prompt_manual_ipv6
+    fi
+    IPV6_MODE="${IPV6_MODE:-subnet}"
+    validate_ipv6_values "$IPV6_MODE" "${IPV6_ADDR:-}" "${IPV6_SUBNET:-}" "${IPV6_IFACE:-}" || exit 1
+    probe_ipv6_values "$IPV6_MODE" "${IPV6_ADDR:-}" "${IPV6_SUBNET:-}" "${IPV6_IFACE:-}" "$IPV6_ROUTED" || exit 1
+    printf '%s|%s|%s|%s|%s\n' "$IPV6_IFACE" "$IPV6_ADDR" "$(echo "$IPV6_SUBNET" | cut -d/ -f2)" "$IPV6_SUBNET" "$IPV6_ROUTED"
     exit 0
 fi
 
@@ -724,6 +1048,7 @@ write_config_file() {
     local ndp_network="${8:-}"
     local web_user="${9:-admin}"
     local web_pass="${10:-}"
+    local agent_token="${11:-}"
 
     mkdir -p "$AGENT_CONFIG_DIR"
 
@@ -757,6 +1082,10 @@ write_config_file() {
     "rfw_addr": "$RFW_API_ADDR"
 }
 EOF
+    if [ -n "$agent_token" ]; then
+        jq --arg token "$agent_token" '.token = $token' "$AGENT_CONFIG_FILE" > "$AGENT_CONFIG_FILE.tmp"
+        mv "$AGENT_CONFIG_FILE.tmp" "$AGENT_CONFIG_FILE"
+    fi
     chmod 600 "$AGENT_CONFIG_FILE"
     log "$(t "✓ Configuration file written to $AGENT_CONFIG_FILE" "✓ 配置文件已写入 $AGENT_CONFIG_FILE")"
 }
@@ -1255,18 +1584,20 @@ fetch_vm_images() {
 incus_ready_alias() {
     case "$1" in
         debian) echo "debian/13/cloud/$ARCH/ready" ;;
-        alpine) echo "alpine/3.23/cloud/$ARCH/ready" ;;
+        alpine) echo "alpine/$DEFAULT_INCUS_ALPINE_VERSION/cloud/$ARCH/ready" ;;
     esac
 }
 
 import_incus_images() {
     local refresh="${INCUS_IMAGE_REFRESH:-0}"
     local stamp_dir="$AGENT_DATA_DIR/incus-image-stamps"
+    local requested_distros=("$@")
+    [ ${#requested_distros[@]} -gt 0 ] || requested_distros=(debian alpine)
     command -v incus &>/dev/null || return 0
     mkdir -p "$stamp_dir"
 
     local distro alias asset url tmp stamp_file remote_stamp present
-    for distro in debian alpine; do
+    for distro in "${requested_distros[@]}"; do
         alias=$(incus_ready_alias "$distro")
         asset="incus-${distro}-${ARCH}.tar.gz"
         # 支持通过 INCUS_IMAGE_MIRROR（本地静态服务/内网镜像）覆盖默认的 GitHub releases 基址
@@ -1382,21 +1713,41 @@ import_incus_images_from_mirror() {
         log "$(t "Cannot reach mirror metadata: $base" "无法访问镜像元数据: $base")"; return 1
     }
 
-    local ok=0 distro lxd_path rootfs_path tmpd lxd_file rootfs_file local_alias
+    MIRROR_IMPORTED_DISTROS=""
+    local ok=0 distro item_record metadata_path rootfs_path metadata_sha rootfs_sha tmpd metadata_file rootfs_file local_alias
     for distro in alpine debian; do
-        lxd_path=$(printf '%s\n' "$meta" | jq -r --arg d "$distro" '.products | to_entries[]? | select(.key | startswith($d)) | .value.versions[]?.items["lxd.tar.xz"].path // empty' 2>/dev/null | head -1)
-        [ -n "$lxd_path" ] || continue
-        rootfs_path=$(printf '%s\n' "$meta" | jq -r --arg d "$distro" '.products | to_entries[]? | select(.key | startswith($d)) | .value.versions[]?.items["rootfs.squashfs"].path // empty' 2>/dev/null | head -1)
-        [ -n "$rootfs_path" ] || continue
+        # Accept current Incus names (incus.tar.xz + root.squashfs) and the
+        # legacy LXD names. Select the newest complete version deterministically.
+        item_record=$(printf '%s\n' "$meta" | jq -r --arg d "$distro" '
+          [.products | to_entries[]?
+           | select((.key | startswith($d + ":")) or (.value.os? == $d))
+           | .value.versions | to_entries[]?
+           | {version: .key, items: .value.items}
+           | .metadata = (.items["incus.tar.xz"] // .items["lxd.tar.xz"])
+           | .rootfs = (.items["root.squashfs"] // .items["rootfs.squashfs"])
+           | select(.metadata.path? and .rootfs.path?)]
+          | sort_by(.version) | reverse | .[0]
+          | [.metadata.path, .rootfs.path, (.metadata.sha256 // ""), (.rootfs.sha256 // "")]
+          | @tsv' 2>/dev/null)
+        [ -n "$item_record" ] && [ "$item_record" != "null" ] || continue
+        IFS=$'\t' read -r metadata_path rootfs_path metadata_sha rootfs_sha <<< "$item_record"
+        [ -n "$metadata_path" ] && [ -n "$rootfs_path" ] || continue
 
         tmpd=$(mktemp -d)
-        lxd_file="$tmpd/lxd.tar.xz"; rootfs_file="$tmpd/rootfs.squashfs"
-        if download_with_retry "$base/$lxd_path" "$lxd_file" && download_with_retry "$base/$rootfs_path" "$rootfs_file"; then
-            if [ "$distro" = "alpine" ]; then local_alias="alpine/3.23/cloud/$ARCH/ready"; else local_alias="debian/13/cloud/$ARCH/ready"; fi
+        metadata_file="$tmpd/incus.tar.xz"; rootfs_file="$tmpd/root.squashfs"
+        if download_with_retry "$base/$metadata_path" "$metadata_file" && download_with_retry "$base/$rootfs_path" "$rootfs_file"; then
+            if { [ -n "$metadata_sha" ] && [ "$(sha256sum "$metadata_file" | awk '{print $1}')" != "$metadata_sha" ]; } \
+                || { [ -n "$rootfs_sha" ] && [ "$(sha256sum "$rootfs_file" | awk '{print $1}')" != "$rootfs_sha" ]; }; then
+                log "$(t "Warning: mirror checksum verification failed for $distro" "警告: 镜像服务器中的 $distro 校验失败")"
+                rm -rf "$tmpd"
+                continue
+            fi
+            local_alias=$(incus_ready_alias "$distro")
             incus image delete "$local_alias" >/dev/null 2>&1 || true
-            if incus image import "$lxd_file" "$rootfs_file" --alias "$local_alias"; then
+            if incus image import "$metadata_file" "$rootfs_file" --alias "$local_alias"; then
                 log "$(t "✓ Imported $distro from mirror as $local_alias" "✓ 已从镜像服务器导入 $distro 为 $local_alias")"
                 ok=1
+                MIRROR_IMPORTED_DISTROS="$MIRROR_IMPORTED_DISTROS $distro"
             else
                 log "$(t "Warning: incus image import from mirror failed for $distro" "警告: 从镜像服务器导入 $distro 失败")"
             fi
@@ -1407,6 +1758,32 @@ import_incus_images_from_mirror() {
     done
     [ "$ok" = "1" ] || { log "$(t "Mirror provided no importable images" "镜像服务器未提供可导入的镜像")"; return 1; }
     return 0
+}
+
+import_missing_incus_images() {
+    local saved_mirror="$INCUS_IMAGE_MIRROR" distro
+    INCUS_IMAGE_MIRROR=""
+    for distro in debian alpine; do
+        case " $MIRROR_IMPORTED_DISTROS " in
+            *" $distro "*) ;;
+            *) import_incus_images "$distro" ;;
+        esac
+    done
+    INCUS_IMAGE_MIRROR="$saved_mirror"
+}
+
+# simplestreams 不可用时，仅当镜像源确实提供扁平 tarball 才按扁平源处理；
+# 否则切回官方预构建 Release，避免对一串必然 404 的 URL 重试。
+import_incus_fallback_images() {
+    local saved_mirror="$INCUS_IMAGE_MIRROR"
+    if [ -n "$saved_mirror" ] \
+        && curl -fsSI --max-time 10 "${saved_mirror%/}/incus-alpine-${ARCH}.tar.gz" >/dev/null 2>&1; then
+        import_incus_images
+    else
+        INCUS_IMAGE_MIRROR=""
+        import_incus_images
+        INCUS_IMAGE_MIRROR="$saved_mirror"
+    fi
 }
 
 # 交互式选择 SSH 登录横幅（欢迎页）预设；已通过参数/环境变量指定时跳过。
@@ -1434,6 +1811,11 @@ detect_installed_virt_type() {
 if systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null || [ -f "$AGENT_BINARY" ]; then
     log "$(t "Existing NarwhalCloud Agent detected, updating..." "检测到已安装的 NarwhalCloud Agent，执行更新流程...")"
 
+    if [ -n "$INITIAL_TOKEN" ]; then
+        write_agent_token "$INITIAL_TOKEN"
+        log "$(t "✓ Integration Token updated from command line/environment." "✓ 已通过命令行/环境变量更新对接 Token。")"
+    fi
+
     # 配置迁移：为旧配置补齐新增字段（保留已有值，仅补充缺省），避免升级后新功能无法生效
     if command -v jq >/dev/null 2>&1 && [ -f "$AGENT_CONFIG_FILE" ]; then
         jq '. + {
@@ -1443,7 +1825,8 @@ if systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null || [ -f "$AGENT_BINA
                incus_alpine_base:   (.incus_alpine_base   // ""),
                incus_image_mirror:  (.incus_image_mirror  // ""),
                incus_ipv6_only:     (.incus_ipv6_only     // false),
-               ipv6_wg_subnet:      (.ipv6_wg_subnet      // ""),
+               ipv6_wg_subnet:      (if ((.ipv6_wg_subnet // "") == "" and (.ipv6_mode // "") == "subnet")
+                                        then (.ipv6_subnet // "") else (.ipv6_wg_subnet // "") end),
                ipv6_backup_dir:     (.ipv6_backup_dir     // "/var/lib/narwhal-agent/backups")
              }' "$AGENT_CONFIG_FILE" > "$AGENT_CONFIG_FILE.tmp" \
             && mv "$AGENT_CONFIG_FILE.tmp" "$AGENT_CONFIG_FILE" \
@@ -1503,11 +1886,9 @@ if systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null || [ -f "$AGENT_BINA
                 log "$(t "Mirror import failed on update; falling back to default source." "更新时镜像导入失败；回退到默认源。")"
             fi
             if [ "$_nc_mirror_ok" = "1" ]; then
-                _nc_saved_mirror="$INCUS_IMAGE_MIRROR"
-                INCUS_IMAGE_MIRROR="" import_incus_images
-                INCUS_IMAGE_MIRROR="$_nc_saved_mirror"
+                import_missing_incus_images
             else
-                import_incus_images
+                import_incus_fallback_images
             fi
             ;;
     esac
@@ -1680,25 +2061,33 @@ configure_host_ipv6_routing() {
 # 初始化 IPv6 模式变量
 # IPV6_CONFIG: 检测原始结果，"none" 或 "iface|addr|prefix"
 # IPV6_MODE:   最终运行模式，"none" / "snat" / "subnet"（写入 config.json）
+# Incus 交互安装统一进入网络场景菜单；命令行已给 --ipv6-mode 时不再询问。
+if [ "$VIRT_TYPE" = "incus" ] && [ "$NON_INTERACTIVE" != "1" ] && [ -z "${IPV6_MODE:-}" ]; then
+    prompt_ipv6_strategy
+fi
+
 # 保存用户通过环境变量显式指定的值（如 IPV6_MODE=subnet bash install.sh）
 _USER_IPV6_MODE="${IPV6_MODE:-}"
 IPV6_MODE="none"
+MANUAL_IPV6_CONFIG=0
 
 IPV6_CONFIG="none"
 
 if [ "$_USER_IPV6_MODE" = "none" ]; then
     log "$(t "IPv6 mode pre-set to 'none', skipping detection." "IPv6 模式已预设为 'none'，跳过 IPv6 检测。")"
-elif [ "$_USER_IPV6_MODE" = "snat" ]; then
-    log "$(t "IPv6 mode pre-set to 'snat', skipping detection." "IPv6 模式已预设为 'snat'，跳过 IPv6 检测。")"
-elif [ -n "$_USER_IPV6_MODE" ] && [ -n "${IPV6_ADDR:-}" ] && [ -n "${IPV6_SUBNET:-}" ]; then
+elif [ "$_USER_IPV6_MODE" = "snat" ] && [ -n "${IPV6_ADDR:-}" ] && [ -n "${IPV6_IFACE:-}" ]; then
+    MANUAL_IPV6_CONFIG=1
+    log "$(t "Manual IPv6 SNAT values provided, validating..." "已提供手工 IPv6 SNAT 参数，开始验证...")"
+elif [ "$_USER_IPV6_MODE" = "subnet" ] && [ -n "${IPV6_ADDR:-}" ] && [ -n "${IPV6_SUBNET:-}" ] && [ -n "${IPV6_IFACE:-}" ]; then
     # 用户提供了完整的自定义配置（模式 + 地址 + 子网），跳过检测
+    MANUAL_IPV6_CONFIG=1
     log "$(t "Custom IPv6 config provided (mode=$_USER_IPV6_MODE addr=$IPV6_ADDR subnet=$IPV6_SUBNET), skipping detection." \
         "已提供自定义 IPv6 配置 (mode=$_USER_IPV6_MODE addr=$IPV6_ADDR subnet=$IPV6_SUBNET)，跳过检测。")"
 elif [ -n "$_USER_IPV6_MODE" ]; then
     log "$(t "IPv6 mode pre-set to '$_USER_IPV6_MODE', auto-detecting IPv6..." "IPv6 模式已预设为 '$_USER_IPV6_MODE'，自动检测 IPv6...")"
     IPV6_CONFIG=$(detect_and_configure_ipv6)
 else
-    if [ "$NON_INTERACTIVE" = "1" ]; then
+    if [ "$NON_INTERACTIVE" = "1" ] || [ "${IPV6_DETECT_CONFIRMED:-0}" = "1" ]; then
         _ipv6=Y
     else
         read -rp "$(t "Enable public IPv6 detection? [Y/n]: " "是否进行公网 IPv6 检测? [Y/n]: ")" _ipv6
@@ -1961,12 +2350,28 @@ if [ "$IPV6_MODE" = "subnet" ] && [ "$IPV6_ROUTED" != "1" ]; then
     fi
 fi
 
+# 在写 config.json 前确定 WireGuard IPv6 池，确保首启 Agent 即可读取。
+if [ "$VIRT_TYPE" = "incus" ] && [ "$IPV6_MODE" = "subnet" ] \
+    && [ -n "$IPV6_SUBNET" ] && [ -z "$INCUS_WG_IPV6_SUBNET" ]; then
+    INCUS_WG_IPV6_SUBNET="$IPV6_SUBNET"
+fi
+
 # 生成默认 Web 面板用户名和随机密码
 DEFAULT_USER="admin"
 DEFAULT_PASS=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 12 2>/dev/null || openssl rand -base64 9 | tr -dc A-Za-z0-9 | head -c 12)
 
+# 首次安装必须生成或接收一个可轮换的对接 Token。交互输入不回显；留空自动生成。
+if [ "$GENERATE_TOKEN" = "1" ]; then
+    INITIAL_TOKEN=$(generate_agent_token)
+elif [ -z "$INITIAL_TOKEN" ] && [ "$NON_INTERACTIVE" != "1" ] && [ -t 0 ]; then
+    read -rsp "$(t "Integration Token (leave blank to generate): " "对接 Token（留空自动生成）: ")" INITIAL_TOKEN
+    echo
+fi
+[ -n "$INITIAL_TOKEN" ] || INITIAL_TOKEN=$(generate_agent_token)
+validate_agent_token "$INITIAL_TOKEN" || die "$(t "Invalid integration Token." "无效的对接 Token。")"
+
 # 生成配置文件（包含所有启动参数、IPv6配置和磁盘限制）
-write_config_file "$VIRT_TYPE" "$IPV6_MODE" "$IPV6_SUBNET" "$IPV6_ADDR" "$IPV6_IFACE" "$NDP_IFACE" "$NDP_SUBNETS" "$NDP_NETWORK" "$DEFAULT_USER" "$DEFAULT_PASS"
+write_config_file "$VIRT_TYPE" "$IPV6_MODE" "$IPV6_SUBNET" "$IPV6_ADDR" "$IPV6_IFACE" "$NDP_IFACE" "$NDP_SUBNETS" "$NDP_NETWORK" "$DEFAULT_USER" "$DEFAULT_PASS" "$INITIAL_TOKEN"
 
 write_service_file "$VIRT_TYPE"
 start_service "$AGENT_SERVICE"
@@ -1979,6 +2384,14 @@ elif [ "$NON_INTERACTIVE" = "1" ]; then
     log "$(t "Non-interactive mode: skipping optional rfw installation." "非交互模式：跳过可选 rfw 安装。")"
 else
     install_rfw 0
+fi
+
+if [ "$MANUAL_IPV6_CONFIG" = "1" ]; then
+    validate_ipv6_values "$IPV6_MODE" "$IPV6_ADDR" "$IPV6_SUBNET" "$IPV6_IFACE" \
+        || die "$(t "Manual IPv6 validation failed." "手工 IPv6 参数验证失败。")"
+    probe_ipv6_values "$IPV6_MODE" "$IPV6_ADDR" "$IPV6_SUBNET" "$IPV6_IFACE" "$IPV6_ROUTED" \
+        || die "$(t "Manual IPv6 online verification failed; use --skip-ipv6-probe only when validation is intentionally offline." \
+            "手工 IPv6 在线验证失败；仅在明确离线验证时使用 --skip-ipv6-probe。")"
 fi
 
 # ── Done ──────────────────────────────────────────────────────────────────────
@@ -2060,17 +2473,14 @@ PY
         if [ "$_nc_mirror_ok" = "1" ]; then
             # 镜像服务器已提供部分发行版：其余（如 debian）从 GitHub 默认源补齐；
             # 若镜像不可达导致前述导入均失败，则此处一并补齐 alpine
-            _nc_saved_mirror="$INCUS_IMAGE_MIRROR"
-            INCUS_IMAGE_MIRROR="" import_incus_images
-            INCUS_IMAGE_MIRROR="$_nc_saved_mirror"
+            import_missing_incus_images
         else
-            # 镜像不可用或为非 simplestreams（flat）镜像：按原逻辑使用 --image-mirror 基址 / GitHub
-            import_incus_images
+            import_incus_fallback_images
         fi
     fi
 
     # 4.1 注册私有 simplestreams 镜像服务器为 incus remote（best-effort）。
-    #     既能让运维直接 `incus launch podcctv-mirror:alpine/3.23`，也顺带
+    #     既能让运维直接 `incus launch podcctv-mirror:alpine/3.24`，也顺带
     #     在线验证 index.json 是否已正确（修正前 incus remote add 会失败）。
     if [ -n "$INCUS_IMAGE_MIRROR" ] && command -v incus >/dev/null 2>&1; then
         if incus remote list 2>/dev/null | grep -qw "podcctv-mirror"; then
@@ -2096,6 +2506,14 @@ log "$(t "IP:           $IP" "IP:           $IP")"
 log "$(t "Web panel:    http://$IP:$AGENT_WEB_PORT" "面板地址:     http://$IP:$AGENT_WEB_PORT")"
 log "$(t "Username:     $DEFAULT_USER" "用户名:       $DEFAULT_USER")"
 log "$(t "Password:     $DEFAULT_PASS" "密码:         $DEFAULT_PASS")"
+log "$(t "Token:        $INITIAL_TOKEN" "对接 Token:    $INITIAL_TOKEN")"
 echo ""
-log "$(t "Next step: log in to the web panel and enter your Token" "下一步：登录面板并在设置中填入您的 Token")"
+log "$(t "Token rotation: bash install.sh --rotate-token" "Token 轮换:    bash install.sh --rotate-token")"
+log "$(t "Custom Token:  bash install.sh --rotate-token --token '<new-token>'" "自定义 Token:   bash install.sh --rotate-token --token '<新Token>'")"
+if [ "${INCUS_IPV6_ONLY:-0}" = "1" ]; then
+    _nat4_en="off"; _nat4_zh="关闭"
+else
+    _nat4_en="on"; _nat4_zh="开启"
+fi
+log "$(t "Network:      IPv4 NAT=$_nat4_en, IPv6=$IPV6_MODE" "网络模式:      IPv4 NAT=$_nat4_zh, IPv6=$IPV6_MODE")"
 log "========================================"

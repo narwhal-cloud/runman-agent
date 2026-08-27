@@ -12,6 +12,37 @@ permissions:
   contents: write
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test Agent and installer
+        env:
+          CGO_ENABLED: 0
+        run: |
+          go test -tags containers_image_openpgp ./...
+          bash -n install.sh
+          bash install.sh --help >/dev/null
+          printf '0\n' | bash install.sh zh --menu >/dev/null
+          bash install.sh en --validate-ipv6 --ipv6-mode subnet \
+            --ipv6-addr 2001:db8:100::1 --ipv6-subnet 2001:db8:100::/64 \
+            --ipv6-iface lo --ipv6-routed --skip-ipv6-probe --non-interactive
+          bash install.sh en --validate-ipv6 --ipv6-mode subnet \
+            --ipv6-addr 2001:db8:200::1 --ipv6-subnet 2001:db8:200::/64 \
+            --ipv6-iface lo --skip-ipv6-probe --non-interactive
+          if bash install.sh en --validate-ipv6 --ipv6-mode subnet \
+            --ipv6-addr 2001:db8:300::1 --ipv6-subnet 2001:db8:301::/64 \
+            --ipv6-iface lo --skip-ipv6-probe --non-interactive; then
+            echo 'invalid IPv6 values unexpectedly passed validation' >&2
+            exit 1
+          fi
+
   build-agent:
     runs-on: ubuntu-latest
     strategy:
@@ -98,7 +129,7 @@ jobs:
           retention-days: 1
 
   release:
-    needs: [build-agent, build-rfw]
+    needs: [test, build-agent, build-rfw]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

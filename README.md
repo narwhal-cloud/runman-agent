@@ -98,36 +98,53 @@ bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/in
 需要固定版本时可设置 `AGENT_RELEASE_TAG=vX.Y.Z`，私有镜像或自建下载源可设置
 `RUNMAN_AGENT_DOWNLOAD_BASE=https://...`。
 
-安装脚本为交互式，过程中会依次询问：
+无参数执行时会进入总菜单，可选择安装/更新、IPv6 探测、手工 `/64` 验证、Token
+查看/轮换、网络备份/回滚和两种卸载方式。选择安装后依次引导：虚拟化类型、容器网络场景、
+对接 Token、rfw 以及登录横幅。Incus 网络菜单覆盖：
 
-1. **语言选择** — English 或 中文
-2. **虚拟化类型** — 详见下方说明
-3. **公网 IPv6 检测** — 是否检测并配置 IPv6
-4. **数据盘大小** — 仅 Podman 模式需要，例如 `20G`、`50G`
-5. **是否安装 rfw 防火墙** — 可选的 eBPF 防火墙
+1. **NAT4 + 公网 IPv6 自动探测**（推荐）；
+2. **纯 IPv6 自动探测**；
+3. **NAT4 + 手工路由/原生 `/64`**；
+4. **纯 IPv6 + 手工路由/原生 `/64`**；
+5. **仅 IPv4 NAT**；
+6. **NAT4 + IPv6 SNAT**。
+
+自动探测会区分原生二层、HE 6in4、WireGuard 和供应商静态路由前缀；手工模式会验证地址、
+CIDR、网卡、前缀归属，并临时绑定测试地址验证独立源地址出站连通性。
 
 ### 非交互 / 一键参数
 
 所有配置项均支持环境变量或命令行参数，便于自动化部署。常用示例：
 
 ```bash
-# 使用私有镜像服务器（推荐，避免依赖 GitHub Releases）
+# NAT4 + 自动探测公网 IPv6；默认使用 podcctv Alpine 3.24 镜像
 bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh) \
-  --image-mirror https://alpine-incus-base.428048.xyz
+  zh --virt incus --nat4 --non-interactive --generate-token
 
-# 全非交互：Incus + 自动探测 IPv6 + 纯 IPv6 容器（不安装可选 rfw）
+# 纯 IPv6 容器；自动识别原生 /64 或隧道路由 /64
 bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh) \
   --virt incus --ipv6-only --non-interactive
 
-# 显式指定 routed /64（6in4 / WireGuard 等隧道场景）
+# 手工 routed /64（HE 6in4、WireGuard、供应商静态路由）
 bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh) \
-  --virt incus --ipv6-only --non-interactive \
+  --virt incus --nat4 --non-interactive \
   --ipv6-mode subnet --ipv6-addr 2001:db8:100::1 \
   --ipv6-subnet 2001:db8:100::/64 --ipv6-iface wg6 --ipv6-routed
 
-# 使用定制 alpine 基础镜像 + SSH 欢迎页
+# 手工原生二层 /64（不加 --ipv6-routed，安装器会验证 NDP 场景）
 bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh) \
-  --alpine-base ./alpine-base.tar.gz --banner-preset project
+  --virt incus --nat4 --non-interactive \
+  --ipv6-mode subnet --ipv6-addr 2001:db8:200::1 \
+  --ipv6-subnet 2001:db8:200::/64 --ipv6-iface eth0
+
+# IPv6 SNAT + NAT4（只有单个公网 IPv6 时）
+bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh) \
+  --virt incus --ipv6-mode snat --nat4 --non-interactive
+
+# 完全手工配置可先单独验证，不安装任何组件
+bash install.sh zh --validate-ipv6 --ipv6-mode subnet \
+  --ipv6-addr 2001:db8:100::1 --ipv6-subnet 2001:db8:100::/64 \
+  --ipv6-iface wg6 --ipv6-routed
 ```
 
 ## 虚拟化类型说明
@@ -146,14 +163,16 @@ bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/in
 
 | 功能 | 说明 | 相关参数 |
 |---|---|---|
+| 菜单式全流程 | 安装、网络场景、探测/验证、Token、备份/回滚、卸载均可从总菜单进入 | `--menu`（无参数执行时默认） |
 | 私有 / 本地镜像服务 | 用私有镜像服务器或本地目录替代 GitHub Releases 拉取镜像，离线/内网可部署 | `--image-mirror`、`--local-image-dir` |
-| 定制 alpine 基础镜像 | 使用自己的 alpine-base（本地 tar.gz 或已导入的 incus 别名） | `--alpine-base` |
+| podcctv Alpine 默认镜像 | 默认从 `alpine-incus-base.428048.xyz` 校验并导入 Alpine 3.24，面板默认选中 Alpine | 无需参数；覆盖用 `--image-mirror` / `--alpine-base` |
 | SSH 欢迎页 / 横幅 | 容器登录前/后展示自定义横幅（预设或完全自定义文本） | `--banner-preset`、`--banner-text` |
 | IPv6 精细化分配 | 每个容器可分配 1–15 个公网 IPv6（非 /64 网段也可） | `--ipv6-alloc` |
 | 纯 IPv6 容器 | 容器仅分配 IPv6、不分配 IPv4 | `--ipv6-only` |
 | 强制 SSH 密码登录 | 无论基础镜像如何，均确保容器内 root 密码登录可用 | （默认开启） |
 | IPv6 备份 / 回滚 | 改动前完整备份 sysctl/网卡/incusbr0，支持一键回滚 | `--backup-ipv6`、`--rollback-ipv6` |
-| 一键卸载 | 撤销本安装器引入的变更并先恢复 IPv6/网卡，不影响既有业务 | `--uninstall` |
+| Token 生命周期 | 首装接收或生成 Token，可打印、生成轮换或指定值轮换并自动重启 Agent | `--token`、`--generate-token`、`--show-token`、`--rotate-token` |
+| 两级一键卸载 | 普通卸载保留 Incus；彻底卸载额外删除受管实例、镜像、网桥和镜像远端 | `--uninstall`、`--purge-incus` |
 
 下文针对 **Incus 后端**给出完整用法；Podman / cloud-hypervisor 模式下镜像镜像服务（`--image-mirror` 等）同样适用。
 
@@ -168,6 +187,10 @@ bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/in
 | `none`   | 无公网 IPv6                      | 仅 IPv4                              |
 | `snat`   | 单个 `/128` 地址，或前缀 `/65`–`/127` | 容器/VM 通过 SNAT/MASQUERADE 共享宿主机 IPv6 |
 | `subnet` | 前缀 ≤ `/64`（至少 `/64` 子网）       | 每个容器/VM 获得独立的公网 IPv6 地址             |
+
+容器 IPv4 与 IPv6 模式彼此独立：`--nat4` 保留 `10.91.0.0/20` 私网地址并通过
+Incus `ipv4.nat=true` 出口，同时为容器分配公网 IPv6；`--ipv6-only` 则把实例网卡的
+`ipv4.address` 设为 `none`。两种模式都使用同一个经过验证的 IPv6 前缀。
 
 探测器会区分“隧道链路前缀”和“独立 routed prefix”。例如 HE 6in4、WireGuard
 常把默认路由放在 `he-ipv6`/`wg6`，并把 routed `/64` 中的一个 `/128` 地址放在 `lo`
@@ -198,6 +221,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/in
 
 环境变量 `IPV6_MODE`、`IPV6_ADDR`、`IPV6_SUBNET`、`IPV6_IFACE` 仍兼容；命令行参数
 优先用于一键部署。独立路由前缀可额外传 `--ipv6-routed`，避免修改隧道链路配置。
+在线验证故意失败时安装器会中止；只有离线审查配置或 CI 测试时才应使用
+`--skip-ipv6-probe`。
 
 ---
 
@@ -211,7 +236,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/in
 
 1. 读取 `https://alpine-incus-base.428048.xyz/streams/v1/images.json`；
 2. 按其中声明的路径下载对应发行版的 `lxd.tar.xz` 与 `rootfs.squashfs`；
-3. 执行 `incus image import` 并自动别名化为 Agent 期望的 `alpine/3.23/cloud/amd64/ready`。
+3. 校验元数据和 rootfs 的 SHA256 后执行 `incus image import`，自动别名化为 Agent 期望的 `alpine/3.24/cloud/amd64/ready`。
 
 > 该服务器当前发布 **Alpine（amd64）**。Debian 等未发布的发行版会自动从 GitHub Releases 默认源补齐；因此纯离线部署请配合 `--local-image-dir` 预置全部发行版镜像。
 
@@ -245,7 +270,7 @@ incus remote add podcctv-mirror https://alpine-incus-base.428048.xyz \
 注册成功后即可直接：
 
 ```bash
-incus launch podcctv-mirror:alpine/3.23 my-alpine
+incus launch podcctv-mirror:alpine/3.24 my-alpine
 ```
 
 同时，该步骤也是**在线校验 `index.json` 是否生效**的手段：若返回失败，说明服务器 `index.json` 仍缺失/格式错误，Agent 后续运行时构建镜像会自动回退到上游 `images.linuxcontainers.org`，不影响既有已导入的本地 ready 镜像。
@@ -341,8 +366,12 @@ bash install.sh --rollback-ipv6
 ## 一键卸载
 
 ```bash
-# 撤销本安装器引入的全部变更（含 IPv6/网卡恢复），不影响既有业务
+# 普通卸载：恢复网络并删除 Agent，保留 Incus 实例/镜像
 bash install.sh --uninstall
+
+# 彻底卸载/从零重装：另行删除受管 Incus 实例、ready 镜像、incusbr0 和 podcctv-mirror
+# 交互执行会要求输入 PURGE；自动化时显式参数即代表确认
+bash install.sh --uninstall --purge-incus
 ```
 
 卸载流程严格有序：
@@ -351,9 +380,10 @@ bash install.sh --uninstall
 2. `systemctl stop/disable` 本 Agent 及由本安装器新增的可选 rfw 服务，不动其它业务服务；
 3. 删除安装时新增的受管文件（`runman-incus.conf`、`ipv6-rollback.sh`）；
 4. 清理 Agent 程序/配置目录，**保留系统配置备份目录**；
-5. 日志明确提示：incus 容器/镜像及其它服务已保留。
+5. 普通模式保留 Incus 制品；`--purge-incus` 模式会先列出删除对象，再清理受管 Incus 制品。
 
-> 如需同时清理 incus 制品，按日志提示显式执行：`incus network delete incusbr0`、`incus image delete <别名>`。
+脚本不会卸载 Incus 软件包、删除 `default` 存储池或触碰 HE/WireGuard 隧道服务；因此可在彻底
+卸载后直接重新执行菜单安装。
 
 ---
 
@@ -375,22 +405,39 @@ bash install.sh --uninstall
 
 ---
 
-## 第三步 — 绑定 Token
+## 第三步 — 对接与轮换 Token
 
-安装完成后，终端会显示服务器 IP 和面板地址：
+首次安装可以用 `--token '<已有Token>'` 指定平台 Token，或用 `--generate-token` / 交互留空
+生成 48 字符随机 Token。安装结束会一次性打印面板凭据、Token 和轮换命令：
 
 ```
 [2026-01-01 00:00:00] ========================================
 [2026-01-01 00:00:00] ✓ NarwhalCloud Agent 安装完成！
 [2026-01-01 00:00:00] IP:           1.2.3.4
 [2026-01-01 00:00:00] 面板地址:     http://1.2.3.4:8792
-[2026-01-01 00:00:00] 下一步：登录面板并在设置中填入您的 Token
+[2026-01-01 00:00:00] 对接 Token:    <48字符Token>
+[2026-01-01 00:00:00] Token 轮换:    bash install.sh --rotate-token
 [2026-01-01 00:00:00] ========================================
 ```
 
-1. 在浏览器中打开 `http://<服务器IP>:8792`
-2. 登录管理面板
-3. 进入**设置**页面，将 NarwhalCloud 控制台中的**母鸡 Token** 粘贴并保存
+```bash
+# 查看当前 Token（仅 root 可读取）
+bash install.sh --show-token
+
+# 生成新 Token、写入 config.json、重启 Agent 并打印新值
+bash install.sh --rotate-token
+
+# 指定自定义 Token；直接写命令行可能进入 shell history
+bash install.sh --rotate-token --token '至少16字符的新Token'
+
+# 更安全的自定义方式：从环境变量读取
+read -rsp 'Token: ' NARWHAL_AGENT_TOKEN; export NARWHAL_AGENT_TOKEN
+bash install.sh --rotate-token
+unset NARWHAL_AGENT_TOKEN
+```
+
+轮换后需要在对接平台同步更新为输出的新值，否则平台连接会认证失败。Web 面板的登录密码与
+对接 Token 是两套独立凭据。
 
 ---
 
@@ -434,7 +481,7 @@ systemctl restart narwhal-agent
 
 | 字段                 | 说明                             |
 |--------------------|--------------------------------|
-| `token`            | 母鸡 Token（安装完成后填入）              |
+| `token`            | 平台对接 Token（首装写入，可用安装器查看/轮换）     |
 | `web`              | 面板监听地址（默认 `:8792`）             |
 | `virt_type`        | `podman` / `cloudhv` / `incus` |
 | `monitor_nic`      | 用于流量统计的网卡名（留空自动检测）             |
@@ -448,6 +495,33 @@ systemctl restart narwhal-agent
 | `incus_banner_text` | `preset=custom` 时的完整横幅文本           |
 | `ipv6_backup_dir`  | IPv6 配置备份目录（默认 `/var/lib/narwhal-agent/backups`） |
 | `ipv6_wg_subnet`   | 供 WireGuard 隧道分配的 IPv6 池（CIDR）       |
+
+---
+
+## 安装后验收清单
+
+```bash
+# 1. 自动探测：最后一行应为 IFACE|ADDR|PREFIX|SUBNET|ROUTED
+bash install.sh zh --detect-ipv6 --non-interactive
+
+# 2. 服务、镜像和网桥；默认 Alpine 应为 3.24
+systemctl is-active narwhal-agent incus
+incus image info alpine/3.24/cloud/amd64/ready
+incus network show incusbr0
+
+# 3. NAT4 + IPv6 实例应同时有 10.91.0.0/20 地址和公网 IPv6
+incus exec <实例名> -- sh -lc 'ip -4 addr; ip -6 addr; ip -4 route; ip -6 route'
+
+# 4. 纯 IPv6 实例应无全局 IPv4，并能通过 IPv6 出站
+incus exec <实例名> -- sh -lc 'ip -4 -o addr show scope global | wc -l'
+incus exec <实例名> -- ping -6 -c 3 2606:4700:4700::1111
+
+# 5. Token 与面板
+bash install.sh --show-token
+curl -I http://127.0.0.1:8792   # 未认证返回 401 属正常
+```
+
+CI 同时执行 Go 测试、`bash -n`、总菜单退出、路由 `/64`、原生 `/64` 以及错误前缀拒绝测试。
 
 ---
 

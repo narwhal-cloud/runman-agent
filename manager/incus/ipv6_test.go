@@ -2,7 +2,21 @@
 
 package incus
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
+
+func TestCustomAlpineIsDefaultImage(t *testing.T) {
+	m := &Manager{}
+	images, err := m.GetSupportedImages(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(images) < 2 || images[0].Id != "alpine" || images[1].Id != "debian" {
+		t.Fatalf("unexpected Incus image order: %#v", images)
+	}
+}
 
 func TestComputeIPsCanonicalCIDRs(t *testing.T) {
 	tests := []struct {
@@ -48,5 +62,16 @@ func TestComputeIPsCanonicalCIDRs(t *testing.T) {
 				t.Fatalf("gateway %q, want %q", gw, tc.gwWant)
 			}
 		})
+	}
+}
+
+func TestSNATUsesBridgeGateway(t *testing.T) {
+	m := &Manager{ipv6Mode: "snat", ipv6Addr: "2001:db8::10", ipv6Alloc: 1}
+	_, addresses := m.computeIPs(2)
+	if len(addresses) != 1 || addresses[0] != "fd91:cafe:cafe:10::2" {
+		t.Fatalf("unexpected SNAT address allocation: %v", addresses)
+	}
+	if got := m.ipv6Gateway(); got != "fd91:cafe:cafe:10::1" {
+		t.Fatalf("SNAT gateway %q, want bridge gateway", got)
 	}
 }

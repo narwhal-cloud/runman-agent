@@ -22,8 +22,10 @@ import (
 )
 
 const (
-	SocketPath  = "/var/lib/incus/unix.socket"
-	IncusBridge = "incusbr0"
+	SocketPath         = "/var/lib/incus/unix.socket"
+	IncusBridge        = "incusbr0"
+	DefaultAlpineImage = "alpine/3.24/cloud"
+	MirrorAlpineImage  = "alpine/3.24"
 )
 
 type Manager struct {
@@ -175,7 +177,7 @@ func (m *Manager) createVM(ctx context.Context, req *agent.CmdCreateVM) error {
 		if m.alpineBase != "" {
 			alias = m.alpineBase
 		} else {
-			alias = "alpine/3.23/cloud"
+			alias = DefaultAlpineImage
 		}
 	}
 
@@ -728,7 +730,7 @@ runcmd:
 			Type:     "image",
 			Server:   m.imageMirror,
 			Protocol: "simplestreams",
-			Alias:    baseAlias,
+			Alias:    MirrorAlpineImage,
 		}
 	} else {
 		builderSource = api.InstanceSource{
@@ -873,6 +875,9 @@ func (m *Manager) ipv6Gateway() string {
 				return addr.String()
 			}
 		}
+	}
+	if m.ipv6Mode == "snat" {
+		return "fd91:cafe:cafe:10::1"
 	}
 	if m.ipv6Addr != "" {
 		return m.ipv6Addr
@@ -1024,8 +1029,10 @@ func (m *Manager) GetVMLocalIPv6(_ context.Context, vmID string) (string, error)
 
 func (m *Manager) GetSupportedImages(_ context.Context) ([]*agent.OSImageInfo, error) {
 	return []*agent.OSImageInfo{
+		// Keep the fork's custom Alpine image first so the web panel selects it
+		// by default. Debian remains available as an explicit alternative.
+		{Id: "alpine", Name: "Alpine (podcctv custom Incus image)"},
 		{Id: "debian", Name: "Debian (Incus)"},
-		{Id: "alpine", Name: "Alpine (Incus)"},
 	}, nil
 }
 
