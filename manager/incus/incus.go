@@ -519,7 +519,7 @@ func (m *Manager) startVM(ctx context.Context, vmID string) error {
 }
 
 func (m *Manager) configureRunningInstance(ctx context.Context, vmID, distro, rootPassword, ipv4 string, ipv6s []string, ipv6Mask, gw6 string) error {
-	if err := m.execInstanceWithRetry(ctx, vmID, []string{"/bin/sh", "-c", "mkdir -p /etc/network /etc/systemd/network /etc/ssh/sshd_config.d /run/sshd"}); err != nil {
+	if err := m.execInstanceWithRetry(ctx, vmID, []string{"/bin/sh", "-c", "mkdir -p /etc/network /etc/systemd/network /etc/ssh/sshd_config.d /usr/local/sbin /run/sshd"}); err != nil {
 		return fmt.Errorf("prepare configuration directories: %w", err)
 	}
 
@@ -558,7 +558,7 @@ func (m *Manager) configureRunningInstance(ctx context.Context, vmID, distro, ro
 				networkConfig += fmt.Sprintf("  gateway %s\n  dns-nameservers 2606:4700:4700::1111\n", gw6)
 			}
 		}
-		activate = "if command -v rc-service >/dev/null 2>&1; then rc-update add networking boot >/dev/null 2>&1 || true; rc-update add sshd default >/dev/null 2>&1 || true; rc-service networking restart; ssh-keygen -A; rc-service sshd restart; else ifdown eth0 >/dev/null 2>&1 || true; ifup eth0; ssh-keygen -A; grep -qF '::respawn:/usr/sbin/sshd -D -e' /etc/inittab || echo '::respawn:/usr/sbin/sshd -D -e' >> /etc/inittab; pkill sshd >/dev/null 2>&1 || true; /usr/sbin/sshd; fi"
+		activate = "if command -v rc-service >/dev/null 2>&1; then rc-update add networking boot >/dev/null 2>&1 || true; rc-update add sshd default >/dev/null 2>&1 || true; rc-service networking restart; ssh-keygen -A; rc-service sshd restart; else /usr/local/sbin/runman-network-init; ssh-keygen -A; grep -qF '::wait:/usr/local/sbin/runman-network-init' /etc/inittab || echo '::wait:/usr/local/sbin/runman-network-init' >> /etc/inittab; grep -qF '::respawn:/usr/sbin/sshd -D -e' /etc/inittab || echo '::respawn:/usr/sbin/sshd -D -e' >> /etc/inittab; pkill sshd >/dev/null 2>&1 || true; /usr/sbin/sshd; fi"
 	} else {
 		networkPath = "/etc/systemd/network/10-eth0.network"
 		networkConfig = "[Match]\nName=eth0\n\n[Network]\nDNS=2606:4700:4700::1111\n"
@@ -575,6 +575,19 @@ func (m *Manager) configureRunningInstance(ctx context.Context, vmID, distro, ro
 	}
 	if err := m.putInstanceFile(vmID, networkPath, networkConfig, 0o644); err != nil {
 		return fmt.Errorf("write network configuration: %w", err)
+	}
+	if distro == "alpine" {
+		fallbackNetworkInit := "#!/bin/sh\n" +
+			"attempt=0\n" +
+			"while [ \"$attempt\" -lt 30 ]; do\n" +
+			"  if ip link show eth0 >/dev/null 2>&1 && ifup -f eth0; then exit 0; fi\n" +
+			"  attempt=$((attempt + 1))\n" +
+			"  sleep 1\n" +
+			"done\n" +
+			"exit 1\n"
+		if err := m.putInstanceFile(vmID, "/usr/local/sbin/runman-network-init", fallbackNetworkInit, 0o755); err != nil {
+			return fmt.Errorf("write Alpine network init fallback: %w", err)
+		}
 	}
 
 	command := "chpasswd < /run/runman-root-password; rm -f /run/runman-root-password; " +
