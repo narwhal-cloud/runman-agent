@@ -308,7 +308,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/in
 
 > 纯 IPv6 容器仅经 IPv6 可达，IPv4 NAT 端口转发不适用；请确认上游已正确路由该 IPv6 段到宿主机。
 
-> Agent 同时写入 cloud-init 配置并通过 Incus agent 执行运行时配置。即使是没有 cloud-init/OpenRC 的轻量 Alpine 镜像，静态 IPv6、root 密码和 sshd 也会被正确配置；BusyBox `ifup` 镜像使用独立 `netmask` 字段。
+> Agent 同时写入 cloud-init 配置并通过 Incus agent 执行运行时配置。即使是没有 cloud-init/OpenRC 的轻量 Alpine 镜像，静态 IPv6、root 密码和 sshd 也会被正确配置；BusyBox `ifup` 镜像使用独立 `netmask` 字段。对于由 Agent 管理的 Alpine 实例，运行时配置完成后会禁用 cloud-init 接管，避免旧版 `/dev/lxd` 探测在 Incus 6 上等待元数据或覆盖静态网络。
 
 ### 6. 强制 SSH 密码登录
 

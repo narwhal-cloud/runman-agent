@@ -519,7 +519,7 @@ func (m *Manager) startVM(ctx context.Context, vmID string) error {
 }
 
 func (m *Manager) configureRunningInstance(ctx context.Context, vmID, distro, rootPassword, ipv4 string, ipv6s []string, ipv6Mask, gw6 string) error {
-	if err := m.execInstanceWithRetry(ctx, vmID, []string{"/bin/sh", "-c", "mkdir -p /etc/network /etc/systemd/network /etc/ssh/sshd_config.d /usr/local/sbin /run/sshd"}); err != nil {
+	if err := m.execInstanceWithRetry(ctx, vmID, []string{"/bin/sh", "-c", "mkdir -p /etc/cloud /etc/network /etc/systemd/network /etc/ssh/sshd_config.d /usr/local/sbin /run/sshd"}); err != nil {
 		return fmt.Errorf("prepare configuration directories: %w", err)
 	}
 
@@ -545,6 +545,13 @@ func (m *Manager) configureRunningInstance(ctx context.Context, vmID, distro, ro
 
 	var networkPath, networkConfig, activate string
 	if distro == "alpine" {
+		// Alpine's cloud-init package may probe the legacy /dev/lxd socket on
+		// Incus 6 and then wait several minutes for unrelated EC2 metadata. The
+		// Agent owns credentials and networking for these instances, so disable
+		// cloud-init before it can race with the deterministic runtime config.
+		if err := m.putInstanceFile(vmID, "/etc/cloud/cloud-init.disabled", "managed by runman-agent\n", 0o644); err != nil {
+			return fmt.Errorf("disable Alpine cloud-init: %w", err)
+		}
 		networkPath = "/etc/network/interfaces"
 		networkConfig = "auto lo\niface lo inet loopback\n\nauto eth0\n"
 		if ipv4 != "" {
@@ -558,7 +565,16 @@ func (m *Manager) configureRunningInstance(ctx context.Context, vmID, distro, ro
 				networkConfig += fmt.Sprintf("  gateway %s\n  dns-nameservers 2606:4700:4700::1111\n", gw6)
 			}
 		}
-		activate = "if command -v rc-service >/dev/null 2>&1; then rc-update add networking boot >/dev/null 2>&1 || true; rc-update add sshd default >/dev/null 2>&1 || true; rc-service networking restart; ssh-keygen -A; rc-service sshd restart; else /usr/local/sbin/runman-network-init; ssh-keygen -A; grep -qF '::wait:/usr/local/sbin/runman-network-init' /etc/inittab || echo '::wait:/usr/local/sbin/runman-network-init' >> /etc/inittab; grep -qF '::respawn:/usr/sbin/sshd -D -e' /etc/inittab || echo '::respawn:/usr/sbin/sshd -D -e' >> /etc/inittab; pkill sshd >/dev/null 2>&1 || true; /usr/sbin/sshd; fi"
+		activate = "if command -v rc-service >/dev/null 2>&1; then " +
+			"for svc in cloud-final cloud-config cloud-init cloud-init-local; do rc-service \"$svc\" stop >/dev/null 2>&1 || true; done; " +
+			"rc-update del cloud-init-local boot >/dev/null 2>&1 || true; rc-update del cloud-init boot >/dev/null 2>&1 || true; " +
+			"rc-update del cloud-config default >/dev/null 2>&1 || true; rc-update del cloud-final default >/dev/null 2>&1 || true; " +
+			"rc-update add networking boot >/dev/null 2>&1 || true; rc-update add sshd default >/dev/null 2>&1 || true; " +
+			"rc-service networking restart; ssh-keygen -A; rc-service sshd restart; " +
+			"else /usr/local/sbin/runman-network-init; ssh-keygen -A; " +
+			"grep -qF '::wait:/usr/local/sbin/runman-network-init' /etc/inittab || echo '::wait:/usr/local/sbin/runman-network-init' >> /etc/inittab; " +
+			"grep -qF '::respawn:/usr/sbin/sshd -D -e' /etc/inittab || echo '::respawn:/usr/sbin/sshd -D -e' >> /etc/inittab; " +
+			"pkill sshd >/dev/null 2>&1 || true; /usr/sbin/sshd; fi"
 	} else {
 		networkPath = "/etc/systemd/network/10-eth0.network"
 		networkConfig = "[Match]\nName=eth0\n\n[Network]\nDNS=2606:4700:4700::1111\n"
