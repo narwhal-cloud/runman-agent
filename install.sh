@@ -263,7 +263,11 @@ purge_incus_artifacts() {
 do_uninstall() {
     [ "$(id -u)" = "0" ] || die "$(t "Uninstall requires root." "卸载需要 root 权限。")"
     log "$(t "=== NarwhalCloud Agent uninstall ===" "=== NarwhalCloud Agent 卸载 ===")"
-    local install_origin_restored=0
+    local install_origin_restored=0 previous_virt="unknown"
+    if [ -f "$AGENT_CONFIG_FILE" ]; then
+        previous_virt=$(grep -o '"virt_type"[[:space:]]*:[[:space:]]*"[^"]*"' "$AGENT_CONFIG_FILE" 2>/dev/null \
+            | head -n1 | sed 's/.*:[[:space:]]*"//; s/"$//' || true)
+    fi
 
     # 完整重装模式先删实例，避免恢复/删除网桥时仍被实例引用。
     [ "${PURGE_INCUS:-0}" = "1" ] && purge_incus_artifacts
@@ -289,8 +293,15 @@ do_uninstall() {
             systemctl disable rfw 2>/dev/null || true
             rm -f /etc/systemd/system/rfw.service
         fi
+        if [ -x /usr/local/sbin/runman-podman-forwarding ]; then
+            /usr/local/sbin/runman-podman-forwarding remove 2>/dev/null || true
+        fi
+        systemctl stop runman-podman-forwarding 2>/dev/null || true
+        systemctl disable runman-podman-forwarding 2>/dev/null || true
     fi
     rm -f "/etc/systemd/system/${AGENT_SERVICE}.service"
+    rm -f /etc/systemd/system/runman-podman-forwarding.service
+    rm -f /usr/local/sbin/runman-podman-forwarding
     systemctl daemon-reload 2>/dev/null || true
 
     # 2. 删除安装时新增/修改的受管文件（restore 已按备份删除新建项，这里兜底）
@@ -309,11 +320,16 @@ do_uninstall() {
 
     if [ "${PURGE_INCUS:-0}" = "1" ]; then
         log "$(t "Full uninstall complete; managed Incus artifacts were removed." "完整卸载完成；受管 Incus 制品已删除。")"
+    elif [ "$previous_virt" = "podman" ]; then
+        log "$(t "Uninstall complete. Podman containers, narwhal-net, images and /data are preserved." \
+            "卸载完成。已保留 Podman 容器、narwhal-net、镜像与 /data 数据盘。")"
     else
         log "$(t "Uninstall complete. Incus containers/images and other services are preserved." "卸载完成。已保留 incus 容器/镜像及其它业务服务。")"
     fi
     log "$(t "Backups kept at: $INCUS_IPV6_BACKUP_DIR (rerun install.sh --rollback-ipv6 if needed)" "备份保留于: $INCUS_IPV6_BACKUP_DIR（如有需要可重新运行 install.sh --rollback-ipv6）")"
-    [ "${PURGE_INCUS:-0}" = "1" ] || log "$(t "For a clean reinstall, use: bash install.sh --uninstall --purge-incus" "如需彻底清理后重装: bash install.sh --uninstall --purge-incus")"
+    if [ "${PURGE_INCUS:-0}" != "1" ] && [ "$previous_virt" = "incus" ]; then
+        log "$(t "For a clean Incus reinstall, use: bash install.sh --uninstall --purge-incus" "如需彻底清理 Incus 后重装: bash install.sh --uninstall --purge-incus")"
+    fi
 }
 
 # ── Language selection ────────────────────────────────────────────────────────
@@ -324,6 +340,7 @@ INSTALL_RFW_FORCE=0
 FORCE_IMAGE_REFRESH="${FORCE_IMAGE_REFRESH:-0}"
 
 # 本地 incus 镜像服务 / 定制能力相关环境变量（离线/内网部署用）
+[ "${INCUS_IMAGE_MIRROR+x}" = x ] && INCUS_IMAGE_MIRROR_EXPLICIT=1 || INCUS_IMAGE_MIRROR_EXPLICIT=0
 INCUS_IMAGE_MIRROR="${INCUS_IMAGE_MIRROR:-$DEFAULT_INCUS_IMAGE_MIRROR}"  # 私有 simplestreams 镜像服务器（fork 默认）；留空则使用 GitHub releases
 INCUS_LOCAL_IMAGE_DIR="${INCUS_LOCAL_IMAGE_DIR:-}" # 本地镜像目录（含 incus-<distro>-<arch>.tar.gz），直接离线导入
 INCUS_ALPINE_BASE="${INCUS_ALPINE_BASE:-}"         # 定制 alpine 基础镜像：本地 tar.gz 路径或已存在的 incus 别名
@@ -334,6 +351,9 @@ INCUS_BANNER_TEXT="${INCUS_BANNER_TEXT:-}"         # preset=custom 时的完整�
 INCUS_IPV6_BACKUP_DIR="${INCUS_IPV6_BACKUP_DIR:-/var/lib/narwhal-agent/backups}" # IPv6 配置备份目录
 INCUS_IPV6_ONLY="${INCUS_IPV6_ONLY:-}" # 设为 1 时新建容器为纯 IPv6（不分配 IPv4），需 IPv6 模式为 subnet/snat
 IPV6_ROUTED="${IPV6_ROUTED:-0}"         # 1=独立 routed prefix（6in4/WireGuard 等），无需上游 NDP
+[ "${PODMAN_REGISTRY_MIRROR+x}" = x ] && PODMAN_REGISTRY_MIRROR_EXPLICIT=1 || PODMAN_REGISTRY_MIRROR_EXPLICIT=0
+PODMAN_DATA_SIZE="${PODMAN_DATA_SIZE:-}" # Podman XFS 数据盘大小；留空时按根分区可用空间推荐
+PODMAN_REGISTRY_MIRROR="${PODMAN_REGISTRY_MIRROR:-}" # docker.io registry mirror，例如 mirror.example.com
 VIRT_TYPE_REQUESTED="${VIRT_TYPE_REQUESTED:-}"
 NON_INTERACTIVE="${NON_INTERACTIVE:-0}"
 ORIGINAL_ARGC=$#
@@ -345,6 +365,8 @@ TOKEN_VALUE="${TOKEN_VALUE:-}"
 INITIAL_TOKEN="${NARWHAL_AGENT_TOKEN:-}"
 GENERATE_TOKEN=0
 SKIP_IPV6_PROBE="${SKIP_IPV6_PROBE:-0}"
+SYSTEM_ACTION=""
+IMAGE_MENU=0
 
 # 一键模式：IPv6 探测 / 备份 / 回滚，处理后退出
 IPV6_ONESHOT_MODE="${IPV6_ONESHOT_MODE:-}"
@@ -362,39 +384,94 @@ Runman Agent installer
   bash install.sh --show-token             Print current integration Token
   bash install.sh --rotate-token           Generate, store and print a new Token
   bash install.sh --rotate-token --token X Store and print a custom Token
-  bash install.sh --uninstall              Remove Agent, preserve Incus artifacts
+  bash install.sh --status                 Show Agent/backend/service status
+  bash install.sh --restart-agent          Restart Agent and optional rfw
+  bash install.sh --reset-panel-password   Reset panel password interactively
+  bash install.sh --uninstall              Remove Agent; preserve backend containers/images/data
   bash install.sh --uninstall --purge-incus
                                            Remove Agent and managed Incus artifacts
 
 IPv6: --ipv6-mode none|snat|subnet --ipv6-addr ADDR
       --ipv6-subnet CIDR --ipv6-iface IFACE --ipv6-routed
       --ipv6-only | --nat4 --skip-ipv6-probe
+Podman: --data-size 10G --podman-registry-mirror mirror.example.com
 EOF
+}
+
+show_agent_status() {
+    local virt="not-installed" agent_state="inactive" backend_state="n/a" rfw_state="not-installed"
+    if [ -f "$AGENT_CONFIG_FILE" ] && command -v jq >/dev/null 2>&1; then
+        virt=$(jq -r '.virt_type // "unknown"' "$AGENT_CONFIG_FILE" 2>/dev/null || echo unknown)
+    fi
+    command -v systemctl >/dev/null 2>&1 && agent_state=$(systemctl is-active "$AGENT_SERVICE" 2>/dev/null || true)
+    case "$virt" in
+        podman) backend_state=$(systemctl is-active podman.socket 2>/dev/null || true) ;;
+        incus) backend_state=$(systemctl is-active incus 2>/dev/null || true) ;;
+        cloudhv) backend_state=$([ -e /dev/kvm ] && echo ready || echo no-kvm) ;;
+    esac
+    [ -f "$RFW_BIN_DIR/rfw" ] && rfw_state=$(systemctl is-active rfw 2>/dev/null || true)
+    printf '%s\n' \
+        "VIRT_TYPE=$virt" \
+        "AGENT_SERVICE=$agent_state" \
+        "BACKEND_SERVICE=$backend_state" \
+        "RFW_SERVICE=$rfw_state" \
+        "PANEL=http://$(curl -4 -s --max-time 5 ip.sb 2>/dev/null || echo '<host-ip>'):$AGENT_WEB_PORT"
+}
+
+restart_agent_services() {
+    [ -f "$AGENT_BINARY" ] || die "$(t "Agent is not installed." "Agent 尚未安装。")"
+    systemctl restart "$AGENT_SERVICE"
+    [ -f "$RFW_BIN_DIR/rfw" ] && systemctl restart rfw 2>/dev/null || true
+    log "$(t "Agent services restarted." "Agent 服务已重启。")"
+    show_agent_status
+}
+
+reset_panel_password() {
+    [ -x "$AGENT_BINARY" ] && [ -f "$AGENT_CONFIG_FILE" ] \
+        || die "$(t "Agent is not installed." "Agent 尚未安装。")"
+    [ "$NON_INTERACTIVE" != "1" ] && [ -t 0 ] \
+        || die "$(t "Panel password reset requires an interactive terminal." "重置面板密码需要交互式终端。")"
+    local first second
+    read -rsp "$(t "New panel password (minimum 8 characters): " "新面板密码（至少 8 个字符）: ")" first; echo
+    read -rsp "$(t "Confirm new panel password: " "再次输入新面板密码: ")" second; echo
+    [ "$first" = "$second" ] || die "$(t "Passwords do not match." "两次密码不一致。")"
+    [ "${#first}" -ge 8 ] || die "$(t "Password must contain at least 8 characters." "密码至少需要 8 个字符。")"
+    "$AGENT_BINARY" --config "$AGENT_CONFIG_FILE" --reset-password "$first" >/dev/null
+    systemctl restart "$AGENT_SERVICE"
+    log "$(t "Panel password reset; Agent restarted." "面板密码已重置，Agent 已重启。")"
 }
 
 show_main_menu() {
     printf '\n%s\n' "$(t "Runman Agent guided operations" "Runman Agent 菜单引导")"
     printf '  1) %s\n' "$(t "Install/update (guided network setup)" "安装/更新（网络引导配置）")"
-    printf '  2) %s\n' "$(t "Detect IPv6 only" "仅探测 IPv6")"
-    printf '  3) %s\n' "$(t "Validate a manual IPv6 /64" "验证手工 IPv6 /64")"
-    printf '  4) %s\n' "$(t "Show integration Token" "显示对接 Token")"
-    printf '  5) %s\n' "$(t "Rotate integration Token" "轮换对接 Token")"
-    printf '  6) %s\n' "$(t "Back up IPv6 configuration" "备份 IPv6 配置")"
-    printf '  7) %s\n' "$(t "Roll back IPv6 configuration" "回滚 IPv6 配置")"
-    printf '  8) %s\n' "$(t "Uninstall Agent (keep Incus artifacts)" "卸载 Agent（保留 Incus 制品）")"
-    printf '  9) %s\n' "$(t "Full uninstall (delete managed Incus artifacts)" "完整卸载（删除受管 Incus 制品）")"
+    printf '  2) %s\n' "$(t "Show installation/service status" "查看安装/服务状态")"
+    printf '  3) %s\n' "$(t "Restart Agent and firewall" "重启 Agent 与防火墙")"
+    printf '  4) %s\n' "$(t "Reset Web panel password" "重置 Web 面板密码")"
+    printf '  5) %s\n' "$(t "Detect IPv6 only" "仅探测 IPv6")"
+    printf '  6) %s\n' "$(t "Validate a manual IPv6 /64" "验证手工 IPv6 /64")"
+    printf '  7) %s\n' "$(t "Show integration Token" "显示对接 Token")"
+    printf '  8) %s\n' "$(t "Rotate integration Token" "轮换对接 Token")"
+    printf '  9) %s\n' "$(t "Back up IPv6 configuration" "备份 IPv6 配置")"
+    printf ' 10) %s\n' "$(t "Roll back IPv6 configuration" "回滚 IPv6 配置")"
+    printf ' 11) %s\n' "$(t "Uninstall Agent (keep containers/images)" "卸载 Agent（保留容器/镜像）")"
+    printf ' 12) %s\n' "$(t "Full Incus cleanup and uninstall" "清理 Incus 制品并完整卸载")"
+    printf ' 13) %s\n' "$(t "Configure/refresh container images" "配置/刷新容器镜像")"
     printf '  0) %s\n' "$(t "Exit" "退出")"
     read -rp '> ' _menu_choice
     case "${_menu_choice}" in
         1) GUIDED_INSTALL=1 ;;
-        2) IPV6_ONESHOT_MODE="detect" ;;
-        3) IPV6_ONESHOT_MODE="validate" ;;
-        4) TOKEN_ACTION="show" ;;
-        5) TOKEN_ACTION="rotate" ;;
-        6) IPV6_ONESHOT_MODE="backup" ;;
-        7) IPV6_ONESHOT_MODE="rollback" ;;
-        8) UNINSTALL=1 ;;
-        9) UNINSTALL=1; PURGE_INCUS=1 ;;
+        2) SYSTEM_ACTION="status" ;;
+        3) SYSTEM_ACTION="restart" ;;
+        4) SYSTEM_ACTION="reset-password" ;;
+        5) IPV6_ONESHOT_MODE="detect" ;;
+        6) IPV6_ONESHOT_MODE="validate" ;;
+        7) TOKEN_ACTION="show" ;;
+        8) TOKEN_ACTION="rotate" ;;
+        9) IPV6_ONESHOT_MODE="backup" ;;
+        10) IPV6_ONESHOT_MODE="rollback" ;;
+        11) UNINSTALL=1 ;;
+        12) UNINSTALL=1; PURGE_INCUS=1 ;;
+        13) GUIDED_INSTALL=1; FORCE_IMAGE_REFRESH=1; IMAGE_MENU=1 ;;
         0) exit 0 ;;
         *) die "$(t "Invalid menu selection." "无效的菜单选项。")" ;;
     esac
@@ -407,9 +484,11 @@ while [[ $# -gt 0 ]]; do
         --virt) [ $# -ge 2 ] || die "--virt requires a value"; VIRT_TYPE_REQUESTED="$2"; shift 2 ;;
         --install-rfw) INSTALL_RFW_FORCE=1; shift ;;
         --force-images) FORCE_IMAGE_REFRESH=1; shift ;;
-        --image-mirror) [ $# -ge 2 ] || die "--image-mirror requires a value"; INCUS_IMAGE_MIRROR="$2"; shift 2 ;;
+        --image-mirror) [ $# -ge 2 ] || die "--image-mirror requires a value"; INCUS_IMAGE_MIRROR="$2"; INCUS_IMAGE_MIRROR_EXPLICIT=1; shift 2 ;;
         --local-image-dir) [ $# -ge 2 ] || die "--local-image-dir requires a value"; INCUS_LOCAL_IMAGE_DIR="$2"; shift 2 ;;
         --alpine-base) [ $# -ge 2 ] || die "--alpine-base requires a value"; INCUS_ALPINE_BASE="$2"; shift 2 ;;
+        --data-size) [ $# -ge 2 ] || die "--data-size requires a value"; PODMAN_DATA_SIZE="$2"; shift 2 ;;
+        --podman-registry-mirror) [ $# -ge 2 ] || die "--podman-registry-mirror requires a value"; PODMAN_REGISTRY_MIRROR="$2"; PODMAN_REGISTRY_MIRROR_EXPLICIT=1; shift 2 ;;
         --ipv6-alloc) [ $# -ge 2 ] || die "--ipv6-alloc requires a value"; INCUS_IPV6_ALLOC="$2"; shift 2 ;;
         --wg-ipv6-subnet) [ $# -ge 2 ] || die "--wg-ipv6-subnet requires a value"; INCUS_WG_IPV6_SUBNET="$2"; shift 2 ;;
         --ipv6-mode) [ $# -ge 2 ] || die "--ipv6-mode requires a value"; IPV6_MODE="$2"; shift 2 ;;
@@ -432,6 +511,9 @@ while [[ $# -gt 0 ]]; do
         --rollback-ipv6) IPV6_ONESHOT_MODE="rollback"; shift ;;
         --show-token) TOKEN_ACTION="show"; shift ;;
         --rotate-token) TOKEN_ACTION="rotate"; shift ;;
+        --status) SYSTEM_ACTION="status"; shift ;;
+        --restart-agent) SYSTEM_ACTION="restart"; shift ;;
+        --reset-panel-password) SYSTEM_ACTION="reset-password"; shift ;;
         --uninstall) UNINSTALL=1; shift ;;
         --purge-incus) PURGE_INCUS=1; UNINSTALL=1; shift ;;
         -h|--help) show_help; exit 0 ;;
@@ -472,6 +554,11 @@ if [ "$FORCE_MENU" = "1" ] || { [ "$ORIGINAL_ARGC" -eq 0 ] && [ -t 0 ]; }; then
 fi
 
 # ── 一键 Token / 备份 / 回滚 / 卸载（处理完即退出）──
+case "$SYSTEM_ACTION" in
+    status) show_agent_status; exit 0 ;;
+    restart) restart_agent_services; exit 0 ;;
+    reset-password) reset_panel_password; exit 0 ;;
+esac
 case "$TOKEN_ACTION" in
     show) show_agent_token; exit 0 ;;
     rotate) rotate_agent_token; exit 0 ;;
@@ -689,15 +776,31 @@ PY
 }
 
 prompt_ipv6_strategy() {
-    local choice
+    local backend="${1:-incus}" choice
     printf '\n%s\n' "$(t "Container network mode:" "容器网络模式:")"
     printf '  1) %s\n' "$(t "NAT4 + public IPv6 (auto detect; recommended)" "NAT4 + 公网 IPv6（自动探测，推荐）")"
-    printf '  2) %s\n' "$(t "IPv6-only (auto detect)" "纯 IPv6（自动探测）")"
-    printf '  3) %s\n' "$(t "NAT4 + manual routed/native /64" "NAT4 + 手工路由/原生 /64")"
-    printf '  4) %s\n' "$(t "IPv6-only + manual routed/native /64" "纯 IPv6 + 手工路由/原生 /64")"
-    printf '  5) %s\n' "$(t "IPv4 NAT only" "仅 IPv4 NAT")"
-    printf '  6) %s\n' "$(t "NAT4 + IPv6 SNAT (auto-detect host address)" "NAT4 + IPv6 SNAT（自动探测宿主机地址）")"
+    if [ "$backend" = "incus" ]; then
+        printf '  2) %s\n' "$(t "IPv6-only (auto detect)" "纯 IPv6（自动探测）")"
+        printf '  3) %s\n' "$(t "NAT4 + manual routed/native /64" "NAT4 + 手工路由/原生 /64")"
+        printf '  4) %s\n' "$(t "IPv6-only + manual routed/native /64" "纯 IPv6 + 手工路由/原生 /64")"
+        printf '  5) %s\n' "$(t "IPv4 NAT only" "仅 IPv4 NAT")"
+        printf '  6) %s\n' "$(t "NAT4 + IPv6 SNAT (auto-detect host address)" "NAT4 + IPv6 SNAT（自动探测宿主机地址）")"
+    else
+        printf '  2) %s\n' "$(t "NAT4 + manual routed/native /64" "NAT4 + 手工路由/原生 /64")"
+        printf '  3) %s\n' "$(t "IPv4 NAT only" "仅 IPv4 NAT")"
+        printf '  4) %s\n' "$(t "NAT4 + IPv6 SNAT (auto-detect host address)" "NAT4 + IPv6 SNAT（自动探测宿主机地址）")"
+    fi
     read -rp '[1] > ' choice
+    if [ "$backend" != "incus" ]; then
+        case "${choice:-1}" in
+            1) IPV6_DETECT_CONFIRMED=1 ;;
+            2) prompt_manual_ipv6 ;;
+            3) IPV6_MODE="none" ;;
+            4) IPV6_MODE="snat"; IPV6_DETECT_CONFIRMED=1 ;;
+            *) die "$(t "Invalid network mode." "无效网络模式。")" ;;
+        esac
+        return 0
+    fi
     case "${choice:-1}" in
         1) INCUS_IPV6_ONLY=0; IPV6_DETECT_CONFIRMED=1 ;;
         2) INCUS_IPV6_ONLY=1; IPV6_DETECT_CONFIRMED=1 ;;
@@ -726,6 +829,11 @@ import sys
 
 iface = ipaddress.IPv6Interface(sys.argv[1])
 uplink = ipaddress.IPv6Address(sys.argv[2])
+# Docker/Podman bridges frequently expose ULA prefixes (fc00::/7). They may
+# pass a source-address curl probe through host NAT, but they are not provider-
+# routed public prefixes and must never replace the uplink's global address.
+if not iface.ip.is_global:
+    raise SystemExit(0)
 # A /128 on lo is the usual routed-prefix gateway marker.  Derive /64 and
 # prove it below; false candidates fail the independent-source probe.
 prefix = min(iface.network.prefixlen, 64)
@@ -946,14 +1054,19 @@ create_xfs_disk() {
     local disk=$1 size=$2 mount=$3 opts=$4
     if [ ! -f "$disk" ]; then
         log "$(t "Creating XFS disk $disk ($size)..." "创建 XFS 磁盘 $disk ($size)...")"
-        # 确保完全预分配空间，避免稀疏文件导致的高负载下挂载挂起
-        if ! fallocate -l "$size" "$disk" 2>/dev/null; then
-            log "$(t "fallocate failed, using dd..." "fallocate 失败，改用 dd...")"
-            local m_size
-            m_size=$(echo "$size" | sed 's/[Gg]/*1024/;s/[Mm]//' | bc 2>/dev/null || echo "20480")
-            dd if=/dev/zero of="$disk" bs=1M count="$m_size" status=progress
+        # 在临时文件中完全预分配，失败时不留下半成品，也不再用 dd 继续填满根分区。
+        local creating="${disk}.creating"
+        rm -f -- "$creating"
+        if ! fallocate -l "$size" "$creating" 2>/dev/null; then
+            rm -f -- "$creating"
+            log "$(t "Unable to allocate $size; choose a smaller data disk." "无法分配 $size，请选择更小的数据盘。")"
+            return 1
         fi
-        mkfs.xfs -f "$disk"
+        if ! mkfs.xfs -f "$creating"; then
+            rm -f -- "$creating"
+            return 1
+        fi
+        mv "$creating" "$disk"
     else
         log "$(t "$disk already exists, skipping." "$disk 已存在，跳过。")"
     fi
@@ -977,6 +1090,145 @@ EOF
         fi
     fi
     grep -q "$disk" /etc/fstab || echo "$disk $mount xfs $opts 0 0" >> /etc/fstab
+}
+
+recommended_podman_data_size() {
+    local avail_mb target
+    avail_mb=$(df -Pm / | awk 'NR==2 {print $4}')
+    target=$(( (avail_mb - 2048) / 1024 ))
+    [ "$target" -gt 20 ] && target=20
+    [ "$target" -ge 2 ] || return 1
+    printf '%sG\n' "$target"
+}
+
+validate_podman_data_size() {
+    local value="$1" amount unit requested_mb avail_mb
+    case "$value" in
+        *[Gg]) amount="${value%[Gg]}"; unit=G ;;
+        *[Mm]) amount="${value%[Mm]}"; unit=M ;;
+        *) return 1 ;;
+    esac
+    case "$amount" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$amount" -gt 0 ] || return 1
+    if [ "$unit" = G ]; then requested_mb=$((amount * 1024)); else requested_mb=$amount; fi
+    [ "$requested_mb" -ge 1024 ] || return 1
+    avail_mb=$(df -Pm / | awk 'NR==2 {print $4}')
+    [ $((requested_mb + 1536)) -le "$avail_mb" ] || {
+        log "$(t "Insufficient root filesystem space: requested $value, available ${avail_mb}M; keep at least 1536M free." \
+            "根分区空间不足：请求 $value，可用 ${avail_mb}M；安装后至少需保留 1536M。")"
+        return 1
+    }
+}
+
+prompt_podman_options() {
+    local recommended choice custom mirror
+    recommended=$(recommended_podman_data_size) \
+        || die "$(t "At least 3.5 GiB free space is required for a Podman installation." "Podman 安装至少需要约 3.5 GiB 可用空间。")"
+    printf '\n%s\n' "$(t "Podman XFS data disk size:" "Podman XFS 数据盘容量:")"
+    printf '  1) %s (%s)\n' "$(t "Recommended for current disk" "按当前磁盘推荐")" "$recommended"
+    printf '  2) 5G\n  3) 10G\n  4) 20G\n  5) %s\n' "$(t "Custom size" "自定义容量")"
+    read -rp '[1] > ' choice
+    case "${choice:-1}" in
+        1) PODMAN_DATA_SIZE="$recommended" ;;
+        2) PODMAN_DATA_SIZE=5G ;;
+        3) PODMAN_DATA_SIZE=10G ;;
+        4) PODMAN_DATA_SIZE=20G ;;
+        5) read -rp "$(t "Custom size (for example 8G): " "自定义容量（例如 8G）: ")" custom; PODMAN_DATA_SIZE="$custom" ;;
+        *) die "$(t "Invalid data disk selection." "无效的数据盘选项。")" ;;
+    esac
+    validate_podman_data_size "$PODMAN_DATA_SIZE" \
+        || die "$(t "Invalid or oversized Podman data disk value: $PODMAN_DATA_SIZE" "Podman 数据盘容量无效或超过可用空间: $PODMAN_DATA_SIZE")"
+    read -rp "$(t "docker.io registry mirror (blank = direct): " "docker.io 镜像加速地址（留空直连）: ")" mirror
+    PODMAN_REGISTRY_MIRROR="${mirror:-$PODMAN_REGISTRY_MIRROR}"
+    [ -z "$mirror" ] || PODMAN_REGISTRY_MIRROR_EXPLICIT=1
+}
+
+configure_podman_registry_mirror() {
+    if [ -z "$PODMAN_REGISTRY_MIRROR" ]; then
+        if [ "${PODMAN_REGISTRY_MIRROR_EXPLICIT:-0}" = "1" ]; then
+            rm -f -- /etc/containers/registries.conf.d/99-runman-mirror.conf
+            log "$(t "Podman docker.io mirror cleared; direct/default registry settings will be used." "已清除 Podman docker.io 镜像加速，将使用直连/系统默认配置。")"
+        fi
+        return 0
+    fi
+    local raw="$PODMAN_REGISTRY_MIRROR" location insecure=false
+    case "$raw" in
+        http://*) insecure=true; location="${raw#http://}" ;;
+        https://*) location="${raw#https://}" ;;
+        *) location="$raw" ;;
+    esac
+    location="${location%/}"
+    case "$location" in ''|*[!A-Za-z0-9._:/-]*) die "$(t "Invalid Podman registry mirror: $raw" "Podman 镜像加速地址无效: $raw")" ;; esac
+    mkdir -p /etc/containers/registries.conf.d
+    cat > /etc/containers/registries.conf.d/99-runman-mirror.conf <<EOF
+[[registry]]
+prefix = "docker.io"
+location = "docker.io"
+
+[[registry.mirror]]
+location = "$location"
+insecure = $insecure
+EOF
+    log "$(t "Podman docker.io mirror configured: $location" "Podman docker.io 镜像加速已配置: $location")"
+}
+
+install_podman_forwarding_compat() {
+    # Docker sets the shared iptables FORWARD policy to DROP. Netavark's nft
+    # base chain cannot override an earlier DROP, so Podman traffic dies when
+    # Docker and Podman coexist. DOCKER-USER is Docker's supported insertion
+    # point; limit exceptions strictly to the Runman network subnets.
+    cat > /usr/local/sbin/runman-podman-forwarding <<'EOF'
+#!/usr/bin/env bash
+set -u
+
+apply_rule() {
+    local tool="$1"; shift
+    "$tool" -w -C DOCKER-USER "$@" 2>/dev/null || "$tool" -w -I DOCKER-USER 1 "$@"
+}
+delete_rule() {
+    local tool="$1"; shift
+    while "$tool" -w -C DOCKER-USER "$@" 2>/dev/null; do
+        "$tool" -w -D DOCKER-USER "$@" 2>/dev/null || break
+    done
+}
+
+mode="${1:-apply}"
+if iptables -w -S DOCKER-USER >/dev/null 2>&1; then
+    if [ "$mode" = remove ]; then
+        delete_rule iptables -s 10.91.0.0/20 -j ACCEPT
+        delete_rule iptables -d 10.91.0.0/20 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    else
+        apply_rule iptables -d 10.91.0.0/20 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+        apply_rule iptables -s 10.91.0.0/20 -j ACCEPT
+    fi
+fi
+if ip6tables -w -S DOCKER-USER >/dev/null 2>&1; then
+    if [ "$mode" = remove ]; then
+        delete_rule ip6tables -s fd91:cafe:cafe:10::/64 -j ACCEPT
+        delete_rule ip6tables -d fd91:cafe:cafe:10::/64 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    else
+        apply_rule ip6tables -d fd91:cafe:cafe:10::/64 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+        apply_rule ip6tables -s fd91:cafe:cafe:10::/64 -j ACCEPT
+    fi
+fi
+EOF
+    chmod 700 /usr/local/sbin/runman-podman-forwarding
+    cat > /etc/systemd/system/runman-podman-forwarding.service <<'EOF'
+[Unit]
+Description=Runman Podman forwarding compatibility for Docker hosts
+After=network-online.target docker.service podman.socket
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/runman-podman-forwarding apply
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    start_service runman-podman-forwarding
+    log "$(t "Podman/Docker forwarding compatibility applied." "已应用 Podman/Docker 共存转发兼容规则。")"
 }
 
 download_agent() {
@@ -1806,10 +2058,52 @@ detect_installed_virt_type() {
         | head -n1 | sed 's/.*:[[:space:]]*"//; s/"$//' || true
 }
 
+prompt_existing_image_update() {
+    local virt="$1" choice current value
+    if [ "$virt" = "incus" ]; then
+        current=$(jq -r '.incus_image_mirror // ""' "$AGENT_CONFIG_FILE" 2>/dev/null || true)
+        printf '\n%s\n%s\n' "$(t "Incus image management:" "Incus 镜像管理:")" \
+            "$(t "Current mirror: ${current:-<GitHub/default>}" "当前镜像源: ${current:-<GitHub/默认>}")"
+        printf '  1) %s\n' "$(t "Refresh from current source" "从当前镜像源强制刷新")"
+        printf '  2) %s\n' "$(t "Set a simplestreams/flat mirror URL and refresh" "设置 simplestreams/扁平镜像地址并刷新")"
+        printf '  3) %s\n' "$(t "Import from an offline local directory" "从离线本地目录导入")"
+        printf '  4) %s\n' "$(t "Set a custom Alpine base file/alias" "设置自定义 Alpine 基础镜像文件/别名")"
+        printf '  5) %s\n' "$(t "Reset to the podcctv default mirror" "恢复 podcctv 默认镜像源")"
+        read -rp '[1] > ' choice
+        case "${choice:-1}" in
+            1) INCUS_IMAGE_MIRROR="$current" ;;
+            2) read -rp "$(t "Mirror URL: " "镜像服务 URL: ")" value; [ -n "$value" ] || die "$(t "Mirror URL cannot be empty." "镜像服务 URL 不能为空。")"; INCUS_IMAGE_MIRROR="$value"; INCUS_IMAGE_MIRROR_EXPLICIT=1 ;;
+            3) read -rp "$(t "Local image directory: " "本地镜像目录: ")" value; [ -d "$value" ] || die "$(t "Directory not found: $value" "目录不存在: $value")"; INCUS_LOCAL_IMAGE_DIR="$value" ;;
+            4) read -rp "$(t "Alpine base tarball path or Incus alias: " "Alpine 基础镜像 tarball 路径或 Incus 别名: ")" value; [ -n "$value" ] || die "$(t "Value cannot be empty." "输入不能为空。")"; INCUS_ALPINE_BASE="$value" ;;
+            5) INCUS_IMAGE_MIRROR="$DEFAULT_INCUS_IMAGE_MIRROR"; INCUS_IMAGE_MIRROR_EXPLICIT=1 ;;
+            *) die "$(t "Invalid image operation." "无效的镜像操作。")" ;;
+        esac
+    elif [ "$virt" = "podman" ]; then
+        printf '\n%s\n' "$(t "Podman image management:" "Podman 镜像管理:")"
+        printf '  1) %s\n' "$(t "Refresh the built-in Debian and Alpine images" "刷新内置 Debian 与 Alpine 镜像")"
+        printf '  2) %s\n' "$(t "Set docker.io registry mirror and refresh" "设置 docker.io 镜像加速并刷新")"
+        printf '  3) %s\n' "$(t "Clear installer-managed registry mirror" "清除安装脚本管理的镜像加速")"
+        read -rp '[1] > ' choice
+        case "${choice:-1}" in
+            1) ;;
+            2) read -rp "$(t "Registry mirror (host[:port][/prefix] or URL): " "镜像加速地址（host[:port][/prefix] 或 URL）: ")" value; [ -n "$value" ] || die "$(t "Mirror cannot be empty." "镜像加速地址不能为空。")"; PODMAN_REGISTRY_MIRROR="$value"; PODMAN_REGISTRY_MIRROR_EXPLICIT=1 ;;
+            3) PODMAN_REGISTRY_MIRROR=""; PODMAN_REGISTRY_MIRROR_EXPLICIT=1 ;;
+            *) die "$(t "Invalid image operation." "无效的镜像操作。")" ;;
+        esac
+    else
+        log "$(t "Image refresh will use the current cloud-hypervisor source." "镜像刷新将使用当前 cloud-hypervisor 镜像源。")"
+    fi
+}
+
 # ── Update flow ───────────────────────────────────────────────────────────────
 
 if systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null || [ -f "$AGENT_BINARY" ]; then
     log "$(t "Existing NarwhalCloud Agent detected, updating..." "检测到已安装的 NarwhalCloud Agent，执行更新流程...")"
+
+    _installed_virt=$(detect_installed_virt_type)
+    if [ "$IMAGE_MENU" = "1" ] && [ "$NON_INTERACTIVE" != "1" ] && [ -t 0 ]; then
+        prompt_existing_image_update "$_installed_virt"
+    fi
 
     if [ -n "$INITIAL_TOKEN" ]; then
         write_agent_token "$INITIAL_TOKEN"
@@ -1858,8 +2152,17 @@ if systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null || [ -f "$AGENT_BINA
 
     # Refresh prebuilt base images for VM-style virtualization.
     # 已运行的实例使用的是镜像副本，替换基础镜像只影响之后新建的实例。
-    VIRT_TYPE=$(detect_installed_virt_type)
+    VIRT_TYPE="$_installed_virt"
     case "$VIRT_TYPE" in
+        podman)
+            configure_podman_registry_mirror
+            install_podman_forwarding_compat
+            if [ "$FORCE_IMAGE_REFRESH" = "1" ]; then
+                for image in "docker.io/narwhalcloud/debian:podman" "docker.io/narwhalcloud/alpine:podman"; do
+                    podman pull "$image" || die "$(t "Failed to refresh Podman image: $image" "Podman 镜像刷新失败: $image")"
+                done
+            fi
+            ;;
         cloudhv)
             log "$(t "Checking prebuilt VM images for updates..." "检查预构建 VM 镜像更新...")"
             VM_IMAGE_REFRESH=1
@@ -1871,6 +2174,14 @@ if systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null || [ -f "$AGENT_BINA
             fi
             ;;
         incus)
+            if [ "$INCUS_IMAGE_MIRROR_EXPLICIT" = "1" ] || [ -n "$INCUS_ALPINE_BASE" ]; then
+                jq --arg mirror "$INCUS_IMAGE_MIRROR" --arg base "$INCUS_ALPINE_BASE" \
+                    '.incus_image_mirror = $mirror | if $base != "" then .incus_alpine_base = $base else . end' \
+                    "$AGENT_CONFIG_FILE" > "$AGENT_CONFIG_FILE.tmp" \
+                    && mv "$AGENT_CONFIG_FILE.tmp" "$AGENT_CONFIG_FILE" \
+                    && chmod 600 "$AGENT_CONFIG_FILE"
+                systemctl restart "$AGENT_SERVICE"
+            fi
             log "$(t "Checking prebuilt Incus images for updates..." "检查预构建 Incus 镜像更新...")"
             if [ -n "$INCUS_LOCAL_IMAGE_DIR" ]; then
                 import_local_incus_images || true
@@ -1911,6 +2222,8 @@ fi
 
 # ── Fresh install ─────────────────────────────────────────────────────────────
 
+[ "$IMAGE_MENU" = "1" ] && die "$(t "Agent is not installed; use menu option 1 first." "Agent 尚未安装，请先使用菜单选项 1 安装。")"
+
 log "$(t "Starting fresh installation..." "开始全新安装流程...")"
 
 
@@ -1922,8 +2235,8 @@ else
     printf "$(t "Select virtualization type:" "选择虚拟化类型：")\n"
     printf "  1) Podman container ($(t "recommended" "推荐"))\n"
     printf "  2) cloud-hypervisor VM ($(t "experimental, requires /dev/kvm" "实验性，需要 /dev/kvm"))\n"
-    printf "  3) Incus (LXC) ($(t "experimental" "实验性"))\n"
-    log "$(t "WARNING: Types 2 and 3 are currently experimental and may not be stable." "警告：选项 2 和 3 目前处于实验阶段，稳定性可能不足。")"
+    printf "  3) Incus (LXC) ($(t "enhanced in this fork" "本 Fork 已增强"))\n"
+    log "$(t "WARNING: cloud-hypervisor (type 2) is experimental. Incus has guided image and IPv6 support in this fork." "提示：cloud-hypervisor（选项 2）仍为实验性；本 Fork 已为 Incus 补齐镜像与 IPv6 引导。")"
     read -rp "> " _virt_choice
     case "${_virt_choice}" in
         2) VIRT_TYPE="cloudhv" ;;
@@ -1938,6 +2251,22 @@ if [ "$VIRT_TYPE" = "cloudhv" ]; then
     log "$(t "✓ KVM support detected." "✓ 检测到 KVM 支持。")"
 fi
 log "$(t "Selected virtualization type: $VIRT_TYPE" "选择的虚拟化类型: $VIRT_TYPE")"
+
+if [ "$VIRT_TYPE" = "podman" ]; then
+    if [ ! -f /xfs_disk.img ]; then
+        if [ "$NON_INTERACTIVE" != "1" ] && [ -t 0 ]; then
+            prompt_podman_options
+        else
+            [ -n "$PODMAN_DATA_SIZE" ] || PODMAN_DATA_SIZE=$(recommended_podman_data_size) \
+                || die "$(t "At least 3.5 GiB free space is required for a Podman installation." "Podman 安装至少需要约 3.5 GiB 可用空间。")"
+            validate_podman_data_size "$PODMAN_DATA_SIZE" \
+                || die "$(t "Invalid or oversized Podman data disk value: $PODMAN_DATA_SIZE" "Podman 数据盘容量无效或超过可用空间: $PODMAN_DATA_SIZE")"
+        fi
+    elif [ "$NON_INTERACTIVE" != "1" ] && [ -t 0 ]; then
+        read -rp "$(t "docker.io registry mirror (blank = keep direct/default): " "docker.io 镜像加速地址（留空保持直连/现有配置）: ")" _podman_mirror
+        [ -z "$_podman_mirror" ] || PODMAN_REGISTRY_MIRROR="$_podman_mirror"
+    fi
+fi
 
 # ── Installation ───────────────────────────────────────────────────────────────
 
@@ -2003,10 +2332,9 @@ EOF
             echo 1 > "/sys/block/${_loop_dev#/dev/}/loop/direct_io" 2>/dev/null || true
         fi
     else
-        read -rp "$(t "Enter data disk size (e.g. 20G): " "请输入数据盘大小 (例如 20G): ")" xfs_size
-        xfs_size=${xfs_size:-20G}
-        # 增加 noatime 优化性能和稳定性
-        create_xfs_disk "/xfs_disk.img" "$xfs_size" "/data" "defaults,pquota,loop,noatime"
+        # 增加 noatime 优化性能和稳定性；容量已在菜单/参数阶段校验。
+        create_xfs_disk "/xfs_disk.img" "$PODMAN_DATA_SIZE" "/data" "defaults,pquota,loop,noatime" \
+            || die "$(t "Failed to create the Podman XFS data disk." "Podman XFS 数据盘创建失败。")"
     fi
 fi
 
@@ -2018,6 +2346,7 @@ runroot = "/run/containers/storage"
 graphroot = "/data/containers/storage"
 EOF
     mkdir -p /data/containers/storage
+    configure_podman_registry_mirror
 fi
 
 configure_host_ipv6_routing() {
@@ -2061,9 +2390,10 @@ configure_host_ipv6_routing() {
 # 初始化 IPv6 模式变量
 # IPV6_CONFIG: 检测原始结果，"none" 或 "iface|addr|prefix"
 # IPV6_MODE:   最终运行模式，"none" / "snat" / "subnet"（写入 config.json）
-# Incus 交互安装统一进入网络场景菜单；命令行已给 --ipv6-mode 时不再询问。
-if [ "$VIRT_TYPE" = "incus" ] && [ "$NON_INTERACTIVE" != "1" ] && [ -z "${IPV6_MODE:-}" ]; then
-    prompt_ipv6_strategy
+# 三种后端的交互安装统一进入网络场景菜单；命令行已给 --ipv6-mode 时不再询问。
+# Podman/cloud-hypervisor 固定保留 NAT4，因此不会显示 Incus 专属的纯 IPv6 选项。
+if [ "$NON_INTERACTIVE" != "1" ] && [ -z "${IPV6_MODE:-}" ]; then
+    prompt_ipv6_strategy "$VIRT_TYPE"
 fi
 
 # 保存用户通过环境变量显式指定的值（如 IPV6_MODE=subnet bash install.sh）
@@ -2265,6 +2595,8 @@ PYEOF
     NDP_NETWORK="$PODMAN_NETWORK"
     log "$(t "✓ NDP responder will be handled by NarwhalCloud Agent." "✓ NDP responder 将由 NarwhalCloud Agent 内置处理。")"
 fi
+
+install_podman_forwarding_compat
 
 # Podman auto-restart service
 cat > /usr/lib/systemd/system/podman-restart.service <<'EOF'

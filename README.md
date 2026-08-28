@@ -65,8 +65,8 @@ NarwhalCloud Agent（`narwhal-agent`）是运行在宿主机（母鸡）上的�
 | 操作系统 | **Debian 13 (Trixie)** — 强烈推荐    |
 | 架构   | x86_64 (amd64) · aarch64 (arm64) |
 | 内存   | ≥ 1 GB RAM                       |
-| 磁盘   | ≥ 10 GB 可用空间                     |
-| 后端依赖 | Incus 模式需提前安装 `incus` / `incus-ui` |
+| 磁盘   | 建议 ≥ 10 GB；Podman 最低约 3.5 GiB 可用空间，菜单会按剩余空间推荐并校验 |
+| 后端依赖 | 安装器会安装 Podman/Incus 依赖；已有 Docker 业务可以保留 |
 
 > **为什么选 Debian 13？** 安装脚本使用了 `apt`、`podman`、`systemd-zram-generator` 等依赖，这些在 Debian 13 上完整可用。使用其他发行版可能导致意外失败。
 
@@ -98,9 +98,43 @@ bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/in
 需要固定版本时可设置 `AGENT_RELEASE_TAG=vX.Y.Z`，私有镜像或自建下载源可设置
 `RUNMAN_AGENT_DOWNLOAD_BASE=https://...`。
 
-无参数执行时会进入总菜单，可选择安装/更新、IPv6 探测、手工 `/64` 验证、Token
-查看/轮换、网络备份/回滚和两种卸载方式。选择安装后依次引导：虚拟化类型、容器网络场景、
-对接 Token、rfw 以及登录横幅。Incus 网络菜单覆盖：
+### 新手安装前需要准备什么
+
+安装脚本不会要求填写服务器 root 密码（你已经通过 SSH 登录）；需要准备或现场选择的内容如下。
+示例全部使用脱敏占位符，不要把真实密码、Token 或私钥写进 README、工单或截图。
+
+| 项目 | 什么时候需要 | 填写示例（脱敏） | 不清楚时怎么选 |
+|---|---|---|---|
+| 虚拟化后端 | 所有人 | `Podman` / `Incus` | 普通 OCI 容器选 Podman；需要完整系统容器、纯 IPv6 或自建 simplestreams 源选 Incus |
+| Podman 数据盘 | 首次 Podman 安装 | `8G` | 选“按当前磁盘推荐”；脚本至少保留 1536 MiB 根分区空间，超量会拒绝 |
+| Docker Hub 加速地址 | Podman 可选 | `https://mirror.example.com` | 能直连 `docker.io` 就留空；私有源需要先 `podman login` |
+| 网络场景 | 所有人 | NAT4、IPv6 SNAT、公网 `/64` | 不懂 IPv6 时选“自动探测”；无 IPv6 选“仅 IPv4 NAT” |
+| IPv6 上行网卡 | 仅手工 IPv6 | `eth0` / `ens3` / `he-ipv6` | 用 `ip -6 route show default` 查看；不要照抄示例 |
+| IPv6 地址和 CIDR | 仅手工 `/64` | `2001:db8:100::1`、`2001:db8:100::/64` | 必须使用供应商真实分配；`2001:db8::/32` 仅文档示例，不能上网 |
+| 前缀类型 | 仅手工 `/64` | 路由/隧道 或 原生二层 | HE/WireGuard/供应商静态路由选“路由/隧道”；同一二层网段选“原生/NDP” |
+| 对接 Token | 首装或轮换 | `<平台生成的Token>` | 留空自动生成；安装结束会打印，配置文件权限为 `0600` |
+| rfw 网卡 | 选择安装 rfw 时 | `ens3` | 选择拥有公网 IPv4 的物理/虚拟上行网卡，不选 `docker0`、`podman*`、`incusbr0` |
+| 登录横幅 | Incus 可选 | 项目名称、支持地址 | 不需要就选“无”；不要写密码、Token、私钥 |
+
+### 总菜单说明
+
+无参数执行时进入数字选择菜单。常见运维不需要记命令：
+
+| 菜单 | 操作 | 是否修改系统 |
+|---:|---|---|
+| 1 | 安装或更新 Agent；首次安装继续选择后端和网络 | 是 |
+| 2 | 查看后端、Agent、rfw、面板地址 | 否 |
+| 3 | 重启 Agent 与 rfw | 是，可恢复 |
+| 4 | 隐藏输入并确认新的 Web 面板密码 | 是 |
+| 5–6 | 自动探测 IPv6、验证手工 `/64` | 探测仅临时绑定测试地址，结束即删除 |
+| 7–8 | 显示或轮换对接 Token | 轮换会重启 Agent |
+| 9–10 | 备份或回滚安装器管理的网络配置 | 是 |
+| 11 | 卸载 Agent，保留容器、镜像和数据盘 | 是 |
+| 12 | Incus 完整清理：删除受管实例、ready 镜像、`incusbr0` 和镜像 remote | **破坏性，菜单要求确认** |
+| 13 | 配置/刷新镜像：Incus URL/离线目录/基础镜像；Podman registry mirror/基础镜像 | 是 |
+
+选择安装后依次引导：虚拟化类型、Podman 数据盘及 registry mirror（如适用）、容器网络、
+对接 Token、rfw 网卡以及 Incus 登录横幅。Incus 网络菜单覆盖：
 
 1. **NAT4 + 公网 IPv6 自动探测**（推荐）；
 2. **纯 IPv6 自动探测**；
@@ -110,7 +144,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/in
 6. **NAT4 + IPv6 SNAT**。
 
 自动探测会区分原生二层、HE 6in4、WireGuard 和供应商静态路由前缀；手工模式会验证地址、
-CIDR、网卡、前缀归属，并临时绑定测试地址验证独立源地址出站连通性。
+CIDR、网卡、前缀归属，并临时绑定测试地址验证独立源地址出站连通性。Docker/Podman 的
+ULA（`fc00::/7`）和链路本地地址不会被当成公网路由前缀。
 
 ### 非交互 / 一键参数
 
@@ -141,6 +176,16 @@ bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/in
 bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh) \
   --virt incus --ipv6-mode snat --nat4 --non-interactive
 
+# Podman：3G XFS 数据盘 + 单公网 IPv6 SNAT；非交互模式不会再等待容量输入
+bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh) \
+  zh --virt podman --data-size 3G --ipv6-mode snat \
+  --non-interactive --generate-token
+
+# Podman：使用 docker.io registry mirror；URL/主机名按实际服务替换
+bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh) \
+  zh --virt podman --data-size 8G --ipv6-mode none \
+  --podman-registry-mirror https://mirror.example.com --non-interactive
+
 # 完全手工配置可先单独验证，不安装任何组件
 bash install.sh zh --validate-ipv6 --ipv6-mode subnet \
   --ipv6-addr 2001:db8:100::1 --ipv6-subnet 2001:db8:100::/64 \
@@ -165,6 +210,8 @@ bash install.sh zh --validate-ipv6 --ipv6-mode subnet \
 |---|---|---|
 | 菜单式全流程 | 安装、网络场景、探测/验证、Token、备份/回滚、卸载均可从总菜单进入 | `--menu`（无参数执行时默认） |
 | 私有 / 本地镜像服务 | 用私有镜像服务器或本地目录替代 GitHub Releases 拉取镜像，离线/内网可部署 | `--image-mirror`、`--local-image-dir` |
+| Podman 数据盘与镜像加速 | 按可用空间推荐 XFS 数据盘；支持配置/清除 `docker.io` registry mirror | `--data-size`、`--podman-registry-mirror` |
+| Docker + Podman 共存 | 自动安装幂等转发兼容服务，只放行 `narwhal-net`，不停止或删除已有 Docker 容器 | 默认开启 |
 | podcctv Alpine 默认镜像 | 默认从 `alpine-incus-base.428048.xyz` 校验并导入 Alpine 3.24，面板默认选中 Alpine | 无需参数；覆盖用 `--image-mirror` / `--alpine-base` |
 | SSH 欢迎页 / 横幅 | 容器登录前/后展示自定义横幅（预设或完全自定义文本） | `--banner-preset`、`--banner-text` |
 | IPv6 精细化分配 | 每个容器可分配 1–15 个公网 IPv6（非 /64 网段也可） | `--ipv6-alloc` |
@@ -172,9 +219,52 @@ bash install.sh zh --validate-ipv6 --ipv6-mode subnet \
 | 强制 SSH 密码登录 | 无论基础镜像如何，均确保容器内 root 密码登录可用 | （默认开启） |
 | IPv6 备份 / 回滚 | 改动前完整备份 sysctl/网卡/incusbr0，支持一键回滚 | `--backup-ipv6`、`--rollback-ipv6` |
 | Token 生命周期 | 首装接收或生成 Token，可打印、生成轮换或指定值轮换并自动重启 Agent | `--token`、`--generate-token`、`--show-token`、`--rotate-token` |
-| 两级一键卸载 | 普通卸载保留 Incus；彻底卸载额外删除受管实例、镜像、网桥和镜像远端 | `--uninstall`、`--purge-incus` |
+| 安全卸载与 Incus 完整清理 | 普通卸载保留后端容器、镜像、网络和数据；Incus 可另选完整清理 | `--uninstall`、`--purge-incus` |
 
-下文针对 **Incus 后端**给出完整用法；Podman / cloud-hypervisor 模式下镜像镜像服务（`--image-mirror` 等）同样适用。
+Incus 镜像使用 `--image-mirror` / `--local-image-dir`；Podman 是 OCI registry，使用
+`--podman-registry-mirror` 或在面板“镜像”页添加完整镜像名。两套协议不能混用。
+
+---
+
+## Podman 后端新手指南
+
+首次选择 Podman 后，菜单会依次询问数据盘、Docker Hub 加速地址和网络场景：
+
+1. 数据盘优先选脚本给出的推荐值。脚本创建 `/xfs_disk.img` 并以 XFS 挂载到 `/data`；
+   创建失败会删除临时文件，且始终为根分区保留至少 1536 MiB。
+2. 能直接访问 Docker Hub 时，registry mirror 留空。使用镜像站时填写
+   `https://mirror.example.com`；HTTP 内网源也支持，但会被标记为 insecure。
+3. 有单个公网 IPv6（通常 `/128`）选“**NAT4 + IPv6 SNAT**”；有真实路由 `/64`
+   选自动探测或手工 `/64`；没有 IPv6 选“**仅 IPv4 NAT**”。
+4. 宿主机已有 Docker 时无需卸载。安装器会创建
+   `runman-podman-forwarding.service`，仅在 Docker 的 `DOCKER-USER` 链放行
+   `10.91.0.0/20` 与 `fd91:cafe:cafe:10::/64` 的转发，不修改已有 Docker 容器。
+
+安装后可通过总菜单 **13 → Podman 镜像管理**刷新内置 Debian/Alpine 镜像、设置镜像加速或
+清除安装器管理的配置。对应文件是
+`/etc/containers/registries.conf.d/99-runman-mirror.conf`。
+
+### 使用自定义 OCI 镜像
+
+面板进入“镜像”页，填写完整镜像引用（例如 `registry.example.com/team/alpine:3.22`）并添加；
+状态变成 `ready` 后即可创建实例。私有 registry 需先在宿主机登录：
+
+```bash
+podman login registry.example.com
+podman pull registry.example.com/team/alpine:3.22
+```
+
+也可使用 API 自动化。以下 Token 和镜像地址都是占位符：
+
+```bash
+curl -u 'admin:<面板密码>' -H 'Content-Type: application/json' \
+  -d '{"id":"registry.example.com/team/alpine:3.22","name":"团队 Alpine"}' \
+  http://127.0.0.1:8792/api/images/custom
+```
+
+如果要自建 OCI registry，建议在另一台服务器用 `registry:2` 部署、挂载持久化目录，并在
+反向代理配置受信任的 HTTPS 证书；随后用 `podman login` 登录。不要把 Incus
+simplestreams 的 `streams/v1/images.json` 地址填进 Podman registry mirror。
 
 ---
 
@@ -257,6 +347,35 @@ bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/in
 > **兼容性**：`--image-mirror` 同时支持最简流（simplestreams）与传统的扁平 tarball 基址——脚本会先尝试 simplestreams 元数据，失败则回退到 `<mirror>/incus-<distro>-<arch>.tar.gz`。留空（或 `--image-mirror ""`）则直接使用 GitHub Releases。
 
 > **simplestreams 端点要求 `index.json`**：要让 `incus remote add --protocol=simplestreams` 或 Agent 运行时按 simplestreams 协议拉取，服务器根下必须存在合法的 `streams/v1/index.json`（格式为 `datatype: index:1.0` / `format: simplestreams:1.0`，`index` 指针指向 `streams/v1/images.json`）。本项目配套的镜像服务器构建脚本 `podcctv/alpine-base` 的 `scripts/generate-streams.py` 已修正此前误把 image-downloads 内容写入 `index.json` 的 bug；若你的服务器返回 404 或 `incus remote add` 失败，请重新运行 `python3 scripts/generate-streams.py` 并重新部署（或直接把一份正确的 `index.json` 放到 `streams/v1/` 下）。
+
+#### 自建 custom Alpine simplestreams 服务
+
+建议使用单独服务器部署，避免镜像站重启影响容器宿主机。准备 Docker、Compose 插件、Git、
+Python 3 和可用磁盘，然后执行：
+
+```bash
+git clone https://github.com/podcctv/alpine-base.git
+cd alpine-base
+
+# 从 continuous Release 下载/重新下载产物，生成并校验 simplestreams 树，再启动 nginx
+./scripts/serve-incus.sh --download
+
+# 本机校验；下面主机名必须替换成真实域名或 IP
+python3 scripts/validate-streams.py incus-server/www
+curl -fsS http://<MIRROR_HOST>:8080/streams/v1/index.json
+curl -fsS http://<MIRROR_HOST>:8080/streams/v1/images.json
+```
+
+放通 TCP 8080 后，在已安装节点运行一键脚本，选择 **13 → Incus 镜像管理 → 2**，填写
+`http://<MIRROR_HOST>:8080`；也可首装时使用
+`--image-mirror http://<MIRROR_HOST>:8080`。安装器会直接下载、校验 SHA256 并导入镜像，
+因此可信内网 HTTP 可用于这个“直接导入”步骤。
+
+生产环境应在 nginx/Caddy/Cloudflare 前配置受信任证书，最终使用
+`https://mirror.example.com`。当前 Incus 客户端的 simplestreams remote **只接受 HTTPS**；
+因此 `incus remote add` 和 Agent 后续按 remote 动态拉取都要求 HTTPS。HTTP 源即使能完成安装器
+直接导入，也无法注册成 remote，运行时会回退上游。不要使用自签名证书，除非所有客户端都已
+显式信任相应 CA。
 
 #### 注册为 incus remote（运维便利 + 运行时验证）
 
@@ -500,28 +619,67 @@ systemctl restart narwhal-agent
 
 ## 安装后验收清单
 
+先执行总菜单 **2（状态）**，确认 `AGENT_SERVICE=active`、后端服务为 `active`，并保存菜单
+**7** 打印的对接 Token。Token 只交给平台管理方，不要发到公开聊天或日志。
+
+### Podman：NAT4 + IPv6（SNAT 或真实 `/64`）
+
 ```bash
-# 1. 自动探测：最后一行应为 IFACE|ADDR|PREFIX|SUBNET|ROUTED
+# 自动探测：最后一行应为 IFACE|ADDR|PREFIX|SUBNET|ROUTED；ULA 不应被接受
 bash install.sh zh --detect-ipv6 --non-interactive
 
-# 2. 服务、镜像和网桥；默认 Alpine 应为 3.24
+# 数据盘、网络、内置镜像和 Docker 共存规则
+findmnt /data
+podman network inspect narwhal-net
+podman image exists docker.io/narwhalcloud/alpine:podman
+systemctl is-active narwhal-agent podman.socket runman-podman-forwarding
+
+# 通过面板/API 创建 Alpine 和 Debian 后，在实例内验证 v4/v6、sshd，再重启确认 IP 不变
+podman exec <实例名> sh -lc 'ip -4 addr; ip -6 addr; ping -c 3 1.1.1.1'
+podman exec <实例名> ping -6 -c 3 2606:4700:4700::1111
+podman exec <实例名> sh -lc 'ss -lnt | grep :22'
+```
+
+真实路由 `/64` 应看到实例获得公网 IPv6；`snat` 模式会看到
+`fd91:cafe:cafe:10::/64` 地址并经宿主机公网 IPv6 出站。宿主机已有 Docker 时，再确认其原有
+容器仍为 running。完成后从面板删除测试实例，`podman ps -a` 不应残留。
+
+### Incus：NAT4 + IPv6、纯 IPv6、手工 `/64`
+
+```bash
 systemctl is-active narwhal-agent incus
 incus image info alpine/3.24/cloud/amd64/ready
 incus network show incusbr0
 
-# 3. NAT4 + IPv6 实例应同时有 10.91.0.0/20 地址和公网 IPv6
+# NAT4 + IPv6 实例应同时有 10.91.0.0/20 地址和公网 IPv6
 incus exec <实例名> -- sh -lc 'ip -4 addr; ip -6 addr; ip -4 route; ip -6 route'
 
-# 4. 纯 IPv6 实例应无全局 IPv4，并能通过 IPv6 出站
+# 纯 IPv6 实例应无全局 IPv4，并能通过 IPv6 出站
 incus exec <实例名> -- sh -lc 'ip -4 -o addr show scope global | wc -l'
 incus exec <实例名> -- ping -6 -c 3 2606:4700:4700::1111
 
-# 5. Token 与面板
+# Token 与面板
 bash install.sh --show-token
 curl -I http://127.0.0.1:8792   # 未认证返回 401 属正常
 ```
 
-CI 同时执行 Go 测试、`bash -n`、总菜单退出、路由 `/64`、原生 `/64` 以及错误前缀拒绝测试。
+手工 `/64` 先用菜单 **6** 验证，再安装；必须分别覆盖路由/隧道（HE、WireGuard、供应商静态
+路由）和原生二层/NDP 场景。创建 Alpine 后验证版本、sshd、IPv6 出站、外部主机回 ping、
+重启 IP 保持，再删除实例并确认 `incus list` 无测试实例。
+
+### 自建镜像服务
+
+确认 `index.json`、`images.json` 和其中引用的两个产物都返回 200 且 SHA256 匹配；HTTPS 域名
+还应能执行：
+
+```bash
+incus remote add custom-check https://mirror.example.com --protocol=simplestreams --public
+incus image list custom-check:
+incus remote remove custom-check
+```
+
+CI 同时执行 Go 测试、`bash -n`、总菜单退出、路由 `/64`、原生 `/64` 以及错误前缀拒绝测试；
+实机验收还必须覆盖创建、联网、SSH、重启、删除和清理残留。
 
 ---
 
@@ -540,6 +698,25 @@ journalctl -u narwhal-agent --no-pager -n 50
 mount -o defaults,pquota,loop,noatime /xfs_disk.img /data
 systemctl restart narwhal-agent
 ```
+
+**Docker 与 Podman 共存时，Podman 实例无法出站**
+
+Docker 常把 FORWARD 默认策略设为 DROP。不要清空 Docker 规则；重新应用安装器的定向兼容服务：
+
+```bash
+systemctl restart runman-podman-forwarding
+systemctl status runman-podman-forwarding --no-pager
+iptables -S DOCKER-USER
+ip6tables -S DOCKER-USER
+```
+
+只应看到针对 `10.91.0.0/20` 和 `fd91:cafe:cafe:10::/64` 的 ACCEPT 规则。菜单 **3** 会重启
+Agent/rfw；兼容规则由独立 oneshot 服务在开机和更新时应用。
+
+**Podman 自定义镜像拉取失败**
+
+先用 `podman pull <完整镜像引用>` 查看真实错误。私有源执行 `podman login <registry>`；自签名
+证书应改为受信任证书或安装内部 CA。镜像加速配置可用总菜单 **13** 清除后重试。
 
 **KVM 不可用（cloud-hypervisor 模式）**
 在宿主机管理界面开启嵌套虚拟化，或改用 Podman 模式。

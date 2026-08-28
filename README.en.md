@@ -47,7 +47,7 @@ NarwhalCloud Agent (`narwhal-agent`) is the host-side daemon that manages contai
 | OS           | **Debian 13 (Trixie)** — strongly recommended |
 | Architecture | x86_64 (amd64) · aarch64 (arm64)              |
 | Memory       | ≥ 1 GB RAM                                    |
-| Disk         | ≥ 10 GB free                                  |
+| Disk         | ≥ 10 GB recommended; Podman needs about 3.5 GiB free at minimum |
 
 > **Why Debian 13?** The install script uses `apt`, `podman`, `systemd-zram-generator`, and other packages that are fully available on Debian 13. Using other distributions may cause unexpected failures.
 
@@ -74,11 +74,11 @@ The script will reboot the server and install Debian 13 automatically. Once the 
 bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh)
 ```
 
-With no arguments the installer opens a guided operations menu: install/update,
-IPv6 detection, manual `/64` validation, Token display/rotation, network
-backup/rollback, normal uninstall, and full Incus cleanup. The Incus install
-wizard offers NAT4 + public IPv6, IPv6-only, manual routed/native `/64`, IPv4
-only, and IPv6 SNAT scenarios.
+With no arguments the installer opens a guided operations menu with 13 actions:
+install/update, status, service restart, panel-password reset, IPv6 detection,
+manual `/64` validation, Token display/rotation, network backup/rollback, safe
+uninstall, full Incus cleanup, and backend-specific image management. The wizard
+also guides Podman data-disk and registry-mirror choices.
 
 ```bash
 # NAT4 + auto-detected public IPv6; podcctv Alpine 3.24 is the default image
@@ -103,6 +103,14 @@ bash install.sh en --virt incus --nat4 --non-interactive \
 bash install.sh en --validate-ipv6 --ipv6-mode subnet \
   --ipv6-addr 2001:db8:100::1 --ipv6-subnet 2001:db8:100::/64 \
   --ipv6-iface wg6 --ipv6-routed
+
+# Podman with a 3G XFS disk and IPv6 SNAT through one public host address
+bash install.sh en --virt podman --data-size 3G --ipv6-mode snat \
+  --non-interactive --generate-token
+
+# Podman with a docker.io registry mirror
+bash install.sh en --virt podman --data-size 8G --ipv6-mode none \
+  --podman-registry-mirror https://mirror.example.com --non-interactive
 ```
 
 ## Virtualization Types
@@ -119,8 +127,10 @@ bash install.sh en --validate-ipv6 --ipv6-mode subnet \
 
 This fork of `narwhal-cloud/runman-agent` significantly enhances the **Incus (LXC)** backend and offline/intranet deployment. Highlights:
 
-- **Guided operations menu** — install/update, six network scenarios, IPv6 detection/validation, Token lifecycle, backup/rollback, and two uninstall levels.
+- **Guided operations menu** — status and service/password operations plus install/update, six network scenarios, IPv6 detection/validation, Token lifecycle, backup/rollback, image management, and two uninstall levels.
 - **Private image server and default custom image** — built-in `https://alpine-incus-base.428048.xyz`; the installer verifies simplestreams checksums and imports Alpine 3.24 as `alpine/3.24/cloud/<arch>/ready`. Alpine is first in the panel image list. Override with `--image-mirror` or `--local-image-dir`.
+- **Podman disk and registry guidance** — safe XFS size recommendations, `--data-size`, and `--podman-registry-mirror`.
+- **Docker + Podman coexistence** — an idempotent boot service allows only the Narwhal Podman subnets through Docker's `DOCKER-USER` chain; existing Docker containers are not stopped or removed.
 - **Custom alpine base** — `--alpine-base <local.tar.gz | incus-alias>`.
 - **SSH login banner** — `--banner-preset none|default|minimal|project|custom` (+ `--banner-text`).
 - **Fine-grained IPv6 allocation** — `--ipv6-alloc N` (N addresses per container).
@@ -131,6 +141,50 @@ This fork of `narwhal-cloud/runman-agent` significantly enhances the **Incus (LX
 - **Two-level uninstall** — `--uninstall` preserves Incus artifacts; add `--purge-incus` for a clean reinstall that removes managed instances, ready images, `incusbr0`, and `podcctv-mirror`.
 
 Detailed design and code review: [`INCU_S_OPTIMIZATION_REPORT.md`](INCU_S_OPTIMIZATION_REPORT.md).
+
+## Podman Beginner Guide
+
+Choose the installer's recommended XFS size unless you have a specific quota
+plan. It always keeps at least 1536 MiB free on the root filesystem and mounts
+`/xfs_disk.img` at `/data`. Leave the docker.io mirror blank when direct pulls
+work; otherwise enter an HTTPS mirror. Use **NAT4 + IPv6 SNAT** for a single
+public `/128`, auto/manual `/64` for a genuinely routed prefix, or IPv4-only.
+
+Menu **13 → Podman image management** refreshes the built-in Debian/Alpine
+images and sets or clears
+`/etc/containers/registries.conf.d/99-runman-mirror.conf`. Add custom OCI images
+from the panel with a full reference such as
+`registry.example.com/team/alpine:3.22`; run `podman login registry.example.com`
+first for private registries. A self-hosted OCI registry should use persistent
+storage and a trusted HTTPS certificate. It is not interchangeable with an
+Incus simplestreams server.
+
+## Self-hosted Incus Custom Image Service
+
+The default custom Alpine source is
+`https://alpine-incus-base.428048.xyz`. To operate your own mirror on a separate
+server:
+
+```bash
+git clone https://github.com/podcctv/alpine-base.git
+cd alpine-base
+./scripts/serve-incus.sh --download
+python3 scripts/validate-streams.py incus-server/www
+curl -fsS http://<MIRROR_HOST>:8080/streams/v1/index.json
+curl -fsS http://<MIRROR_HOST>:8080/streams/v1/images.json
+```
+
+Then choose menu **13 → Incus image management → 2**, or pass
+`--image-mirror http://<MIRROR_HOST>:8080`. Trusted-LAN HTTP works only for the
+installer's direct checksum-verified import. Current Incus simplestreams remotes
+accept HTTPS only, so production runtime pulls and `incus remote add` require a
+trusted HTTPS endpoint such as `https://mirror.example.com`:
+
+```bash
+incus remote add custom-check https://mirror.example.com \
+  --protocol=simplestreams --public
+incus image list custom-check:
+```
 
 ## IPv6 Support
 
@@ -212,7 +266,8 @@ rotation. The web-panel password and integration Token are separate credentials.
 ## Clean Reinstall / Uninstall
 
 ```bash
-# Restore network changes and remove Agent; keep Incus artifacts
+# Restore installer-managed network changes and remove Agent.
+# Backend containers, images, networks and the Podman /data disk are preserved.
 bash install.sh --uninstall
 
 # Also delete managed Incus instances, ready images, incusbr0 and podcctv-mirror
@@ -221,6 +276,10 @@ bash install.sh --uninstall --purge-incus
 
 The full cleanup does not remove the Incus package/default storage pool or
 touch HE/WireGuard tunnel services, so the guided installer can be run again.
+
+Before uninstalling Podman, delete unwanted instances in the panel. The safe
+uninstall intentionally does not guess which Podman containers or images belong
+to the user.
 
 ## Updating the Agent
 
@@ -284,6 +343,26 @@ Some cloud providers' network interface cards do not support eBPF. Try adding th
 mount -o defaults,pquota,loop,noatime /xfs_disk.img /data
 systemctl restart narwhal-agent
 ```
+
+**Podman instances cannot reach the network when Docker is installed**
+
+Docker may set the FORWARD policy to DROP. Reapply the scoped compatibility
+rules; do not flush Docker's firewall tables:
+
+```bash
+systemctl restart runman-podman-forwarding
+iptables -S DOCKER-USER
+ip6tables -S DOCKER-USER
+```
+
+Only the Narwhal subnets `10.91.0.0/20` and `fd91:cafe:cafe:10::/64` should be
+allowed by this service.
+
+**A Podman custom image cannot be pulled**
+
+Run `podman pull <full-image-reference>` for the original error. Use
+`podman login <registry>` for a private registry, install its internal CA or use
+a trusted certificate, and clear a bad mirror through menu 13.
 
 **KVM not available (cloud-hypervisor)**
 Enable nested virtualization in your hypervisor, or switch to Podman mode.
