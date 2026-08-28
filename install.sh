@@ -1396,6 +1396,14 @@ install_rfw() {
         elif [ ${#interfaces[@]} -eq 1 ]; then
             SEL_IFACE="${interfaces[0]}"
             log "$(t "Only one WAN interface found, using: $SEL_IFACE" "只找到一个 WAN 网卡，使用: $SEL_IFACE")"
+        elif [ "$mode" = "1" ] || [ "$NON_INTERACTIVE" = "1" ]; then
+            # --install-rfw promises a no-prompt forced install. Prefer the
+            # default IPv4 uplink so tunnel/bridge interfaces are not selected.
+            SEL_IFACE=$(ip -4 route show default 2>/dev/null | awk 'NR==1 {print $5}')
+            if [ -z "$SEL_IFACE" ] || ! printf '%s\n' "${interfaces[@]}" | grep -Fxq "$SEL_IFACE"; then
+                SEL_IFACE="${interfaces[0]}"
+            fi
+            log "$(t "Non-interactive rfw uplink: $SEL_IFACE" "无交互 rfw 上行网卡: $SEL_IFACE")"
         else
             echo "$(t "Available WAN interfaces:" "可用 WAN 网卡：")"
             for i in "${!interfaces[@]}"; do echo "  $((i+1)). ${interfaces[$i]}"; done
