@@ -52,12 +52,8 @@ jobs:
         include:
           - target: x86_64-unknown-linux-musl
             arch: amd64
-            cc: musl-gcc
-            linker: musl-gcc
           - target: aarch64-unknown-linux-musl
             arch: arm64
-            cc: aarch64-linux-musl-gcc
-            linker: aarch64-linux-musl-gcc
 
     steps:
       - uses: actions/checkout@v4
@@ -68,13 +64,8 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools zstd
-
-      - name: Install aarch64 musl cross toolchain
-        if: matrix.target == 'aarch64-unknown-linux-musl'
-        run: |
-          curl -fsSL https://musl.cc/aarch64-linux-musl-cross.tgz | tar -xz -C /tmp
-          echo "/tmp/aarch64-linux-musl-cross/bin" >> $GITHUB_PATH
+          sudo apt-get install -y zstd python3-pip
+          pip3 install --break-system-packages ziglang cargo-zigbuild 2>/dev/null || pip3 install ziglang cargo-zigbuild
 
       - name: Setup Rust toolchain
         run: |
@@ -93,14 +84,8 @@ jobs:
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       - name: Build rfw
-        env:
-          CC: ${{ matrix.cc }}
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: ${{ matrix.linker }}
-          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: ${{ matrix.linker }}
-          CC_aarch64_unknown_linux_musl: aarch64-linux-musl-gcc
-          AR_aarch64_unknown_linux_musl: aarch64-linux-musl-ar
         run: |
-          cargo build --package rfw --release --target ${{ matrix.target }}
+          cargo zigbuild --package rfw --release --target ${{ matrix.target }}
           cp target/${{ matrix.target }}/release/rfw rfw-${{ matrix.arch }}
 
       - name: Upload artifact
