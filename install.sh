@@ -421,8 +421,58 @@ show_agent_status() {
         "PANEL=http://$panel_host:$AGENT_WEB_PORT"
 }
 
+ensure_podman_network_from_config() {
+    [ -f "$AGENT_CONFIG_FILE" ] || return 0
+    command -v jq >/dev/null 2>&1 && command -v podman >/dev/null 2>&1 || return 0
+    [ "$(jq -r '.virt_type // ""' "$AGENT_CONFIG_FILE" 2>/dev/null)" = "podman" ] || return 0
+    podman network exists "$PODMAN_NETWORK" 2>/dev/null && return 0
+
+    local mode subnet container_base container_gw network_json
+    mode=$(jq -r '.ipv6_mode // "none"' "$AGENT_CONFIG_FILE")
+    log "$(t "Podman network $PODMAN_NETWORK is missing; rebuilding it from config." \
+        "Podman 网络 $PODMAN_NETWORK 缺失，正在按现有配置重建。")"
+    case "$mode" in
+        none)
+            podman network create --driver=bridge \
+                --subnet=10.91.0.0/20 --gateway=10.91.0.1 "$PODMAN_NETWORK"
+            ;;
+        snat)
+            podman network create --driver=bridge \
+                --subnet=10.91.0.0/20 --gateway=10.91.0.1 \
+                --ipv6 --subnet=fd91:cafe:cafe:10::/64 --gateway=fd91:cafe:cafe:10::1 \
+                "$PODMAN_NETWORK"
+            ;;
+        subnet)
+            subnet=$(jq -r '.ipv6_subnet // ""' "$AGENT_CONFIG_FILE")
+            [ -n "$subnet" ] || die "$(t "Cannot rebuild Podman subnet network: ipv6_subnet is empty." \
+                "无法重建 Podman 子网：ipv6_subnet 为空。")"
+            read -r container_base container_gw <<< "$(python3 - "$subnet" <<'PYEOF'
+import ipaddress
+import sys
+
+net = ipaddress.IPv6Network(sys.argv[1], strict=False)
+offset = 0xcafe << (128 - net.prefixlen - 16) if net.prefixlen <= 112 else 0
+container_int = (int(net.network_address) | offset) & ~((1 << 16) - 1)
+container_net = ipaddress.IPv6Network(f'{ipaddress.IPv6Address(container_int)}/112', strict=False)
+print(container_net.network_address, container_net.network_address + 1)
+PYEOF
+)"
+            podman network create --driver=bridge \
+                --subnet=10.91.0.0/20 --gateway=10.91.0.1 \
+                --ipv6 --subnet="${container_base}/112" --gateway="$container_gw" \
+                "$PODMAN_NETWORK"
+            network_json="/etc/containers/networks/${PODMAN_NETWORK}.json"
+            jq '.options["snat_ipv6"] = "false"' "$network_json" > "${network_json}.tmp" \
+                && mv "${network_json}.tmp" "$network_json"
+            ;;
+        *) die "$(t "Unsupported Podman IPv6 mode in config: $mode" "配置中的 Podman IPv6 模式无效: $mode")" ;;
+    esac
+    log "$(t "Podman network $PODMAN_NETWORK rebuilt." "Podman 网络 $PODMAN_NETWORK 已重建。")"
+}
+
 restart_agent_services() {
     [ -f "$AGENT_BINARY" ] || die "$(t "Agent is not installed." "Agent 尚未安装。")"
+    ensure_podman_network_from_config
     systemctl restart "$AGENT_SERVICE"
     [ -f "$RFW_BIN_DIR/rfw" ] && systemctl restart rfw 2>/dev/null || true
     log "$(t "Agent services restarted." "Agent 服务已重启。")"
@@ -448,7 +498,7 @@ show_main_menu() {
     printf '\n%s\n' "$(t "Runman Agent guided operations" "Runman Agent 菜单引导")"
     printf '  1) %s\n' "$(t "Install/update (guided network setup)" "安装/更新（网络引导配置）")"
     printf '  2) %s\n' "$(t "Show installation/service status" "查看安装/服务状态")"
-    printf '  3) %s\n' "$(t "Restart Agent and firewall" "重启 Agent 与防火墙")"
+    printf '  3) %s\n' "$(t "Repair network and restart Agent/firewall" "修复网络并重启 Agent/防火墙")"
     printf '  4) %s\n' "$(t "Reset Web panel password" "重置 Web 面板密码")"
     printf '  5) %s\n' "$(t "Detect IPv6 only" "仅探测 IPv6")"
     printf '  6) %s\n' "$(t "Validate a manual IPv6 /64" "验证手工 IPv6 /64")"
@@ -2173,6 +2223,7 @@ if systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null || [ -f "$AGENT_BINA
     VIRT_TYPE="$_installed_virt"
     case "$VIRT_TYPE" in
         podman)
+            ensure_podman_network_from_config
             configure_podman_registry_mirror
             install_podman_forwarding_compat
             if [ "$FORCE_IMAGE_REFRESH" = "1" ]; then

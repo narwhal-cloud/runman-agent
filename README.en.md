@@ -75,7 +75,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/in
 ```
 
 With no arguments the installer opens a guided operations menu with 13 actions:
-install/update, status, service restart, panel-password reset, IPv6 detection,
+install/update, status, Podman-network repair plus service restart, panel-password reset, IPv6 detection,
 manual `/64` validation, Token display/rotation, network backup/rollback, safe
 uninstall, full Incus cleanup, and backend-specific image management. The wizard
 also guides Podman data-disk and registry-mirror choices.
@@ -347,7 +347,8 @@ systemctl restart narwhal-agent
 **Podman instances cannot reach the network when Docker is installed**
 
 Docker may set the FORWARD policy to DROP. Reapply the scoped compatibility
-rules; do not flush Docker's firewall tables:
+rules; do not flush Docker's firewall tables. Menu 3 also rebuilds a missing
+`narwhal-net` from the current `config.json` before restarting services:
 
 ```bash
 systemctl restart runman-podman-forwarding

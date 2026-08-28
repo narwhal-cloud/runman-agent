@@ -124,7 +124,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/in
 |---:|---|---|
 | 1 | 安装或更新 Agent；首次安装继续选择后端和网络 | 是 |
 | 2 | 查看后端、Agent、rfw、面板地址 | 否 |
-| 3 | 重启 Agent 与 rfw | 是，可恢复 |
+| 3 | 修复缺失的 Podman `narwhal-net`，再重启 Agent 与 rfw | 是，可恢复 |
 | 4 | 隐藏输入并确认新的 Web 面板密码 | 是 |
 | 5–6 | 自动探测 IPv6、验证手工 `/64` | 探测仅临时绑定测试地址，结束即删除 |
 | 7–8 | 显示或轮换对接 Token | 轮换会重启 Agent |
@@ -710,8 +710,9 @@ iptables -S DOCKER-USER
 ip6tables -S DOCKER-USER
 ```
 
-只应看到针对 `10.91.0.0/20` 和 `fd91:cafe:cafe:10::/64` 的 ACCEPT 规则。菜单 **3** 会重启
-Agent/rfw；兼容规则由独立 oneshot 服务在开机和更新时应用。
+只应看到针对 `10.91.0.0/20` 和 `fd91:cafe:cafe:10::/64` 的 ACCEPT 规则。菜单 **3** 会先按
+现有 `config.json` 自动重建缺失的 `narwhal-net`，再重启 Agent/rfw；兼容规则由独立
+oneshot 服务在开机和更新时应用。
 
 **Podman 自定义镜像拉取失败**
 
