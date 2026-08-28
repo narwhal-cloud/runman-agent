@@ -399,7 +399,7 @@ EOF
 }
 
 show_agent_status() {
-    local virt="not-installed" agent_state="inactive" backend_state="n/a" rfw_state="not-installed"
+    local virt="not-installed" agent_state="inactive" backend_state="n/a" rfw_state="not-installed" panel_host
     if [ -f "$AGENT_CONFIG_FILE" ] && command -v jq >/dev/null 2>&1; then
         virt=$(jq -r '.virt_type // "unknown"' "$AGENT_CONFIG_FILE" 2>/dev/null || echo unknown)
     fi
@@ -410,12 +410,15 @@ show_agent_status() {
         cloudhv) backend_state=$([ -e /dev/kvm ] && echo ready || echo no-kvm) ;;
     esac
     [ -f "$RFW_BIN_DIR/rfw" ] && rfw_state=$(systemctl is-active rfw 2>/dev/null || true)
+    panel_host=$(curl -4 -s --max-time 5 ip.sb 2>/dev/null | head -n1 || true)
+    [ -n "$panel_host" ] || panel_host='<host-ip>'
+    case "$panel_host" in *:*) panel_host="[$panel_host]" ;; esac
     printf '%s\n' \
         "VIRT_TYPE=$virt" \
         "AGENT_SERVICE=$agent_state" \
         "BACKEND_SERVICE=$backend_state" \
         "RFW_SERVICE=$rfw_state" \
-        "PANEL=http://$(curl -4 -s --max-time 5 ip.sb 2>/dev/null || echo '<host-ip>'):$AGENT_WEB_PORT"
+        "PANEL=http://$panel_host:$AGENT_WEB_PORT"
 }
 
 restart_agent_services() {
@@ -535,6 +538,13 @@ esac
 [ "$INCUS_IPV6_ALLOC" -ge 1 ] && [ "$INCUS_IPV6_ALLOC" -le 15 ] \
     || die "--ipv6-alloc must be an integer from 1 to 15"
 
+# One-shot operations and explicit non-interactive installs must never pause for
+# a language selection. Guided/menu installs keep the bilingual prompt.
+if [ -z "$LANG_CODE" ] && { [ -n "$SYSTEM_ACTION" ] || [ -n "$TOKEN_ACTION" ] \
+    || [ -n "$IPV6_ONESHOT_MODE" ] || [ "$UNINSTALL" = "1" ] \
+    || [ "$NON_INTERACTIVE" = "1" ]; }; then
+    LANG_CODE="en"
+fi
 if [ -z "$LANG_CODE" ]; then
     printf "Select language / 选择语言:\n  1) English (default)\n  2) 中文\n"
     if [ -t 0 ]; then

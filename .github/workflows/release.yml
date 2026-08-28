@@ -29,6 +29,11 @@ jobs:
           go test -tags containers_image_openpgp ./...
           bash -n install.sh
           bash install.sh --help >/dev/null
+          status_output="$(bash install.sh --status)"
+          if grep -q 'Select language' <<<"$status_output"; then
+            echo 'one-shot status unexpectedly prompted for language' >&2
+            exit 1
+          fi
           printf '0\n' | bash install.sh zh --menu >/dev/null
           bash install.sh en --validate-ipv6 --ipv6-mode subnet \
             --ipv6-addr 2001:db8:100::1 --ipv6-subnet 2001:db8:100::/64 \
