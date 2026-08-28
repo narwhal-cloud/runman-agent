@@ -4,6 +4,7 @@ package incus
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -73,5 +74,35 @@ func TestSNATUsesBridgeGateway(t *testing.T) {
 	}
 	if got := m.ipv6Gateway(); got != "fd91:cafe:cafe:10::1" {
 		t.Fatalf("SNAT gateway %q, want bridge gateway", got)
+	}
+}
+
+func TestInstanceResolvConfIPv6Only(t *testing.T) {
+	got := instanceResolvConf("", true)
+	if strings.Contains(got, "nameserver "+IPv4Resolver+"\n") {
+		t.Fatalf("IPv6-only resolver unexpectedly contains IPv4 DNS: %q", got)
+	}
+	for _, resolver := range []string{IPv6Resolver, IPv6ResolverBackup} {
+		if !strings.Contains(got, "nameserver "+resolver+"\n") {
+			t.Fatalf("IPv6-only resolver is missing %s: %q", resolver, got)
+		}
+	}
+}
+
+func TestInstanceResolvConfDualStack(t *testing.T) {
+	got := instanceResolvConf("10.91.0.2", true)
+	for _, resolver := range []string{IPv4Resolver, IPv6Resolver, IPv6ResolverBackup} {
+		if !strings.Contains(got, "nameserver "+resolver+"\n") {
+			t.Fatalf("dual-stack resolver is missing %s: %q", resolver, got)
+		}
+	}
+}
+
+func TestIncusForwardIPFallsBackToIPv6(t *testing.T) {
+	if got := incusForwardIP("", "2001:db8:100::2/64"); got != "2001:db8:100::2" {
+		t.Fatalf("IPv6-only forward target %q", got)
+	}
+	if got := incusForwardIP("10.91.0.2/20", "2001:db8:100::2/64"); got != "10.91.0.2" {
+		t.Fatalf("dual-stack forward target %q, want IPv4 preference", got)
 	}
 }

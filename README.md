@@ -279,13 +279,18 @@ simplestreams 的 `streams/v1/images.json` 地址填进 Podman registry mirror�
 | `subnet` | 前缀 ≤ `/64`（至少 `/64` 子网）       | 每个容器/VM 获得独立的公网 IPv6 地址             |
 
 容器 IPv4 与 IPv6 模式彼此独立：`--nat4` 保留 `10.91.0.0/20` 私网地址并通过
-Incus `ipv4.nat=true` 出口，同时为容器分配公网 IPv6；`--ipv6-only` 则把实例网卡的
-`ipv4.address` 设为 `none`。两种模式都使用同一个经过验证的 IPv6 前缀。
+Incus `ipv4.nat=true` 出口，同时为容器分配公网 IPv6；`--ipv6-only` 会同时把
+`incusbr0` 和实例网卡的 `ipv4.address` 设为 `none`、关闭 IPv4 NAT，并只写入可经
+IPv6 访问的公共 DNS。两种模式都使用同一个经过验证的 IPv6 前缀。
 
 探测器会区分“隧道链路前缀”和“独立 routed prefix”。例如 HE 6in4、WireGuard
 常把默认路由放在 `he-ipv6`/`wg6`，并把 routed `/64` 中的一个 `/128` 地址放在 `lo`
 或另一接口；脚本会临时绑定一个测试地址做独立源地址连通性验证，通过后选择 routed
 前缀供容器使用。routed 模式不会改写隧道接口掩码，也不会启动不需要的上游 NDP 应答。
+
+> HE 场景中出现两个不同前缀是正常的：例如 `2001:470:35:154::2` 是宿主机的隧道
+> 客户端/“IPv6 入口”，`2001:470:36:154::/64` 是 HE 额外路由给容器的地址池，容器可获得
+> `2001:470:36:154::2`。不要把隧道入口 `/64` 当作容器 routed `/64` 使用。
 
 安装前可做只读为主的独立探测（仅临时绑定测试地址，探测结束立即删除，不安装软件）：
 
@@ -452,7 +457,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/in
 
 > 纯 IPv6 容器仅经 IPv6 可达，IPv4 NAT 端口转发不适用；请确认上游已正确路由该 IPv6 段到宿主机。
 
-> Agent 同时写入 cloud-init 配置并通过 Incus agent 执行运行时配置。即使是没有 cloud-init/OpenRC 的轻量 Alpine 镜像，静态 IPv6、root 密码和 sshd 也会被正确配置；BusyBox `ifup` 镜像使用独立 `netmask` 字段。对于由 Agent 管理的 Alpine 实例，运行时配置完成后会禁用 cloud-init 接管，避免旧版 `/dev/lxd` 探测在 Incus 6 上等待元数据或覆盖静态网络。
+> Agent 同时写入 cloud-init 配置并通过 Incus agent 执行运行时配置。即使是没有 cloud-init/OpenRC 的轻量 Alpine 镜像，静态 IPv6、`/etc/resolv.conf`、root 密码和 sshd 也会被正确配置；BusyBox `ifup` 镜像使用独立 `netmask` 字段。对于由 Agent 管理的 Alpine 实例，运行时配置完成后会禁用 cloud-init 接管，避免旧版 `/dev/lxd` 探测在 Incus 6 上等待元数据或覆盖静态网络。创建完成后 Agent 会自动建立一个 `20000–59999/tcp → 22` 的高位 SSH 转发；纯 IPv6 实例也会使用其 IPv6 作为用户态转发目标。
 
 ### 6. 强制 SSH 密码登录
 
@@ -478,7 +483,7 @@ bash install.sh --rollback-ipv6
 /opt/narwhal-agent/ipv6-rollback.sh /var/lib/narwhal-agent/backups/ipv6-20260826-120000
 ```
 
-> 卸载时会**首先**基于安装前备份恢复 IPv6/网卡配置，再清理其它文件，最大限度避免遗留错误路由影响业务。
+> 卸载时会**首先**基于安装前备份恢复 IPv6/网卡配置，再清理其它文件。普通安全卸载会跳过仍被保留实例依赖的 `incusbr0`，并保留 Podman `/data` 对应的 `storage.conf`；只有完整清理或显式回滚才恢复这些后端资源。
 
 ---
 
@@ -657,6 +662,10 @@ incus exec <实例名> -- sh -lc 'ip -4 addr; ip -6 addr; ip -4 route; ip -6 rou
 # 纯 IPv6 实例应无全局 IPv4，并能通过 IPv6 出站
 incus exec <实例名> -- sh -lc 'ip -4 -o addr show scope global | wc -l'
 incus exec <实例名> -- ping -6 -c 3 2606:4700:4700::1111
+incus exec <实例名> -- sh -lc 'cat /etc/resolv.conf; getent hosts one.one.one.one || nslookup one.one.one.one'
+
+# 应自动存在一条高位 TCP 端口到 22 的规则
+curl -u 'admin:<面板密码>' http://127.0.0.1:8792/api/vms/<实例名>/portfwds
 
 # Token 与面板
 bash install.sh --show-token
@@ -734,7 +743,10 @@ oneshot 服务在开机和更新时应用。
 卸载会自动恢复安装前的备份；若仍有残留，可手动 `--rollback-ipv6` 或检查 `/var/lib/narwhal-agent/backups/` 下的快照。
 
 **纯 IPv6 容器无法联网**
-确认 `ipv6_mode` 为 `subnet` 或 `snat`（非 `none`），且上游已将该 IPv6 段路由到宿主机；纯 IPv6 容器无 IPv4，不能依赖 IPv4 NAT 端口转发。
+先分别测试 `ping -6 2606:4700:4700::1111` 和域名解析。前者成功、域名失败通常是旧版 Agent 留下了空的 `/etc/resolv.conf`；更新 Agent 后新建实例会自动写入 IPv6 DNS。确认 `ipv6_mode` 为 `subnet` 或 `snat`（非 `none`），且上游已将该 IPv6 段路由到宿主机；纯 IPv6 容器无 IPv4，但 Agent 的用户态高位端口转发仍可把宿主机 IPv4 入口转到容器 IPv6 的 22 端口。
+
+**纯 IPv6 容器没有自动 SSH 高位端口**
+旧版只读取实例 IPv4，纯 IPv6 时会记录 `has no IP address`。更新并重启 Agent 后会为缺少规则的现有托管实例补建 `20000–59999/tcp → 22`，新实例则在创建完成时立即建立。可用上面的端口转发 API或面板确认。
 
 ---
 

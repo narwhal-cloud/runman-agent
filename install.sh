@@ -100,8 +100,11 @@ restore_ipv6_config() {
     fi
     # interfaces：仅当备份存在时恢复（避免误删用户原有配置）
     [ -f "$target/interfaces" ] && cp "$target/interfaces" /etc/network/interfaces
-    # incusbr0 网络：原存在则恢复，否则（安装时新建）删除
-    if command -v incus >/dev/null 2>&1; then
+    # 安全卸载会保留后端容器，因此也必须保留其依赖的 Incus 网桥。
+    # 完整清理/显式回滚时才恢复安装前的 incusbr0 状态。
+    if [ "${PRESERVE_INCUS_NETWORK:-0}" = "1" ]; then
+        log "$(t "Preserved incusbr0 because backend instances are being kept." "已保留 incusbr0，避免影响保留的后端实例。")"
+    elif command -v incus >/dev/null 2>&1; then
         if [ "${HAD_INCUSBR0:-1}" = "1" ] && [ -f "$target/incusbr0.network" ]; then
             incus network edit incusbr0 <"$target/incusbr0.network" 2>/dev/null \
                 && log "$(t "Restored incusbr0 network" "已恢复 incusbr0 网络配置")"
@@ -129,7 +132,11 @@ restore_ipv6_config() {
     restore_managed_file journald.conf /etc/systemd/journald.conf "$HAD_JOURNALD"
     restore_managed_file zram-generator.conf /etc/systemd/zram-generator.conf "$HAD_ZRAM"
     restore_managed_file loop-directio.rules /etc/udev/rules.d/99-loop-directio.rules "$HAD_LOOP_RULE"
-    restore_managed_file containers-storage.conf /etc/containers/storage.conf "$HAD_STORAGE_CONF"
+    if [ "${PRESERVE_PODMAN_STORAGE:-0}" = "1" ]; then
+        log "$(t "Preserved Podman storage.conf so retained containers remain manageable." "已保留 Podman storage.conf，确保保留的容器仍可管理。")"
+    else
+        restore_managed_file containers-storage.conf /etc/containers/storage.conf "$HAD_STORAGE_CONF"
+    fi
     restore_managed_file rfw.service /etc/systemd/system/rfw.service "$HAD_RFW_SERVICE"
     systemctl daemon-reload 2>/dev/null || true
     systemctl restart systemd-journald 2>/dev/null || true
@@ -229,7 +236,7 @@ purge_incus_artifacts() {
         return 0
     }
 
-    local names name alias answer purge_arch
+    local names name alias answer purge_arch failed=0
     case "$(uname -m)" in
         aarch64|arm64) purge_arch="arm64" ;;
         *) purge_arch="amd64" ;;
@@ -246,14 +253,32 @@ purge_incus_artifacts() {
 
     while IFS= read -r name; do
         [ -n "$name" ] || continue
-        incus delete "$name" --force >/dev/null 2>&1 || true
+        if ! incus delete "$name" --force >/dev/null 2>&1; then
+            log "$(t "Failed to delete Incus instance:" "删除 Incus 实例失败:") $name"
+            failed=1
+        fi
     done <<< "$names"
 
     for alias in "alpine/3.24/cloud/$purge_arch/ready" "alpine/3.23/cloud/$purge_arch/ready" "debian/13/cloud/$purge_arch/ready" podcctv/alpine-base; do
-        incus image delete "$alias" >/dev/null 2>&1 || true
+        incus image info "$alias" >/dev/null 2>&1 || continue
+        if ! incus image delete "$alias" >/dev/null 2>&1; then
+            log "$(t "Failed to delete managed Incus image:" "删除受管 Incus 镜像失败:") $alias"
+            failed=1
+        fi
     done
-    incus remote remove podcctv-mirror >/dev/null 2>&1 || true
-    incus network delete incusbr0 >/dev/null 2>&1 || true
+    if incus remote list --format csv -c n 2>/dev/null | grep -qx podcctv-mirror; then
+        incus remote remove podcctv-mirror >/dev/null 2>&1 || {
+            log "$(t "Failed to remove Incus remote: podcctv-mirror" "删除 Incus 远端失败: podcctv-mirror")"
+            failed=1
+        }
+    fi
+    if incus network show incusbr0 >/dev/null 2>&1; then
+        incus network delete incusbr0 >/dev/null 2>&1 || {
+            log "$(t "Failed to delete incusbr0; check for remaining instances or profiles." "删除 incusbr0 失败；请检查残留实例或 profile 引用。")"
+            failed=1
+        }
+    fi
+    [ "$failed" = "0" ] || die "$(t "Incus purge was incomplete; see the failed items above." "Incus 清理未完成，请检查上方失败项目。")"
     log "$(t "✓ Managed Incus instances, images, network and remote removed." "✓ 已删除受管 Incus 实例、镜像、网络和远端。")"
 }
 
@@ -264,9 +289,17 @@ do_uninstall() {
     [ "$(id -u)" = "0" ] || die "$(t "Uninstall requires root." "卸载需要 root 权限。")"
     log "$(t "=== NarwhalCloud Agent uninstall ===" "=== NarwhalCloud Agent 卸载 ===")"
     local install_origin_restored=0 previous_virt="unknown"
+    local PRESERVE_INCUS_NETWORK=0 PRESERVE_PODMAN_STORAGE=0
     if [ -f "$AGENT_CONFIG_FILE" ]; then
         previous_virt=$(grep -o '"virt_type"[[:space:]]*:[[:space:]]*"[^"]*"' "$AGENT_CONFIG_FILE" 2>/dev/null \
             | head -n1 | sed 's/.*:[[:space:]]*"//; s/"$//' || true)
+    fi
+
+    # 普通卸载承诺保留后端状态。不要恢复掉保留实例正在使用的网桥，
+    # 也不要删除指向 /data 的 Podman storage.conf。
+    if [ "${PURGE_INCUS:-0}" != "1" ]; then
+        [ "$previous_virt" = "incus" ] && PRESERVE_INCUS_NETWORK=1
+        [ "$previous_virt" = "podman" ] && PRESERVE_PODMAN_STORAGE=1
     fi
 
     # 完整重装模式先删实例，避免恢复/删除网桥时仍被实例引用。
@@ -2586,8 +2619,8 @@ if [ "$VIRT_TYPE" = "cloudhv" ] || [ "$VIRT_TYPE" = "incus" ]; then
         log "$(t "✓ IPv6 SNAT mode: VMs share host IPv6 via masquerade." "✓ IPv6 SNAT 模式：VM 通过宿主机 MASQUERADE 共享 IPv6。")"
     fi
 
-    # Bridge creation will be handled by the agent's ensureBridge() on startup
-    log "$(t "✓ $VIRT_TYPE network configured." "✓ $VIRT_TYPE 网络配置完成。")"
+    # Incus 网桥会在安装末尾按这里解析出的最终模式创建/收敛。
+    log "$(t "✓ $VIRT_TYPE network parameters validated." "✓ $VIRT_TYPE 网络参数已验证。")"
 
     if [ "$IPV6_MODE" = "subnet" ] && [ -n "$IPV6_SUBNET" ] && [ -n "$IPV6_IFACE" ]; then
         if [ "$IPV6_ROUTED" = "1" ]; then
@@ -2804,19 +2837,26 @@ if [ "$VIRT_TYPE" = "incus" ]; then
         incus storage create default dir
     fi
 
-    # 2. 初始化默认网桥 incusbr0 (遵循 10.91.0.1/20 标准)
-    if ! incus network show incusbr0 >/dev/null 2>&1; then
-        log "$(t "Initializing Incus network bridge incusbr0..." "初始化 Incus 网桥 incusbr0...")"
-        
-        INCUS_IPV4="10.91.0.1/20"
-        INCUS_IPV6="none"
+    # 2. 创建或收敛默认网桥。纯 IPv6 模式必须同时关闭 IPv4 地址和 NAT，
+    # 避免安装结果与面板声明不一致。
+    INCUS_IPV4="10.91.0.1/20"
+    INCUS_IPV4_NAT="true"
+    INCUS_IPV6="none"
+    INCUS_IPV6_NAT="false"
+    INCUS_DNS="1.1.1.1,2606:4700:4700::1111"
+    if [ "${INCUS_IPV6_ONLY:-0}" = "1" ]; then
+        INCUS_IPV4="none"
+        INCUS_IPV4_NAT="false"
+        INCUS_DNS="2606:4700:4700::1111,2001:4860:4860::8888"
+    fi
 
-        if [ "$IPV6_MODE" = "snat" ]; then
-            INCUS_IPV6="fd91:cafe:cafe:10::1/64"
-        elif [ "$IPV6_MODE" = "subnet" ] && [ -n "$IPV6_SUBNET" ]; then
-            # 使用所分配前缀第一个 /112 的末地址作为网关，避免与常见的
-            # routed-prefix 宿主机地址 ::1/128 冲突；容器地址从 ::2 起分配。
-            INCUS_IPV6=$(python3 - "$IPV6_SUBNET" <<'PY'
+    if [ "$IPV6_MODE" = "snat" ]; then
+        INCUS_IPV6="fd91:cafe:cafe:10::1/64"
+        INCUS_IPV6_NAT="true"
+    elif [ "$IPV6_MODE" = "subnet" ] && [ -n "$IPV6_SUBNET" ]; then
+        # 使用所分配前缀第一个 /112 的末地址作为网关，避免与常见的
+        # routed-prefix 宿主机地址 ::1/128 冲突；容器地址从 ::2 起分配。
+        INCUS_IPV6=$(python3 - "$IPV6_SUBNET" <<'PY'
 import ipaddress
 import sys
 net = ipaddress.IPv6Network(sys.argv[1], strict=False)
@@ -2825,16 +2865,32 @@ bridge = next(net.subnets(new_prefix=bridge_prefix)) if net.prefixlen < bridge_p
 print(f"{bridge.broadcast_address}/{bridge_prefix}")
 PY
 )
-        fi
-        # IPV6_MODE="none" 时 INCUS_IPV6 保持 "none"，Incus 不配置 IPv6
+    fi
 
+    if ! incus network show incusbr0 >/dev/null 2>&1; then
+        log "$(t "Initializing Incus network bridge incusbr0..." "初始化 Incus 网桥 incusbr0...")"
         incus network create incusbr0 \
-            ipv4.address="$INCUS_IPV4" ipv4.nat=true \
-            ipv6.address="$INCUS_IPV6" ipv6.nat=$( [ "$IPV6_MODE" = "snat" ] && echo "true" || echo "false" ) \
+            ipv4.address="$INCUS_IPV4" ipv4.nat="$INCUS_IPV4_NAT" \
+            ipv6.address="$INCUS_IPV6" ipv6.nat="$INCUS_IPV6_NAT" \
             ipv6.routing=true \
             ipv6.dhcp=false \
-            dns.nameservers="1.1.1.1,2606:4700:4700::1111"
+            dns.nameservers="$INCUS_DNS"
+    else
+        log "$(t "Reconciling existing Incus network bridge incusbr0..." "收敛现有 Incus 网桥 incusbr0 配置...")"
+        incus network set incusbr0 ipv4.address "$INCUS_IPV4"
+        incus network set incusbr0 ipv4.nat "$INCUS_IPV4_NAT"
+        incus network set incusbr0 ipv6.address "$INCUS_IPV6"
+        incus network set incusbr0 ipv6.nat "$INCUS_IPV6_NAT"
+        incus network set incusbr0 ipv6.routing true
+        incus network set incusbr0 ipv6.dhcp false
+        incus network set incusbr0 dns.nameservers "$INCUS_DNS"
     fi
+
+    [ "$(incus network get incusbr0 ipv4.address)" = "$INCUS_IPV4" ] \
+        || die "$(t "Incus IPv4 bridge validation failed." "Incus 网桥 IPv4 配置校验失败。")"
+    [ "$(incus network get incusbr0 ipv6.address)" = "$INCUS_IPV6" ] \
+        || die "$(t "Incus IPv6 bridge validation failed." "Incus 网桥 IPv6 配置校验失败。")"
+    log "$(t "✓ Incus bridge matches the selected network mode." "✓ Incus 网桥与所选网络模式一致。")"
 
     # 3. 确保默认配置集 (profile) 使用基础磁盘
     if incus profile show default >/dev/null 2>&1; then

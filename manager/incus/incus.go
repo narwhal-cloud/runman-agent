@@ -26,6 +26,9 @@ const (
 	IncusBridge        = "incusbr0"
 	DefaultAlpineImage = "alpine/3.24/cloud"
 	MirrorAlpineImage  = "alpine/3.24"
+	IPv4Resolver       = "1.1.1.1"
+	IPv6Resolver       = "2606:4700:4700::1111"
+	IPv6ResolverBackup = "2001:4860:4860::8888"
 )
 
 type Manager struct {
@@ -613,7 +616,36 @@ func (m *Manager) configureRunningInstance(ctx context.Context, vmID, distro, ro
 	if err := m.execInstanceWithRetry(ctx, vmID, []string{"/bin/sh", "-c", command}); err != nil {
 		return fmt.Errorf("activate instance configuration: %w", err)
 	}
+
+	// ifupdown-ng does not install a resolv.conf manager by default. In that
+	// case dns-nameservers in /etc/network/interfaces is silently ignored and
+	// lightweight Alpine images are left with an empty /etc/resolv.conf. Write
+	// an explicit resolver file after the network restart so IPv6-only guests
+	// can resolve names without depending on image-specific cloud-init hooks.
+	if err := m.execInstanceWithRetry(ctx, vmID, []string{"/bin/sh", "-c", "rm -f /etc/resolv.conf"}); err != nil {
+		return fmt.Errorf("prepare resolver configuration: %w", err)
+	}
+	if err := m.putInstanceFile(vmID, "/etc/resolv.conf", instanceResolvConf(ipv4, len(ipv6s) > 0), 0o644); err != nil {
+		return fmt.Errorf("write resolver configuration: %w", err)
+	}
 	return nil
+}
+
+func instanceResolvConf(ipv4 string, hasIPv6 bool) string {
+	var b strings.Builder
+	b.WriteString("# Managed by runman-agent\n")
+	if ipv4 != "" {
+		fmt.Fprintf(&b, "nameserver %s\n", IPv4Resolver)
+	}
+	if hasIPv6 {
+		fmt.Fprintf(&b, "nameserver %s\n", IPv6Resolver)
+		fmt.Fprintf(&b, "nameserver %s\n", IPv6ResolverBackup)
+	}
+	if ipv4 == "" && !hasIPv6 {
+		fmt.Fprintf(&b, "nameserver %s\n", IPv4Resolver)
+	}
+	b.WriteString("options timeout:2 attempts:3\n")
+	return b.String()
 }
 
 func (m *Manager) putInstanceFile(vmID, path, content string, mode int) error {
@@ -1014,8 +1046,7 @@ func (m *Manager) GetVMLocalIP(_ context.Context, vmID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	parts := strings.SplitN(conf.IPv4, "/", 2)
-	return parts[0], nil
+	return incusForwardIP(conf.IPv4, conf.IPv6), nil
 }
 
 func (m *Manager) GetVMLocalIPv6(_ context.Context, vmID string) (string, error) {
@@ -1023,8 +1054,19 @@ func (m *Manager) GetVMLocalIPv6(_ context.Context, vmID string) (string, error)
 	if err != nil {
 		return "", err
 	}
-	parts := strings.SplitN(conf.IPv6, "/", 2)
-	return parts[0], nil
+	return addressWithoutCIDR(conf.IPv6), nil
+}
+
+func incusForwardIP(ipv4, ipv6 string) string {
+	if ip := addressWithoutCIDR(ipv4); ip != "" {
+		return ip
+	}
+	return addressWithoutCIDR(ipv6)
+}
+
+func addressWithoutCIDR(value string) string {
+	parts := strings.SplitN(strings.TrimSpace(value), "/", 2)
+	return parts[0]
 }
 
 func (m *Manager) GetSupportedImages(_ context.Context) ([]*agent.OSImageInfo, error) {

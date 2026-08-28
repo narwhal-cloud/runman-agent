@@ -171,17 +171,15 @@ func main() {
 
 	// VM 创建后自动添加一条随机端口 → 22 的 SSH 转发
 	svc.OnCreated = func(ctx context.Context, vmID string, bandwidthMbps int) {
-		port, err := pickFreePort(20000, 60000)
-		if err != nil {
-			log.Printf("auto SSH portfwd: %v", err)
-			return
-		}
-		if err := pf.AddMapping(ctx, vmID, "tcp", port, 22, "ssh"); err != nil {
-			log.Printf("auto SSH portfwd %d→22 for %s: %v", port, vmID, err)
-			return
-		}
-		log.Printf("auto SSH portfwd: %s %d→22", vmID, port)
+		addDefaultSSHForward(ctx, pf, vmID)
 	}
+	// Older versions could not create the default SSH rule for IPv6-only
+	// Incus instances. Backfill only VMs that have no tcp -> 22 rule; Restore
+	// and the reconciler continue to handle rules already present in the DB.
+	go func() {
+		time.Sleep(10 * time.Second)
+		backfillDefaultSSHForwards(context.Background(), svc, database, pf)
+	}()
 
 	a := &Agent{
 		cfg:     cfg,
@@ -1056,6 +1054,49 @@ func pickFreePort(min, max int) (int, error) {
 		}
 	}
 	return 0, fmt.Errorf("no free port found in [%d, %d)", min, max)
+}
+
+func addDefaultSSHForward(ctx context.Context, pf *portforward.Manager, vmID string) {
+	var lastErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		port, err := pickFreePort(20000, 60000)
+		if err != nil {
+			lastErr = err
+			break
+		}
+		if err := pf.AddMapping(ctx, vmID, "tcp", port, 22, "ssh"); err != nil {
+			lastErr = err
+			continue
+		}
+		log.Printf("auto SSH portfwd: %s %d→22", vmID, port)
+		return
+	}
+	log.Printf("auto SSH portfwd for %s failed: %v", vmID, lastErr)
+}
+
+func backfillDefaultSSHForwards(ctx context.Context, svc *manager.VMService, database *db.DB, pf *portforward.Manager) {
+	vms, err := svc.ListVMs(ctx)
+	if err != nil {
+		log.Printf("auto SSH backfill: list VMs: %v", err)
+		return
+	}
+	for _, vm := range vms {
+		rules, err := database.ListPortForwards(vm.VmId)
+		if err != nil {
+			log.Printf("auto SSH backfill: list rules for %s: %v", vm.VmId, err)
+			continue
+		}
+		hasSSH := false
+		for _, rule := range rules {
+			if rule.Protocol == "tcp" && rule.GuestPort == 22 {
+				hasSSH = true
+				break
+			}
+		}
+		if !hasSSH {
+			addDefaultSSHForward(ctx, pf, vm.VmId)
+		}
+	}
 }
 
 // monitorPingTimeout 定期检查是否长时间未收到 Ping，检测僵尸连接。

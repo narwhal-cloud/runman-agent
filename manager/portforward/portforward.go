@@ -10,6 +10,7 @@ import (
 	"runman-agent/db"
 	"runman-agent/manager"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -349,7 +350,7 @@ func (m *Manager) addMapping(ctx context.Context, vmId string, protocol string, 
 	if ip == "" {
 		return fmt.Errorf("VM %s has no IP address (is it running?)", vmId)
 	}
-	targetAddr := fmt.Sprintf("%s:%d", ip, guestPort)
+	targetAddr := formatTargetAddress(ip, guestPort)
 
 	runCtx, cancel := context.WithCancel(context.Background())
 	entry := &Entry{
@@ -391,6 +392,10 @@ func (m *Manager) addMapping(ctx context.Context, vmId string, protocol string, 
 		Description: description,
 	})
 	return nil
+}
+
+func formatTargetAddress(ip string, port int) string {
+	return net.JoinHostPort(ip, strconv.Itoa(port))
 }
 
 // removeEntryLocked removes the entry matching (vmId, protocol, hostPort) from

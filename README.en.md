@@ -200,9 +200,14 @@ The installer auto-detects your server's IPv6 configuration and selects the appr
 
 `--nat4` keeps an RFC1918 address on every instance with Incus IPv4 NAT while
 also assigning public IPv6. `--ipv6-only` sets the instance NIC's
-`ipv4.address=none`. Auto-detection distinguishes native on-link prefixes from
+`ipv4.address=none`, disables IPv4 on `incusbr0`, and writes IPv6-capable
+resolvers explicitly. Auto-detection distinguishes native on-link prefixes from
 HE/WireGuard/provider-routed prefixes and verifies a temporary independent
 source address before accepting the `/64`.
+
+With HE, the tunnel client address and routed container prefix are intentionally
+different. For example, `2001:470:35:154::2` can be the host/tunnel entry while
+containers use addresses from the routed `2001:470:36:154::/64`.
 
 You can override the mode and network parameters by setting environment variables before running the script:
 
@@ -276,10 +281,17 @@ bash install.sh --uninstall --purge-incus
 
 The full cleanup does not remove the Incus package/default storage pool or
 touch HE/WireGuard tunnel services, so the guided installer can be run again.
+Safe uninstall preserves `incusbr0` when Incus instances are retained and keeps
+Podman's `/data` `storage.conf`, so preserved services remain manageable.
 
 Before uninstalling Podman, delete unwanted instances in the panel. The safe
 uninstall intentionally does not guess which Podman containers or images belong
 to the user.
+
+IPv6-only Incus guests receive a persistent IPv6 resolver file. The Agent also
+uses their IPv6 address as the target for the automatic random
+`20000-59999/tcp -> 22` SSH forward and backfills a missing default SSH rule for
+existing managed instances after an upgrade.
 
 ## Updating the Agent
 
