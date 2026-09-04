@@ -28,6 +28,7 @@ jobs:
         run: |
           go test -tags containers_image_openpgp ./...
           bash -n install.sh
+          python3 -m unittest discover -s tests -v
           bash install.sh --help >/dev/null
           status_output="$(bash install.sh --status)"
           if grep -q 'Select language' <<<"$status_output"; then
@@ -70,9 +71,13 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 0
         run: |
+          build_version="${{ github.ref_name }}"
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            build_version="continuous-${{ github.sha }}"
+          fi
           go build \
             -tags containers_image_openpgp \
-            -ldflags="-s -w -X main.version=${{ github.ref_name }}" \
+            -ldflags="-s -w -X main.version=${build_version}" \
             -o runman-agent-linux-${{ matrix.goarch }} \
             .
 

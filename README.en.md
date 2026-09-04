@@ -295,6 +295,53 @@ existing managed instances after an upgrade.
 
 ## Updating the Agent
 
+### Migrate from upstream without reinstalling containers
+
+For the standard `narwhal-agent` systemd service with binary and `config.json`
+under `/opt/narwhal-agent`, run as root:
+
+```bash
+bash <(curl -fsSL https://github.com/podcctv/runman-agent/releases/download/continuous/install.sh) en --update-only
+systemctl status narwhal-agent --no-pager
+journalctl -u narwhal-agent -n 50 --no-pager
+```
+
+This preserves the Token, password hash, database, containers, backend, network
+and private image settings, adding missing config defaults only. It does not
+upgrade backends/netavark/rfw, modify host sysctl/storage/bridges, or refresh images.
+It cannot switch backends, change network mode or replace existing guest images.
+Use image menu 13 separately for future guests. Do not uninstall or purge first.
+
+Requires `jq`, `python3`, `curl` and `flock`. Missing/invalid configuration,
+missing database or nonstandard service paths fail closed without a fresh install.
+Each update saves the old binary, config, service definition and a consistent
+SQLite online backup (including committed WAL data) in a root-only directory:
+`/var/lib/narwhal-agent/backups/upgrade-<timestamp>-<random>/`.
+Guest disks are not included. Download and ELF architecture validation finish
+before changing the config/binary. Download failure leaves both unchanged.
+Concurrent updates are rejected. A running Agent is briefly restarted (panel and
+user-space forwarding may be interrupted); stopped Agents stay stopped.
+
+Verify existing guests, SSH forwarding and configuration after migration. On
+startup failure, inspect the journal and the printed backup location. Stop the
+Agent before a rollback, preserve current state, and restore matching binary,
+config and database from one snapshot while handling current SQLite WAL/SHM.
+Never overwrite a live database; old snapshots lack any subsequently created
+instances/rules. Retain snapshots until acceptance, then clean up explicitly to
+avoid unbounded backup disk use.
+
+Automatic and panel updates now use only `podcctv/runman-agent`, never the upstream
+installer or a stale cached script after a download failure. Rolling builds use
+`continuous-<full commit SHA>` and compare the release's immutable target commit;
+`v*` builds use this repository's stable channel. Checks run every 6 hours and
+schedule new versions 24–72 hours later. Updates run in a separate systemd unit
+with `--update-only --non-interactive`; inspect `journalctl -u narwhal-agent-update`.
+To disable automatic checks (not manual updates), add
+`Environment=RUNMAN_AGENT_AUTO_UPDATE=0` under `[Service]` using
+`systemctl edit narwhal-agent`, then daemon-reload and restart the Agent.
+
+### Full component update
+
 Run the same install command on an already-installed host — it automatically detects the existing installation and performs an in-place update (agent + netavark + rfw):
 
 ```bash

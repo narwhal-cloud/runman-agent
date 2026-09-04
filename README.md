@@ -567,13 +567,59 @@ unset NARWHAL_AGENT_TOKEN
 
 ## 更新 Agent
 
-在已安装的服务器上重新执行同一命令，脚本会自动检测到已有安装并执行就地更新（Agent + netavark + rfw 同步更新，并补齐新增配置字段）：
+### 从原版迁移 / 只更新 Agent（推荐已有业务的机器使用）
+
+无需先卸载。适用于原版标准布局：服务 `narwhal-agent`，二进制
+`/opt/narwhal-agent/narwhal-agent`，配置 `/opt/narwhal-agent/config.json`。
+使用 root 执行：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh)
+bash <(curl -fsSL https://github.com/podcctv/runman-agent/releases/download/continuous/install.sh) zh --update-only
+systemctl status narwhal-agent --no-pager
+journalctl -u narwhal-agent -n 50 --no-pager
 ```
 
-> 为避免覆盖你已配置的私有镜像源等参数，更新会**保留现有 `config.json`** 并仅补齐缺省字段（如 `incus_ipv6_only`）。
+`--update-only` 的边界：
+
+- 保留 Token、面板密码哈希、数据库、容器和已有网络/私有镜像配置，仅补齐缺省字段。
+- 不安装/升级 Podman、Incus、netavark、rfw，不改宿主机 sysctl、网桥、存储配置，不拉取基础镜像。
+- 不切换虚拟化后端，也不把已有容器换成自制镜像；这些操作需要单独规划。不能混用 `--nat4`、`--ipv6-only`、Token 或镜像变更参数。
+- 要求已有 `jq`、`python3`、`curl`、`flock`。配置缺失/损坏、数据库缺失、非标准服务路径会中止，不会误走全新安装。
+- 更新前在 `/var/lib/narwhal-agent/backups/upgrade-时间戳-随机串/` 备份旧二进制、原配置、服务定义及数据库。数据库使用 SQLite 在线备份，包含已提交的 WAL 数据；目录仅 root 可访问。备份**不包含容器磁盘**。
+- 下载及 ELF 架构检查完成后才修改配置、替换程序。下载失败保留原程序和配置；并行升级会被锁拒绝。
+- 原本运行的 Agent 会短暂重启，面板和用户态端口转发可能短暂中断；不重启容器。原本停止的 Agent 保持停止，需自行 `systemctl start narwhal-agent`。
+
+升级后确认原容器仍在、SSH 高位端口可用、Token 与网络配置不变。
+若启动失败，脚本会打印备份路径；先查看日志。需要回退时先停止 Agent，妥善备份当前状态，再按同一个升级快照恢复旧程序、配置和数据库，并处理当前 SQLite WAL/SHM；**不要在 Agent 运行时直接覆盖数据库**。升级后新增的实例/规则不在旧快照中，回退前必须核对。保留快照至验收完成，再按需手动清理，避免长期自动升级占满磁盘。
+
+### 常规组件更新 / 镜像管理
+
+不加 `--update-only` 的安装/更新菜单仍可更新 Agent、netavark、rfw，并按当前后端处理网络兼容和基础镜像；会涉及系统参数，不等同于上面的最小迁移。
+配置/刷新自制镜像使用菜单 **13**，只影响后续新建实例，不替换已有容器。
+
+### 自动更新来源与版本
+
+自动更新和面板手动更新只使用 `podcctv/runman-agent`，不再下载原版仓库的安装脚本；下载失败也不会执行旧缓存脚本。
+`main` 的发布版本为 `continuous-完整提交号`，通过 `continuous` 发布的 `target_commitish` 比较提交，避免固定 `main` 版本反复升级。同仓库 `v*` 构建使用稳定版通道。
+自动更新保留每 6 小时检查、发现新版本后随机延迟 24–72 小时的机制，执行 `--update-only --non-interactive`，任务日志：
+
+```bash
+journalctl -u narwhal-agent-update --no-pager
+```
+
+如需只手工升级，运行 `systemctl edit narwhal-agent`，加入以下内容并重启 Agent（此设置不禁用面板手动更新）：
+
+```ini
+[Service]
+Environment=RUNMAN_AGENT_AUTO_UPDATE=0
+```
+
+```bash
+systemctl daemon-reload
+systemctl restart narwhal-agent
+```
+
+旧版本已经升级到原版或存在原版待更新记录时，重新执行上面的本仓库 `--update-only` 命令迁移；新版只根据本仓库发布重新判断，不执行旧的原版更新计划。
 
 ---
 

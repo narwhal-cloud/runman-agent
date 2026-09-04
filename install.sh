@@ -391,6 +391,8 @@ VIRT_TYPE_REQUESTED="${VIRT_TYPE_REQUESTED:-}"
 NON_INTERACTIVE="${NON_INTERACTIVE:-0}"
 ORIGINAL_ARGC=$#
 FORCE_MENU=0
+UPDATE_ONLY=0
+UPDATE_NETWORK_REQUESTED=0
 GUIDED_INSTALL=0
 PURGE_INCUS="${PURGE_INCUS:-0}"
 TOKEN_ACTION=""
@@ -412,6 +414,7 @@ Runman Agent installer
 
   bash install.sh                         Guided menu
   bash install.sh --virt incus            Install/update Incus backend
+  bash install.sh --update-only           Back up and update Agent only; require an existing installation
   bash install.sh --detect-ipv6            Detect native/tunnel IPv6 and routed prefix
   bash install.sh --validate-ipv6 ...      Validate manually supplied IPv6 values
   bash install.sh --show-token             Print current integration Token
@@ -585,12 +588,13 @@ while [[ $# -gt 0 ]]; do
         --skip-ipv6-probe) SKIP_IPV6_PROBE=1; shift ;;
         --banner-preset) [ $# -ge 2 ] || die "--banner-preset requires a value"; INCUS_BANNER_PRESET="$2"; shift 2 ;;
         --banner-text) [ $# -ge 2 ] || die "--banner-text requires a value"; INCUS_BANNER_TEXT="$2"; shift 2 ;;
-        --ipv6-only) INCUS_IPV6_ONLY=1; shift ;;
-        --nat4) INCUS_IPV6_ONLY=0; shift ;;
+        --ipv6-only) INCUS_IPV6_ONLY=1; UPDATE_NETWORK_REQUESTED=1; shift ;;
+        --nat4) INCUS_IPV6_ONLY=0; UPDATE_NETWORK_REQUESTED=1; shift ;;
         --token) [ $# -ge 2 ] || die "--token requires a value"; INITIAL_TOKEN="$2"; TOKEN_VALUE="$2"; shift 2 ;;
         --generate-token) GENERATE_TOKEN=1; shift ;;
         -y|--yes|--non-interactive) NON_INTERACTIVE=1; shift ;;
         --menu) FORCE_MENU=1; shift ;;
+        --update-only) UPDATE_ONLY=1; shift ;;
         --detect-ipv6) IPV6_ONESHOT_MODE="detect"; shift ;;
         --validate-ipv6) IPV6_ONESHOT_MODE="validate"; shift ;;
         --backup-ipv6) IPV6_ONESHOT_MODE="backup"; shift ;;
@@ -647,6 +651,11 @@ if [ "$FORCE_MENU" = "1" ] || { [ "$ORIGINAL_ARGC" -eq 0 ] && [ -t 0 ]; }; then
 fi
 
 # ── 一键 Token / 备份 / 回滚 / 卸载（处理完即退出）──
+if [ "$UPDATE_ONLY" = "1" ]; then
+    [ -z "$SYSTEM_ACTION" ] && [ -z "$TOKEN_ACTION" ] && [ -z "$IPV6_ONESHOT_MODE" ] \
+        && [ "$UNINSTALL" != "1" ] && [ "$GENERATE_TOKEN" = "0" ] \
+        || die "--update-only cannot be combined with other management actions."
+fi
 case "$SYSTEM_ACTION" in
     status) show_agent_status; exit 0 ;;
     restart) restart_agent_services; exit 0 ;;
@@ -1329,11 +1338,11 @@ download_agent() {
     mkdir -p "$AGENT_BIN_DIR"
 
     # 调试模式：检查本地文件
-    if [ -f "./runman-agent-linux-$arch" ]; then
+    if [ "$UPDATE_ONLY" != "1" ] && [ -f "./runman-agent-linux-$arch" ]; then
         log "$(t "Found local agent binary: ./runman-agent-linux-$arch (debug mode)" "找到本地 agent 二进制: ./runman-agent-linux-$arch (调试模式)")"
         cp "./runman-agent-linux-$arch" "$AGENT_BINARY.new"
         chmod +x "$AGENT_BINARY.new"
-        mv "$AGENT_BINARY.new" "$AGENT_BINARY"
+        [ "${2:-}" = "stage" ] || mv "$AGENT_BINARY.new" "$AGENT_BINARY"
         log "$(t "✓ NarwhalCloud Agent installed to $AGENT_BINARY (from local)" "✓ NarwhalCloud Agent 已安装到 $AGENT_BINARY (来自本地)")"
         return 0
     fi
@@ -1341,9 +1350,21 @@ download_agent() {
     # 生产模式：从远程下载
     log "$(t "Downloading NarwhalCloud Agent ($arch)..." "下载 NarwhalCloud Agent ($arch)...")"
     download_with_retry "$DOWNLOAD_BASE/runman-agent-linux-$arch" "$AGENT_BINARY.new"
+    python3 - "$AGENT_BINARY.new" "$arch" <<'PY'
+import sys
+with open(sys.argv[1], 'rb') as binary:
+    header = binary.read(20)
+expected = {'amd64': 62, 'arm64': 183}[sys.argv[2]]
+if len(header) != 20 or header[:6] != b'\x7fELF\x02\x01' or int.from_bytes(header[18:20], 'little') != expected:
+    raise SystemExit('Downloaded Agent is not an ELF64 binary for the selected architecture')
+PY
     chmod +x "$AGENT_BINARY.new"
-    mv "$AGENT_BINARY.new" "$AGENT_BINARY"
-    log "$(t "✓ NarwhalCloud Agent installed to $AGENT_BINARY" "✓ NarwhalCloud Agent 已安装到 $AGENT_BINARY")"
+    if [ "${2:-}" = "stage" ]; then
+        log "$(t "✓ Agent download staged and architecture checked." "✓ Agent 已下载暂存并通过架构检查。")"
+    else
+        mv "$AGENT_BINARY.new" "$AGENT_BINARY"
+        log "$(t "✓ NarwhalCloud Agent installed to $AGENT_BINARY" "✓ NarwhalCloud Agent 已安装到 $AGENT_BINARY")"
+    fi
 }
 
 # write_service_file
@@ -2198,8 +2219,72 @@ prompt_existing_image_update() {
 
 # ── Update flow ───────────────────────────────────────────────────────────────
 
-if systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null || [ -f "$AGENT_BINARY" ]; then
+# Never interpret an incomplete/custom original installation as a fresh install.
+preflight_existing_install() {
+    [ "$(id -u)" = "0" ] || die "Update requires root."
+    for dep in jq python3 curl flock; do
+        command -v "$dep" >/dev/null 2>&1 || die "Update requires $dep; install it first."
+    done
+    [ -f "$AGENT_BINARY" ] && [ -f "$AGENT_CONFIG_FILE" ] \
+        || die "Incomplete/nonstandard installation: expected $AGENT_BINARY and $AGENT_CONFIG_FILE. No fresh installation attempted."
+    jq -e 'type == "object"' "$AGENT_CONFIG_FILE" >/dev/null \
+        || die "Invalid existing config.json; update aborted."
+    local virt command_line
+    virt=$(detect_installed_virt_type)
+    case "$virt" in podman|incus|cloudhv) ;; *) die "Unknown existing virt_type; update aborted." ;; esac
+    [ -z "$VIRT_TYPE_REQUESTED" ] || [ "$VIRT_TYPE_REQUESTED" = "$virt" ] \
+        || die "An update cannot switch virtualization backends. Existing backend: $virt"
+    [ "$UPDATE_NETWORK_REQUESTED" = "0" ] && [ -z "${IPV6_MODE:-}" ] \
+        && [ -z "${IPV6_SUBNET:-}" ] && [ -z "${IPV6_ADDR:-}" ] && [ -z "${IPV6_IFACE:-}" ] \
+        || die "An update preserves existing networking; configure network changes separately."
+    if [ "$UPDATE_ONLY" = "1" ]; then
+        [ "$IMAGE_MENU" = "0" ] && [ "$FORCE_IMAGE_REFRESH" != "1" ] \
+            && [ "$INSTALL_RFW_FORCE" != "1" ] && [ -z "$INITIAL_TOKEN" ] \
+            && [ "$INCUS_IMAGE_MIRROR_EXPLICIT" != "1" ] && [ -z "$INCUS_ALPINE_BASE" ] \
+            && [ -z "$INCUS_LOCAL_IMAGE_DIR" ] && [ "$PODMAN_REGISTRY_MIRROR_EXPLICIT" != "1" ] \
+            || die "--update-only cannot be combined with Token, image or firewall changes."
+    fi
+    command_line=$(systemctl show "$AGENT_SERVICE" -p ExecStart --value)
+    [[ "$command_line" == *"$AGENT_BINARY"* && "$command_line" == *"$AGENT_CONFIG_FILE"* ]] \
+        || die "Nonstandard service ExecStart/config path; manual migration is required."
+    AGENT_DB=$(jq -r '.db // empty' "$AGENT_CONFIG_FILE")
+    AGENT_DB="${AGENT_DB:-$AGENT_CONFIG_DIR/agent.db}"
+    [[ "$AGENT_DB" = /* ]] && [ -f "$AGENT_DB" ] \
+        || die "Existing database missing or not an absolute path: $AGENT_DB; update aborted."
+}
+
+backup_existing_install() {
+    mkdir -p "$INCUS_IPV6_BACKUP_DIR"
+    UPGRADE_BACKUP=$(mktemp -d "$INCUS_IPV6_BACKUP_DIR/upgrade-$(date +%Y%m%d-%H%M%S)-XXXXXX")
+    chmod 700 "$UPGRADE_BACKUP"
+    cp -p "$AGENT_BINARY" "$UPGRADE_BACKUP/narwhal-agent"
+    cp -p "$AGENT_CONFIG_FILE" "$UPGRADE_BACKUP/config.json"
+    systemctl cat "$AGENT_SERVICE" > "$UPGRADE_BACKUP/service.txt"
+    # SQLite's online backup API includes committed WAL data; copying a live
+    # agent.db alone can silently lose VM records and port-forward rules.
+    python3 - "$AGENT_DB" "$UPGRADE_BACKUP/agent.db" <<'PY'
+import pathlib
+import sqlite3
+import sys
+with sqlite3.connect(pathlib.Path(sys.argv[1]).as_uri() + '?mode=ro', uri=True, timeout=30) as source:
+    with sqlite3.connect(sys.argv[2]) as target:
+        source.backup(target)
+        if target.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
+            raise RuntimeError('Database backup failed integrity check')
+PY
+    chmod 600 "$UPGRADE_BACKUP/config.json" "$UPGRADE_BACKUP/agent.db" "$UPGRADE_BACKUP/service.txt"
+    log "$(t "Pre-upgrade backup (keep private):" "升级前备份（请妥善保密）:") $UPGRADE_BACKUP"
+}
+
+if systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null || [ -f "$AGENT_BINARY" ] || [ -f "$AGENT_CONFIG_FILE" ]; then
     log "$(t "Existing NarwhalCloud Agent detected, updating..." "检测到已安装的 NarwhalCloud Agent，执行更新流程...")"
+    preflight_existing_install
+    exec 9>/run/lock/narwhal-agent-install.lock
+    flock -n 9 || die "Another Agent installation/update is already running."
+    backup_existing_install
+    ARCH=$(detect_arch)
+    # Finish downloading before changing config or replacing the running binary.
+    download_agent "$ARCH" stage
 
     _installed_virt=$(detect_installed_virt_type)
     if [ "$IMAGE_MENU" = "1" ] && [ "$NON_INTERACTIVE" != "1" ] && [ -t 0 ]; then
@@ -2229,18 +2314,20 @@ if systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null || [ -f "$AGENT_BINA
     fi
 
     ARCH=$(detect_arch)
-    if command -v podman &>/dev/null; then
+    if [ "$UPDATE_ONLY" != "1" ] && [ "$_installed_virt" = "podman" ]; then
         check_podman_version
     fi
 
     # 重新应用 sysctl，确保旧安装升级后也获得最新内核参数（forwarding/accept_ra 等）
-    enable_bbr
-    configure_journald
+    if [ "$UPDATE_ONLY" != "1" ]; then
+        enable_bbr
+        configure_journald
+    fi
 
-    download_agent "$ARCH"
+    mv "$AGENT_BINARY.new" "$AGENT_BINARY"
 
     # Update netavark
-    if [ -f "/usr/libexec/podman/netavark" ]; then
+    if [ "$UPDATE_ONLY" != "1" ] && [ "$_installed_virt" = "podman" ] && [ -f "/usr/libexec/podman/netavark" ]; then
         if download_with_retry "$NETAVARK_BASE/netavark-new-$ARCH" "/usr/libexec/podman/netavark.new"; then
             chmod +x /usr/libexec/podman/netavark.new
             mv /usr/libexec/podman/netavark.new /usr/libexec/podman/netavark
@@ -2248,8 +2335,20 @@ if systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null || [ -f "$AGENT_BINA
         fi
     fi
 
-    systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null && systemctl restart "$AGENT_SERVICE"
+    if systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null; then
+        systemctl restart "$AGENT_SERVICE" \
+            || die "Agent restart failed. Backup: $UPGRADE_BACKUP; inspect journalctl -u $AGENT_SERVICE"
+        sleep 3
+        systemctl is-active --quiet "$AGENT_SERVICE" \
+            || die "Agent did not remain active. Backup: $UPGRADE_BACKUP; inspect journalctl -u $AGENT_SERVICE"
+    else
+        log "$(t "Agent was stopped; leaving it stopped." "Agent 原本已停止，本次保持停止状态。")"
+    fi
     log "$(t "✓ NarwhalCloud Agent updated." "✓ NarwhalCloud Agent 已更新。")"
+    if [ "$UPDATE_ONLY" = "1" ]; then
+        log "$(t "Agent-only update complete; backend, images and host networking unchanged." "仅 Agent 更新完成；后端、镜像与宿主机网络未改动。")"
+        exit 0
+    fi
 
     # Refresh prebuilt base images for VM-style virtualization.
     # 已运行的实例使用的是镜像副本，替换基础镜像只影响之后新建的实例。
@@ -2324,6 +2423,7 @@ fi
 
 # ── Fresh install ─────────────────────────────────────────────────────────────
 
+[ "$UPDATE_ONLY" != "1" ] || die "No standard Agent installation found; --update-only will not perform a fresh installation."
 [ "$IMAGE_MENU" = "1" ] && die "$(t "Agent is not installed; use menu option 1 first." "Agent 尚未安装，请先使用菜单选项 1 安装。")"
 
 log "$(t "Starting fresh installation..." "开始全新安装流程...")"
