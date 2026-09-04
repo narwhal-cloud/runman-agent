@@ -300,6 +300,8 @@ existing managed instances after an upgrade.
 For the standard `narwhal-agent` systemd service with binary and `config.json`
 under `/opt/narwhal-agent`, run as root:
 
+Menu **14** provides the same Agent-only migration flow.
+
 ```bash
 bash <(curl -fsSL https://github.com/podcctv/runman-agent/releases/download/continuous/install.sh) en --update-only
 systemctl status narwhal-agent --no-pager

@@ -3,6 +3,7 @@
 Linux CI only. No root, containers, real systemd or network access required.
 """
 import json
+import fcntl
 import os
 from pathlib import Path
 import sqlite3
@@ -114,6 +115,14 @@ cp "$TEST_ROOT/new-agent" "$3"
         _, calls = self.run_installer()
         self.assertNotIn("systemctl restart", calls)
 
+    def test_menu_agent_only_upgrade(self):
+        result = subprocess.run(["bash", str(self.script), "en", "--menu"],
+                                cwd=self.root, env=self.env, input="14\n",
+                                text=True, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Agent-only update complete", result.stdout)
+        self.assertNotIn("FORBIDDEN", self.calls.read_text())
+
     def test_download_failure_keeps_original_binary(self):
         self.env["TEST_DOWNLOAD_FAIL"] = "1"
         _, calls = self.run_installer(success=False)
@@ -149,6 +158,30 @@ cp "$TEST_ROOT/new-agent" "$3"
     def test_rejects_backend_switch(self):
         output, _ = self.run_installer("--virt", "podman", success=False)
         self.assertIn("cannot switch", output)
+
+    def test_invalid_json_fails_before_download(self):
+        (self.agent / "config.json").write_text("{broken")
+        _, calls = self.run_installer(success=False)
+        self.assertNotIn("curl", calls)
+
+    def test_database_backup_failure_prevents_replacement(self):
+        self.db.close()
+        self.db_path.write_bytes(b"not a sqlite database")
+        _, calls = self.run_installer(success=False)
+        self.assertNotIn("curl", calls)
+        self.assertEqual((self.agent / "narwhal-agent").read_text(), "old-agent")
+
+    def test_concurrent_update_is_rejected(self):
+        with (self.root / "install.lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            output, calls = self.run_installer(success=False)
+        self.assertIn("already running", output)
+        self.assertNotIn("curl", calls)
+
+    def test_agent_only_ignores_stray_local_debug_binary(self):
+        (self.root / "runman-agent-linux-amd64").write_text("stale-debug-binary")
+        self.run_installer()
+        self.assertEqual((self.agent / "narwhal-agent").read_bytes(), self.new_binary)
 
     def test_rejects_network_change(self):
         output, _ = self.run_installer("--nat4", success=False)

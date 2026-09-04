@@ -132,6 +132,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/in
 | 11 | 卸载 Agent，保留容器、镜像和数据盘 | 是 |
 | 12 | Incus 完整清理：删除受管实例、ready 镜像、`incusbr0` 和镜像 remote | **破坏性，菜单要求确认** |
 | 13 | 配置/刷新镜像：Incus URL/离线目录/基础镜像；Podman registry mirror/基础镜像 | 是 |
+| 14 | 仅升级 Agent / 从原版就地迁移，先备份，保留网络和后端 | 是，运行中的 Agent 短暂重启 |
 
 选择安装后依次引导：虚拟化类型、Podman 数据盘及 registry mirror（如适用）、容器网络、
 对接 Token、rfw 网卡以及 Incus 登录横幅。Incus 网络菜单覆盖：
@@ -572,6 +573,8 @@ unset NARWHAL_AGENT_TOKEN
 无需先卸载。适用于原版标准布局：服务 `narwhal-agent`，二进制
 `/opt/narwhal-agent/narwhal-agent`，配置 `/opt/narwhal-agent/config.json`。
 使用 root 执行：
+
+也可以在总菜单选择 **14：仅升级 Agent / 从原版迁移**，效果与下面命令相同。
 
 ```bash
 bash <(curl -fsSL https://github.com/podcctv/runman-agent/releases/download/continuous/install.sh) zh --update-only

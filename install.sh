@@ -545,6 +545,7 @@ show_main_menu() {
     printf ' 11) %s\n' "$(t "Uninstall Agent (keep containers/images)" "卸载 Agent（保留容器/镜像）")"
     printf ' 12) %s\n' "$(t "Full Incus cleanup and uninstall" "清理 Incus 制品并完整卸载")"
     printf ' 13) %s\n' "$(t "Configure/refresh container images" "配置/刷新容器镜像")"
+    printf ' 14) %s\n' "$(t "Agent-only upgrade / migrate from upstream (keep networking)" "仅升级 Agent / 从原版迁移（保留网络）")"
     printf '  0) %s\n' "$(t "Exit" "退出")"
     read -rp '> ' _menu_choice
     case "${_menu_choice}" in
@@ -561,6 +562,7 @@ show_main_menu() {
         11) UNINSTALL=1 ;;
         12) UNINSTALL=1; PURGE_INCUS=1 ;;
         13) GUIDED_INSTALL=1; FORCE_IMAGE_REFRESH=1; IMAGE_MENU=1 ;;
+        14) UPDATE_ONLY=1 ;;
         0) exit 0 ;;
         *) die "$(t "Invalid menu selection." "无效的菜单选项。")" ;;
     esac
