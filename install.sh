@@ -2078,16 +2078,11 @@ import_custom_alpine_base() {
 # 服务器以 LXD/Incus 原生格式（lxd.tar.xz + rootfs.squashfs）发布，
 # 直接按 streams/v1/images.json 中的路径下载并 incus image import，
 # 不依赖 streams/v1/index.json（部分自建服务器未提供，incus remote add 会失败）。
-# 遍历 alpine / debian，服务器提供哪些就导入哪些（fork 服务器当前仅 alpine/amd64）。
+# 遍历 alpine / debian，按 Simple Streams 元数据匹配当前主机架构。
 # 返回 0 表示至少成功导入一个镜像（调用方据此决定其余发行版是否回退 GitHub）。
 import_incus_images_from_mirror() {
     [ -n "$INCUS_IMAGE_MIRROR" ] || return 1
     MIRROR_IMPORT_REASON=""
-    [ "$ARCH" = "amd64" ] || {
-        MIRROR_IMPORT_REASON="unsupported_arch"
-        log "$(t "Mirror has no $ARCH images; using the official $ARCH release instead." "镜像服务器未提供 $ARCH 镜像；将改用官方 $ARCH 预构建镜像。")"
-        return 1
-    }
     command -v incus >/dev/null 2>&1 || return 1
     command -v jq    >/dev/null 2>&1 || { log "$(t "jq not available; skipping mirror import." "jq 不可用，跳过镜像导入。")"; return 1; }
 
@@ -2098,13 +2093,17 @@ import_incus_images_from_mirror() {
     }
 
     MIRROR_IMPORTED_DISTROS=""
-    local ok=0 distro item_record metadata_path rootfs_path metadata_sha rootfs_sha tmpd metadata_file rootfs_file local_alias
+    local ok=0 matching_images=0 distro item_record metadata_path rootfs_path metadata_sha rootfs_sha tmpd metadata_file rootfs_file local_alias
     for distro in alpine debian; do
         # Accept current Incus names (incus.tar.xz + root.squashfs) and the
         # legacy LXD names. Select the newest complete version deterministically.
-        item_record=$(printf '%s\n' "$meta" | jq -r --arg d "$distro" '
+        item_record=$(printf '%s\n' "$meta" | jq -r --arg d "$distro" --arg arch "$ARCH" '
           [.products | to_entries[]?
-           | select((.key | startswith($d + ":")) or (.value.os? == $d))
+           | select(
+               ((.key | startswith($d + ":")) or (((.value.os? // "") | ascii_downcase) == $d))
+               and ((.value.architecture? // .value.arch? // "") == $arch
+                    or ((.key | split(":") | index($arch)) != null))
+             )
            | .value.versions | to_entries[]?
            | {version: .key, items: .value.items}
            | .metadata = (.items["incus.tar.xz"] // .items["lxd.tar.xz"])
@@ -2116,6 +2115,7 @@ import_incus_images_from_mirror() {
         [ -n "$item_record" ] && [ "$item_record" != "null" ] || continue
         IFS=$'\t' read -r metadata_path rootfs_path metadata_sha rootfs_sha <<< "$item_record"
         [ -n "$metadata_path" ] && [ -n "$rootfs_path" ] || continue
+        matching_images=1
 
         tmpd=$(mktemp -d)
         metadata_file="$tmpd/incus.tar.xz"; rootfs_file="$tmpd/root.squashfs"
@@ -2141,8 +2141,13 @@ import_incus_images_from_mirror() {
         rm -rf "$tmpd"
     done
     [ "$ok" = "1" ] || {
-        MIRROR_IMPORT_REASON="unavailable"
-        log "$(t "Mirror provided no importable images" "镜像服务器未提供可导入的镜像")"
+        if [ "$matching_images" = "0" ]; then
+            MIRROR_IMPORT_REASON="no_matching_arch"
+            log "$(t "Mirror has no importable image for $ARCH" "镜像站未发布适用于 $ARCH 的可导入镜像")"
+        else
+            MIRROR_IMPORT_REASON="unavailable"
+            log "$(t "Mirror provided no importable images" "镜像服务器未提供可导入的镜像")"
+        fi
         return 1
     }
     return 0
@@ -2409,7 +2414,7 @@ if systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null || [ -f "$AGENT_BINA
             if [ -n "$INCUS_IMAGE_MIRROR" ] && import_incus_images_from_mirror; then
                 _nc_mirror_ok=1
             else
-                if [ "${MIRROR_IMPORT_REASON:-}" = "unsupported_arch" ]; then
+                if [ "${MIRROR_IMPORT_REASON:-}" = "no_matching_arch" ]; then
                     log "$(t "Mirror has no $ARCH image; refreshing from the official $ARCH release." "镜像站没有 $ARCH 镜像；将从官方 $ARCH 预构建 Release 刷新。")"
                 else
                     log "$(t "Mirror import failed on update; falling back to default source." "更新时镜像导入失败；回退到默认源。")"
@@ -3042,7 +3047,7 @@ PY
             if import_incus_images_from_mirror; then
                 _nc_mirror_ok=1
             else
-                if [ "${MIRROR_IMPORT_REASON:-}" = "unsupported_arch" ]; then
+                if [ "${MIRROR_IMPORT_REASON:-}" = "no_matching_arch" ]; then
                     log "$(t "Mirror has no $ARCH image; will use the official $ARCH release." "镜像站没有 $ARCH 镜像；将使用官方 $ARCH 预构建 Release。")"
                 else
                     log "$(t "Mirror import skipped/failed; will use configured base / default source." "镜像导入跳过/失败；将使用配置源 / 默认源。")"
