@@ -1461,6 +1461,24 @@ EOF
     log "$(t "✓ Configuration file written to $AGENT_CONFIG_FILE" "✓ 配置文件已写入 $AGENT_CONFIG_FILE")"
 }
 
+rfw_api_ready() {
+    local attempts="${1:-10}" i
+    for ((i = 0; i < attempts; i++)); do
+        curl -sf "http://$RFW_API_ADDR/api/rules" >/dev/null 2>&1 && return 0
+        sleep 1
+    done
+    return 1
+}
+
+enable_rfw_skb_mode() {
+    local unit="/etc/systemd/system/rfw.service"
+    [ -f "$unit" ] || return 1
+    grep -Fq -- "--xdp-mode skb" "$unit" && return 0
+    sed -i '/^ExecStart=/ s/$/ --xdp-mode skb/' "$unit"
+    systemctl daemon-reload
+    systemctl restart rfw
+}
+
 install_rfw() {
     local mode="${1:-0}" # 0: normal (prompt), 1: force (no prompt), 2: update-only (no prompt, only if exists)
     local ARCH
@@ -1548,12 +1566,18 @@ EOF
     
     start_service rfw
 
-    # Wait for rfw API to become ready (up to 10s)
+    # The API starts only after eBPF/XDP attaches. Some cloud NICs (notably
+    # ARM virtual NICs) reject the default native mode but support generic SKB.
     _rfw_ready=0
-    for _i in 1 2 3 4 5 6 7 8 9 10; do
-        curl -sf "http://$RFW_API_ADDR/api/rules" >/dev/null 2>&1 && { _rfw_ready=1; break; }
-        sleep 1
-    done
+    if rfw_api_ready 10; then
+        _rfw_ready=1
+    elif journalctl -u rfw --no-pager -n 60 2>/dev/null | grep -Eiq 'XDP.*(attach|附加)|attach.*XDP'; then
+        log "$(t "rfw XDP native mode is unsupported; retrying in SKB mode." "rfw 默认 XDP 模式不受该网卡支持，正在改用兼容的 SKB 模式重试。")"
+        if enable_rfw_skb_mode && rfw_api_ready 15; then
+            _rfw_ready=1
+            log "$(t "✓ rfw API is ready in SKB mode." "✓ rfw API 已通过 SKB 模式就绪。")"
+        fi
+    fi
 
     if [ "$_rfw_ready" = "1" ]; then
         # Check if rules already exist
@@ -1582,7 +1606,7 @@ EOF
             log "$(t "✓ Default rfw rules installed/verified." "✓ 默认 rfw 规则已安装/确认。")"
         fi
     else
-        log "$(t "Warning: rfw API not ready, skipping default rules." "警告：rfw API 未就绪，跳过默认规则安装。")"
+        log "$(t "Warning: rfw API not ready, skipping default rules. Check: journalctl -u rfw --no-pager -n 80" "警告：rfw API 未就绪，跳过默认规则安装。请检查：journalctl -u rfw --no-pager -n 80")"
     fi
 
     log "$(t "✓ rfw firewall installed/updated." "✓ rfw 防火墙已安装/更新。")"

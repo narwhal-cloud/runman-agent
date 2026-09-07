@@ -397,7 +397,7 @@ journalctl -u narwhal-agent --no-pager -n 50
 ```
 
 **rfw fails to start**
-Some cloud providers' network interface cards do not support eBPF. Try adding the `--xdp_mode skb` flag to the rfw service startup parameters.
+Some cloud-provider NICs do not support the default XDP mode. The installer automatically retries with a compatible mode after detecting an XDP attach failure; for a manual repair, add `--xdp-mode skb` to the rfw service startup parameters.
 
 **Podman data disk not mounted**
 ```bash

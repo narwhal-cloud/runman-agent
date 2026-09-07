@@ -217,6 +217,13 @@ cp "$TEST_ROOT/new-agent" "$3"
         self.assertNotIn('[ "$ARCH" = "amd64" ]', source)
         self.assertIn('curl 退出码 $curl_status', source)
 
+    def test_rfw_retries_xdp_attach_failures_in_skb_mode(self):
+        source = (Path(__file__).resolve().parents[1] / "install.sh").read_text()
+        self.assertIn('rfw_api_ready()', source)
+        self.assertIn('enable_rfw_skb_mode()', source)
+        self.assertIn('--xdp-mode skb', source)
+        self.assertIn('XDP.*(attach|附加)', source)
+
 
 if __name__ == "__main__":
     unittest.main()
