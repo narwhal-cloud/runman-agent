@@ -750,10 +750,13 @@ check_podman_version() {
 }
 
 download_with_retry() {
-    local url=$1 dest=$2 max=3 attempt=1
+    local url=$1 dest=$2 max=3 attempt=1 curl_status
     while [ $attempt -le $max ]; do
         log "$(t "Downloading $url (attempt $attempt)..." "下载 $url (第 $attempt 次)...")"
         if curl -fsSL -o "$dest" "$url"; then return 0; fi
+        curl_status=$?
+        rm -f "$dest"
+        log "$(t "Download attempt failed (curl exit $curl_status): $url" "下载尝试失败（curl 退出码 $curl_status）: $url")"
         [ $attempt -eq $max ] && { log "$(t "Download failed." "下载失败。")"; return 1; }
         attempt=$((attempt + 1)); sleep 5
     done
@@ -2079,7 +2082,12 @@ import_custom_alpine_base() {
 # 返回 0 表示至少成功导入一个镜像（调用方据此决定其余发行版是否回退 GitHub）。
 import_incus_images_from_mirror() {
     [ -n "$INCUS_IMAGE_MIRROR" ] || return 1
-    [ "$ARCH" = "amd64" ] || { log "$(t "Mirror only provides amd64 images; skipping." "镜像服务器仅提供 amd64 镜像，跳过。")"; return 1; }
+    MIRROR_IMPORT_REASON=""
+    [ "$ARCH" = "amd64" ] || {
+        MIRROR_IMPORT_REASON="unsupported_arch"
+        log "$(t "Mirror has no $ARCH images; using the official $ARCH release instead." "镜像服务器未提供 $ARCH 镜像；将改用官方 $ARCH 预构建镜像。")"
+        return 1
+    }
     command -v incus >/dev/null 2>&1 || return 1
     command -v jq    >/dev/null 2>&1 || { log "$(t "jq not available; skipping mirror import." "jq 不可用，跳过镜像导入。")"; return 1; }
 
@@ -2132,7 +2140,11 @@ import_incus_images_from_mirror() {
         fi
         rm -rf "$tmpd"
     done
-    [ "$ok" = "1" ] || { log "$(t "Mirror provided no importable images" "镜像服务器未提供可导入的镜像")"; return 1; }
+    [ "$ok" = "1" ] || {
+        MIRROR_IMPORT_REASON="unavailable"
+        log "$(t "Mirror provided no importable images" "镜像服务器未提供可导入的镜像")"
+        return 1
+    }
     return 0
 }
 
@@ -2397,7 +2409,11 @@ if systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null || [ -f "$AGENT_BINA
             if [ -n "$INCUS_IMAGE_MIRROR" ] && import_incus_images_from_mirror; then
                 _nc_mirror_ok=1
             else
-                log "$(t "Mirror import failed on update; falling back to default source." "更新时镜像导入失败；回退到默认源。")"
+                if [ "${MIRROR_IMPORT_REASON:-}" = "unsupported_arch" ]; then
+                    log "$(t "Mirror has no $ARCH image; refreshing from the official $ARCH release." "镜像站没有 $ARCH 镜像；将从官方 $ARCH 预构建 Release 刷新。")"
+                else
+                    log "$(t "Mirror import failed on update; falling back to default source." "更新时镜像导入失败；回退到默认源。")"
+                fi
             fi
             if [ "$_nc_mirror_ok" = "1" ]; then
                 import_missing_incus_images
@@ -3026,7 +3042,11 @@ PY
             if import_incus_images_from_mirror; then
                 _nc_mirror_ok=1
             else
-                log "$(t "Mirror import skipped/failed; will use configured base / default source." "镜像导入跳过/失败；将使用配置源 / 默认源。")"
+                if [ "${MIRROR_IMPORT_REASON:-}" = "unsupported_arch" ]; then
+                    log "$(t "Mirror has no $ARCH image; will use the official $ARCH release." "镜像站没有 $ARCH 镜像；将使用官方 $ARCH 预构建 Release。")"
+                else
+                    log "$(t "Mirror import skipped/failed; will use configured base / default source." "镜像导入跳过/失败；将使用配置源 / 默认源。")"
+                fi
             fi
         fi
         if [ "$_nc_mirror_ok" = "1" ]; then

@@ -209,6 +209,12 @@ cp "$TEST_ROOT/new-agent" "$3"
         output, _ = self.run_installer(success=False)
         self.assertIn("will not perform a fresh installation", output)
 
+    def test_arm64_mirror_skip_is_not_reported_as_an_import_failure(self):
+        source = (Path(__file__).resolve().parents[1] / "install.sh").read_text()
+        self.assertIn('MIRROR_IMPORT_REASON="unsupported_arch"', source)
+        self.assertIn('官方 $ARCH 预构建 Release', source)
+        self.assertIn('curl 退出码 $curl_status', source)
+
 
 if __name__ == "__main__":
     unittest.main()
