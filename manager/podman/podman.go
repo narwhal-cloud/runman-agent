@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runman-agent/manager/podman/cpualloc"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -610,10 +611,70 @@ func (m *Manager) getUsage(_ context.Context, vmID string) (cpuPct float32, memU
 				for range statsCh {
 				}
 			}()
-			return
+			break
+		}
+		break
+	}
+
+	// 兼容 Podman 4.x (如 Debian 12 官方源默认版本)：
+	// Podman 4.x 的 stats 响应中网络统计仅存在于顶层 NetInput/NetOutput 字段，无 Network 字典，
+	// 导致 s.Network 为空，netIn 与 netOut 仍为 0。
+	// 此时通过读取容器 network namespace 对应的 /proc/<pid>/net/dev 获取真实累计网络流量。
+	if netIn == 0 && netOut == 0 {
+		if in, out, pErr := m.getProcNetDev(vmID); pErr == nil {
+			netIn = in
+			netOut = out
 		}
 	}
+
 	return
+}
+
+// getProcNetDev 从容器网络命名空间 /proc/<pid>/net/dev 读取累计流量字节数（Podman 4.x 兼容回退）
+func (m *Manager) getProcNetDev(vmID string) (in, out int64, err error) {
+	inspect, err := containers.Inspect(m.timeoutCtx(), vmID, nil)
+	if err != nil {
+		return 0, 0, err
+	}
+	if inspect.State == nil || inspect.State.Pid <= 0 {
+		return 0, 0, fmt.Errorf("container %s is not running", vmID)
+	}
+
+	path := fmt.Sprintf("/proc/%d/net/dev", inspect.State.Pid)
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.Contains(line, ":") {
+			continue
+		}
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		ifName := strings.TrimSpace(parts[0])
+		if ifName == "lo" {
+			continue
+		}
+
+		fields := strings.Fields(parts[1])
+		// fields[0]: rx_bytes (容器入站 InBytes)
+		// fields[8]: tx_bytes (容器出站 OutBytes)
+		if len(fields) >= 9 {
+			if rx, e := strconv.ParseInt(fields[0], 10, 64); e == nil {
+				in += rx
+			}
+			if tx, e := strconv.ParseInt(fields[8], 10, 64); e == nil {
+				out += tx
+			}
+		}
+	}
+	return in, out, scanner.Err()
 }
 
 func (m *Manager) ListVMs(ctx context.Context) ([]*agent.VMSummary, error) {
