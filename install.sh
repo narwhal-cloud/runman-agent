@@ -19,14 +19,14 @@ RFW_API_ADDR="127.0.0.1:7734"  # rfw 仅监听本地，由 agent 面板反代
 PODMAN_NETWORK="narwhal-net"
 
 AGENT_RELEASE_TAG="${AGENT_RELEASE_TAG:-continuous}"
-DOWNLOAD_BASE="${RUNMAN_AGENT_DOWNLOAD_BASE:-https://github.com/podcctv/runman-agent/releases/download/$AGENT_RELEASE_TAG}"
+DOWNLOAD_BASE="${RUNMAN_AGENT_DOWNLOAD_BASE:-https://github.com/narwhal-cloud/runman-agent/releases/download/$AGENT_RELEASE_TAG}"
 CLOUD_HYPERVISOR_BASE="https://github.com/cloud-hypervisor/cloud-hypervisor/releases/latest/download"
 # 预构建系统镜像（cloudhv/incus），由 narwhal-cloud/images 仓库 CI 每月构建
 VM_IMAGES_BASE="https://github.com/narwhal-cloud/images/releases/download/vm-latest"
 NETAVARK_BASE="https://github.com/narwhal-cloud/netavark/releases/latest/download"
 # rfw v2 随 agent 同仓库发布，资产名为 rfw-amd64 / rfw-arm64
 RFW_BASE="$DOWNLOAD_BASE"
-DEFAULT_INCUS_IMAGE_MIRROR="https://alpine-incus-base.428048.xyz"
+DEFAULT_INCUS_IMAGE_MIRROR=""
 DEFAULT_INCUS_ALPINE_VERSION="3.24"
 
 # t EN ZH — returns the string for current language
@@ -244,7 +244,7 @@ purge_incus_artifacts() {
     names=$(incus list --format csv -c n 2>/dev/null || true)
     log "$(t "Incus instances to delete:" "将删除的 Incus 实例:") ${names:-<none>}"
     log "$(t "Managed image aliases to delete:" "将删除的受管镜像别名:") alpine/3.24/cloud/$purge_arch/ready, alpine/3.23/cloud/$purge_arch/ready, debian/13/cloud/$purge_arch/ready"
-    log "$(t "Managed network/remote to delete:" "将删除的受管网络/远端:") incusbr0, podcctv-mirror"
+    log "$(t "Managed network/remote to delete:" "将删除的受管网络/远端:") incusbr0, custom-mirror"
 
     if [ "$NON_INTERACTIVE" != "1" ] && [ -t 0 ]; then
         read -rp "$(t "Type PURGE to continue: " "输入 PURGE 继续: ")" answer
@@ -259,19 +259,21 @@ purge_incus_artifacts() {
         fi
     done <<< "$names"
 
-    for alias in "alpine/3.24/cloud/$purge_arch/ready" "alpine/3.23/cloud/$purge_arch/ready" "debian/13/cloud/$purge_arch/ready" podcctv/alpine-base; do
+    for alias in "alpine/3.24/cloud/$purge_arch/ready" "alpine/3.23/cloud/$purge_arch/ready" "debian/13/cloud/$purge_arch/ready" "custom/alpine-base" "podcctv/alpine-base"; do
         incus image info "$alias" >/dev/null 2>&1 || continue
         if ! incus image delete "$alias" >/dev/null 2>&1; then
             log "$(t "Failed to delete managed Incus image:" "删除受管 Incus 镜像失败:") $alias"
             failed=1
         fi
     done
-    if incus remote list --format csv -c n 2>/dev/null | grep -qx podcctv-mirror; then
-        incus remote remove podcctv-mirror >/dev/null 2>&1 || {
-            log "$(t "Failed to remove Incus remote: podcctv-mirror" "删除 Incus 远端失败: podcctv-mirror")"
-            failed=1
-        }
-    fi
+    for remote_name in custom-mirror podcctv-mirror; do
+        if incus remote list --format csv -c n 2>/dev/null | grep -qx "$remote_name"; then
+            incus remote remove "$remote_name" >/dev/null 2>&1 || {
+                log "$(t "Failed to remove Incus remote:" "删除 Incus 远端失败:") $remote_name"
+                failed=1
+            }
+        fi
+    done
     if incus network show incusbr0 >/dev/null 2>&1; then
         incus network delete incusbr0 >/dev/null 2>&1 || {
             log "$(t "Failed to delete incusbr0; check for remaining instances or profiles." "删除 incusbr0 失败；请检查残留实例或 profile 引用。")"
@@ -374,7 +376,7 @@ FORCE_IMAGE_REFRESH="${FORCE_IMAGE_REFRESH:-0}"
 
 # 本地 incus 镜像服务 / 定制能力相关环境变量（离线/内网部署用）
 [ "${INCUS_IMAGE_MIRROR+x}" = x ] && INCUS_IMAGE_MIRROR_EXPLICIT=1 || INCUS_IMAGE_MIRROR_EXPLICIT=0
-INCUS_IMAGE_MIRROR="${INCUS_IMAGE_MIRROR:-$DEFAULT_INCUS_IMAGE_MIRROR}"  # 私有 simplestreams 镜像服务器（fork 默认）；留空则使用 GitHub releases
+INCUS_IMAGE_MIRROR="${INCUS_IMAGE_MIRROR:-$DEFAULT_INCUS_IMAGE_MIRROR}"  # 私有 simplestreams 镜像服务器；留空则使用官方 GitHub releases
 INCUS_LOCAL_IMAGE_DIR="${INCUS_LOCAL_IMAGE_DIR:-}" # 本地镜像目录（含 incus-<distro>-<arch>.tar.gz），直接离线导入
 INCUS_ALPINE_BASE="${INCUS_ALPINE_BASE:-}"         # 定制 alpine 基础镜像：本地 tar.gz 路径或已存在的 incus 别名
 INCUS_IPV6_ALLOC="${INCUS_IPV6_ALLOC:-1}"          # 每个容器分配的 IPv6 数量（非 /64 网段精细化分配）
@@ -545,7 +547,7 @@ show_main_menu() {
     printf ' 11) %s\n' "$(t "Uninstall Agent (keep containers/images)" "卸载 Agent（保留容器/镜像）")"
     printf ' 12) %s\n' "$(t "Full Incus cleanup and uninstall" "清理 Incus 制品并完整卸载")"
     printf ' 13) %s\n' "$(t "Configure/refresh container images" "配置/刷新容器镜像")"
-    printf ' 14) %s\n' "$(t "Agent-only upgrade / migrate from upstream (keep networking)" "仅升级 Agent / 从原版迁移（保留网络）")"
+    printf ' 14) %s\n' "$(t "Agent-only upgrade (keep networking)" "仅升级 Agent（保留网络）")"
     printf '  0) %s\n' "$(t "Exit" "退出")"
     read -rp '> ' _menu_choice
     case "${_menu_choice}" in
@@ -2074,13 +2076,13 @@ import_local_incus_images() {
     done
 }
 
-# 导入定制 alpine 基础镜像（如 podcctv/alpine-base）。
-# 参数可为本地 tar.gz 路径（导入为别名 podcctv/alpine-base）或已存在的 incus 镜像别名。
+# 导入定制 alpine 基础镜像（如 custom/alpine-base）。
+# 参数可为本地 tar.gz 路径（导入为别名 custom/alpine-base）或已存在的 incus 镜像别名。
 import_custom_alpine_base() {
     [ -n "$INCUS_ALPINE_BASE" ] || return 0
     command -v incus >/dev/null 2>&1 || return 0
     if [ -f "$INCUS_ALPINE_BASE" ]; then
-        local alias="podcctv/alpine-base"
+        local alias="custom/alpine-base"
         incus image delete "$alias" >/dev/null 2>&1 || true
         if incus image import "$INCUS_ALPINE_BASE" --alias "$alias"; then
             log "$(t "Imported custom alpine base as $alias" "已导入定制 alpine 基础镜像为 $alias")"
@@ -2098,7 +2100,7 @@ import_custom_alpine_base() {
     fi
 }
 
-# 从私有 simplestreams 镜像服务器导入镜像（fork 默认源）。
+# 从私有 simplestreams 镜像服务器导入镜像。
 # 服务器以 LXD/Incus 原生格式（lxd.tar.xz + rootfs.squashfs）发布，
 # 直接按 streams/v1/images.json 中的路径下载并 incus image import，
 # 不依赖 streams/v1/index.json（部分自建服务器未提供，incus remote add 会失败）。
@@ -2233,14 +2235,14 @@ prompt_existing_image_update() {
         printf '  2) %s\n' "$(t "Set a simplestreams/flat mirror URL and refresh" "设置 simplestreams/扁平镜像地址并刷新")"
         printf '  3) %s\n' "$(t "Import from an offline local directory" "从离线本地目录导入")"
         printf '  4) %s\n' "$(t "Set a custom Alpine base file/alias" "设置自定义 Alpine 基础镜像文件/别名")"
-        printf '  5) %s\n' "$(t "Reset to the podcctv default mirror" "恢复 podcctv 默认镜像源")"
+        printf '  5) %s\n' "$(t "Reset to default official images" "恢复默认官方镜像源")"
         read -rp '[1] > ' choice
         case "${choice:-1}" in
             1) INCUS_IMAGE_MIRROR="$current" ;;
             2) read -rp "$(t "Mirror URL: " "镜像服务 URL: ")" value; [ -n "$value" ] || die "$(t "Mirror URL cannot be empty." "镜像服务 URL 不能为空。")"; INCUS_IMAGE_MIRROR="$value"; INCUS_IMAGE_MIRROR_EXPLICIT=1 ;;
             3) read -rp "$(t "Local image directory: " "本地镜像目录: ")" value; [ -d "$value" ] || die "$(t "Directory not found: $value" "目录不存在: $value")"; INCUS_LOCAL_IMAGE_DIR="$value" ;;
             4) read -rp "$(t "Alpine base tarball path or Incus alias: " "Alpine 基础镜像 tarball 路径或 Incus 别名: ")" value; [ -n "$value" ] || die "$(t "Value cannot be empty." "输入不能为空。")"; INCUS_ALPINE_BASE="$value" ;;
-            5) INCUS_IMAGE_MIRROR="$DEFAULT_INCUS_IMAGE_MIRROR"; INCUS_IMAGE_MIRROR_EXPLICIT=1 ;;
+            5) INCUS_IMAGE_MIRROR=""; INCUS_IMAGE_MIRROR_EXPLICIT=1 ;;
             *) die "$(t "Invalid image operation." "无效的镜像操作。")" ;;
         esac
     elif [ "$virt" = "podman" ]; then
@@ -2484,8 +2486,8 @@ else
     printf "$(t "Select virtualization type:" "选择虚拟化类型：")\n"
     printf "  1) Podman container ($(t "recommended" "推荐"))\n"
     printf "  2) cloud-hypervisor VM ($(t "experimental, requires /dev/kvm" "实验性，需要 /dev/kvm"))\n"
-    printf "  3) Incus (LXC) ($(t "enhanced in this fork" "本 Fork 已增强"))\n"
-    log "$(t "WARNING: cloud-hypervisor (type 2) is experimental. Incus has guided image and IPv6 support in this fork." "提示：cloud-hypervisor（选项 2）仍为实验性；本 Fork 已为 Incus 补齐镜像与 IPv6 引导。")"
+    printf "  3) Incus (LXC)\n"
+    log "$(t "NOTE: cloud-hypervisor (type 2) and Incus (type 3) are experimental." "提示：cloud-hypervisor（选项 2）与 Incus（选项 3）处于实验阶段。")"
     read -rp "> " _virt_choice
     case "${_virt_choice}" in
         2) VIRT_TYPE="cloudhv" ;;
@@ -3088,15 +3090,14 @@ PY
     fi
 
     # 4.1 注册私有 simplestreams 镜像服务器为 incus remote（best-effort）。
-    #     既能让运维直接 `incus launch podcctv-mirror:alpine/3.24`，也顺带
-    #     在线验证 index.json 是否已正确（修正前 incus remote add 会失败）。
+    #     便于运维直接通过 remote 使用自定义镜像，也顺带验证镜像服务是否可用。
     if [ -n "$INCUS_IMAGE_MIRROR" ] && command -v incus >/dev/null 2>&1; then
-        if incus remote list 2>/dev/null | grep -qw "podcctv-mirror"; then
-            log "$(t "Incus remote podcctv-mirror already registered." "incus remote podcctv-mirror 已注册。")"
-        elif incus remote add podcctv-mirror "$INCUS_IMAGE_MIRROR" --protocol=simplestreams --public >/dev/null 2>&1; then
-            log "$(t "✓ Registered incus remote podcctv-mirror ($INCUS_IMAGE_MIRROR)" "✓ 已注册 incus remote podcctv-mirror ($INCUS_IMAGE_MIRROR)")"
+        if incus remote list 2>/dev/null | grep -qw "custom-mirror"; then
+            log "$(t "Incus remote custom-mirror already registered." "incus remote custom-mirror 已注册。")"
+        elif incus remote add custom-mirror "$INCUS_IMAGE_MIRROR" --protocol=simplestreams --public >/dev/null 2>&1; then
+            log "$(t "✓ Registered incus remote custom-mirror ($INCUS_IMAGE_MIRROR)" "✓ 已注册 incus remote custom-mirror ($INCUS_IMAGE_MIRROR)")"
         else
-            log "$(t "Warning: could not register podcctv-mirror (index.json missing/unreachable). Runtime build falls back to upstream." "警告: 无法注册 podcctv-mirror（index.json 缺失/不可达）。运行时构建将回退到上游源。")"
+            log "$(t "Warning: could not register custom-mirror (index.json missing/unreachable). Runtime build falls back to upstream." "警告: 无法注册 custom-mirror（index.json 缺失/不可达）。运行时构建将回退到默认源。")"
         fi
     fi
 

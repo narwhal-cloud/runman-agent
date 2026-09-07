@@ -14,7 +14,7 @@ func TestReleaseChannels(t *testing.T) {
 	for _, version := range []string{"main", "continuous", "continuous-" + strings.Repeat("a", 40), "v1.2.3"} {
 		t.Run(version, func(t *testing.T) {
 			api, base := releaseAPIURL(version), releaseDownloadBase(version)
-			if !strings.Contains(api, "repos/podcctv/runman-agent/") || !strings.Contains(base, "/podcctv/runman-agent/") {
+			if !strings.Contains(api, "repos/narwhal-cloud/runman-agent/") || !strings.Contains(base, "/narwhal-cloud/runman-agent/") {
 				t.Fatalf("wrong repository: %s %s", api, base)
 			}
 			if strings.HasPrefix(version, "v") {
@@ -30,8 +30,8 @@ func TestReleaseChannels(t *testing.T) {
 					t.Fatalf("missing %s: %s", required, args)
 				}
 			}
-			if strings.Contains(args, "narwhal-cloud/") {
-				t.Fatal("upstream update source leaked")
+			if !strings.Contains(args, "narwhal-cloud/runman-agent") {
+				t.Fatal("expected narwhal-cloud update source")
 			}
 		})
 	}

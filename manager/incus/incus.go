@@ -40,7 +40,7 @@ type Manager struct {
 	ipv6Iface  string
 	// 每个容器分配的 IPv6 数量（非 /64 网段精细化分配，默认 1）
 	ipv6Alloc int
-	// 自定义 alpine 基础镜像别名（结合 podcctv/alpine-base 等定制镜像）
+	// 自定义 alpine 基础镜像别名（结合 custom/alpine-base 等定制镜像）
 	alpineBase string
 	// 私有镜像服务器（simplestreams）基址；非空时运行时构建镜像优先从此拉取
 	imageMirror string
@@ -176,7 +176,7 @@ func (m *Manager) createVM(ctx context.Context, req *agent.CmdCreateVM) error {
 	if alias == "debian" {
 		alias = "debian/13/cloud"
 	} else if alias == "alpine" {
-		// 支持使用定制 alpine 基础镜像（如 podcctv/alpine-base）替代内置镜像
+		// 支持使用定制 alpine 基础镜像（如 custom/alpine-base）替代内置镜像
 		if m.alpineBase != "" {
 			alias = m.alpineBase
 		} else {
@@ -751,7 +751,7 @@ runcmd:
 
 	var builderSource api.InstanceSource
 	if baseIsLocal {
-		// 本地已导入的定制基础镜像（如 podcctv/alpine-base），不使用 simplestreams 远端
+		// 本地已导入的定制基础镜像（如 custom/alpine-base），不使用 simplestreams 远端
 		builderSource = api.InstanceSource{
 			Type:  "image",
 			Alias: baseAlias,
@@ -1071,9 +1071,7 @@ func addressWithoutCIDR(value string) string {
 
 func (m *Manager) GetSupportedImages(_ context.Context) ([]*agent.OSImageInfo, error) {
 	return []*agent.OSImageInfo{
-		// Keep the fork's custom Alpine image first so the web panel selects it
-		// by default. Debian remains available as an explicit alternative.
-		{Id: "alpine", Name: "Alpine (podcctv custom Incus image)"},
+		{Id: "alpine", Name: "Alpine (Incus)"},
 		{Id: "debian", Name: "Debian (Incus)"},
 	}, nil
 }

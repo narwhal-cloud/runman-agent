@@ -1,24 +1,8 @@
-# NarwhalCloud Agent — 安装指南（podcctv 增强 Fork）
+# NarwhalCloud Agent — 安装指南
 
 > **把你的闲置服务器变成 NAT VPS 共享主机，平摊成本，按天分成赚钱。**
 
-[English](README.en.md) | [控制台](https://dash.fuckip.me) | [官网](https://fuckip.me) | **[本仓库 Fork](https://github.com/podcctv/runman-agent)**
-
----
-
-> **📌 关于本 Fork**
->
-> 本仓库是 [`narwhal-cloud/runman-agent`](https://github.com/narwhal-cloud/runman-agent) 的 **podcctv 增强分支**，在保留上游 NAT VPS 核心能力的基础上，重点强化了 **Incus (LXC) 后端**与**离线/内网部署能力**：
->
-> - 🖥️ **私有镜像服务器**支持（默认内置 `https://alpine-incus-base.428048.xyz`，摆脱对 GitHub Releases 的依赖）
-> - 📦 本地镜像目录离线导入、定制 `alpine-base` 基础镜像
-> - 🪧 容器 SSH 登录欢迎页 / 横幅（预设 + 自定义）
-> - 🌐 IPv6 精细化分配（每个容器可分配 N 个公网 IPv6）、纯 IPv6 容器
-> - 🔐 强制容器内 SSH 用户密码登录（兼容定制镜像）
-> - 💾 IPv6 / 网卡配置**变更前完整备份** + 一键回滚
-> - 🗑️ 一键安装 / **一键卸载**（不影响既有业务、保留 incus 容器与镜像）
->
-> 详细的设计与代码评审见 [`INCU_S_OPTIMIZATION_REPORT.md`](INCU_S_OPTIMIZATION_REPORT.md)。
+[English](README.en.md) | [控制台](https://dash.fuckip.me) | [官网](https://fuckip.me)
 
 ---
 
@@ -56,7 +40,7 @@ NarwhalCloud Agent 就是让你的服务器具备"自动切分 NAT VPS 实例 + 
 
 NarwhalCloud Agent（`narwhal-agent`）是运行在宿主机（母鸡）上的后台服务，负责管理容器 / 虚拟机实例，将您的服务器接入 NarwhalCloud 平台，并提供本地 Web 管理面板。Agent 支持三种虚拟化后端（Podman、cloud-hypervisor KVM、Incus LXC），自动处理 NAT 端口转发、流量统计和 IPv6 分配，是平台侧与租户实例之间的唯一桥梁。
 
-> **关于 Incus 后端**：上游将 Incus 标记为"实验性"，本 Fork 已对其做了大量生产化增强（私有镜像、欢迎页、IPv6 精细化/纯 IPv6、密码登录兜底、备份回滚、一键卸载），可放心用于 Incus 部署。
+> **关于 Incus 后端**：支持系统容器、私有/本地镜像、登录横幅、IPv6 精细化/纯 IPv6 分配以及配置备份回滚机制。
 
 ## 系统要求
 
@@ -87,16 +71,19 @@ bash reinstall.sh debian 13
 
 ## 第二步 — 执行安装脚本
 
-> 本 Fork 直接从仓库 `main` 分支拉取安装脚本，并从 `continuous` Release 获取匹配的二进制：
+可以直接从仓库获取最新的安装脚本：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/narwhal-cloud/runman-agent/main/install.sh)
 ```
 
-`main` 每次更新都会由 CI 生成 `continuous` Release；安装器默认从该 Release 下载
-`podcctv` Fork 自己的 Agent 与 rfw 二进制，确保 Incus/IPv6 增强代码与安装脚本版本一致。
-需要固定版本时可设置 `AGENT_RELEASE_TAG=vX.Y.Z`，私有镜像或自建下载源可设置
-`RUNMAN_AGENT_DOWNLOAD_BASE=https://...`。
+或使用 Release 最新发布版本：
+
+```bash
+bash <(curl -fsSL https://github.com/narwhal-cloud/runman-agent/releases/latest/download/install.sh)
+```
+
+安装器默认从 GitHub Releases 下载匹配的 Agent 与 rfw 二进制。需要固定版本时可设置 `AGENT_RELEASE_TAG=vX.Y.Z`，私有镜像或自建下载源可设置 `RUNMAN_AGENT_DOWNLOAD_BASE=https://...`。
 
 ### 新手安装前需要准备什么
 
@@ -132,7 +119,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/in
 | 11 | 卸载 Agent，保留容器、镜像和数据盘 | 是 |
 | 12 | Incus 完整清理：删除受管实例、ready 镜像、`incusbr0` 和镜像 remote | **破坏性，菜单要求确认** |
 | 13 | 配置/刷新镜像：Incus URL/离线目录/基础镜像；Podman registry mirror/基础镜像 | 是 |
-| 14 | 仅升级 Agent / 从原版就地迁移，先备份，保留网络和后端 | 是，运行中的 Agent 短暂重启 |
+| 14 | 仅升级 Agent（保留网络和后端，先备份） | 是，运行中的 Agent 短暂重启 |
 
 选择安装后依次引导：虚拟化类型、Podman 数据盘及 registry mirror（如适用）、容器网络、
 对接 Token、rfw 网卡以及 Incus 登录横幅。Incus 网络菜单覆盖：
@@ -153,37 +140,37 @@ ULA（`fc00::/7`）和链路本地地址不会被当成公网路由前缀。
 所有配置项均支持环境变量或命令行参数，便于自动化部署。常用示例：
 
 ```bash
-# NAT4 + 自动探测公网 IPv6；默认使用 podcctv Alpine 3.24 镜像
-bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh) \
+# NAT4 + 自动探测公网 IPv6
+bash <(curl -fsSL https://raw.githubusercontent.com/narwhal-cloud/runman-agent/main/install.sh) \
   zh --virt incus --nat4 --non-interactive --generate-token
 
 # 纯 IPv6 容器；自动识别原生 /64 或隧道路由 /64
-bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh) \
+bash <(curl -fsSL https://raw.githubusercontent.com/narwhal-cloud/runman-agent/main/install.sh) \
   --virt incus --ipv6-only --non-interactive
 
 # 手工 routed /64（HE 6in4、WireGuard、供应商静态路由）
-bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh) \
+bash <(curl -fsSL https://raw.githubusercontent.com/narwhal-cloud/runman-agent/main/install.sh) \
   --virt incus --nat4 --non-interactive \
   --ipv6-mode subnet --ipv6-addr 2001:db8:100::1 \
   --ipv6-subnet 2001:db8:100::/64 --ipv6-iface wg6 --ipv6-routed
 
 # 手工原生二层 /64（不加 --ipv6-routed，安装器会验证 NDP 场景）
-bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh) \
+bash <(curl -fsSL https://raw.githubusercontent.com/narwhal-cloud/runman-agent/main/install.sh) \
   --virt incus --nat4 --non-interactive \
   --ipv6-mode subnet --ipv6-addr 2001:db8:200::1 \
   --ipv6-subnet 2001:db8:200::/64 --ipv6-iface eth0
 
 # IPv6 SNAT + NAT4（只有单个公网 IPv6 时）
-bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh) \
+bash <(curl -fsSL https://raw.githubusercontent.com/narwhal-cloud/runman-agent/main/install.sh) \
   --virt incus --ipv6-mode snat --nat4 --non-interactive
 
 # Podman：3G XFS 数据盘 + 单公网 IPv6 SNAT；非交互模式不会再等待容量输入
-bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh) \
+bash <(curl -fsSL https://raw.githubusercontent.com/narwhal-cloud/runman-agent/main/install.sh) \
   zh --virt podman --data-size 3G --ipv6-mode snat \
   --non-interactive --generate-token
 
 # Podman：使用 docker.io registry mirror；URL/主机名按实际服务替换
-bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh) \
+bash <(curl -fsSL https://raw.githubusercontent.com/narwhal-cloud/runman-agent/main/install.sh) \
   zh --virt podman --data-size 8G --ipv6-mode none \
   --podman-registry-mirror https://mirror.example.com --non-interactive
 
@@ -199,21 +186,19 @@ bash install.sh zh --validate-ipv6 --ipv6-mode subnet \
 |----|---------------------------|----------------------------------------------------|
 | 1  | **Podman**（推荐）            | 基于 Podman 的 OCI 容器，轻量，无需 KVM。使用 XFS loop 挂载数据盘。    |
 | 2  | **cloud-hypervisor**（实验性） | 完整 KVM 虚拟机，需要 `/dev/kvm`。自动下载 Debian/Alpine 虚拟机镜像。 |
-| 3  | **Incus (LXC)**（本 Fork 已增强） | 基于 Incus 的系统容器，比 VM 更轻量。本 Fork 为其新增镜像/欢迎页/IPv6/卸载等能力。 |
-
-> 选项 2 和 3 上游处于实验阶段；**选项 3（Incus）在本 Fork 已具备生产可用性**。
+| 3  | **Incus (LXC)**           | 基于 Incus 的系统容器，支持私有镜像、登录横幅、IPv6 精细化分配等。 |
 
 ---
 
-## 本 Fork 的增强功能
+## Incus (LXC) 与高级功能
 
 | 功能 | 说明 | 相关参数 |
 |---|---|---|
 | 菜单式全流程 | 安装、网络场景、探测/验证、Token、备份/回滚、卸载均可从总菜单进入 | `--menu`（无参数执行时默认） |
-| 私有 / 本地镜像服务 | 用私有镜像服务器或本地目录替代 GitHub Releases 拉取镜像，离线/内网可部署 | `--image-mirror`、`--local-image-dir` |
+| 私有 / 本地镜像服务 | 用私有镜像服务器或本地目录拉取镜像，离线/内网可部署 | `--image-mirror`、`--local-image-dir` |
 | Podman 数据盘与镜像加速 | 按可用空间推荐 XFS 数据盘；支持配置/清除 `docker.io` registry mirror | `--data-size`、`--podman-registry-mirror` |
 | Docker + Podman 共存 | 自动安装幂等转发兼容服务，只放行 `narwhal-net`，不停止或删除已有 Docker 容器 | 默认开启 |
-| podcctv Alpine 默认镜像 | 默认从 `alpine-incus-base.428048.xyz` 校验并导入 Alpine 3.24，面板默认选中 Alpine | 无需参数；覆盖用 `--image-mirror` / `--alpine-base` |
+| Alpine / Debian 基础镜像 | 支持自动校验并导入基础镜像，或指定自定义基础镜像 | `--image-mirror` / `--alpine-base` |
 | SSH 欢迎页 / 横幅 | 容器登录前/后展示自定义横幅（预设或完全自定义文本） | `--banner-preset`、`--banner-text` |
 | IPv6 精细化分配 | 每个容器可分配 1–15 个公网 IPv6（非 /64 网段也可） | `--ipv6-alloc` |
 | 纯 IPv6 容器 | 容器仅分配 IPv6、不分配 IPv4 | `--ipv6-only` |
@@ -307,10 +292,10 @@ bash install.sh en --detect-ipv6 --non-interactive
 
 ```bash
 # 强制使用 SNAT 模式
-IPV6_MODE=snat bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh)
+IPV6_MODE=snat bash <(curl -fsSL https://raw.githubusercontent.com/narwhal-cloud/runman-agent/main/install.sh)
 
 # 强制使用子网模式并指定 IP、子网和上行接口
-bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh) \
+bash <(curl -fsSL https://raw.githubusercontent.com/narwhal-cloud/runman-agent/main/install.sh) \
   --ipv6-mode subnet --ipv6-addr 2001:db8::1 \
   --ipv6-subnet 2001:db8::/64 --ipv6-iface eth0
 ```
@@ -326,109 +311,53 @@ bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/in
 
 以下所有能力均作用于 **`virt_type=incus`**。既可在安装时通过参数指定，也可写入 `config.json` 后由 Agent 读取。
 
-### 1. 私有镜像服务器（fork 默认源，推荐）
+### 1. 私有/本地镜像服务器（可选）
 
-本 Fork 默认内置镜像源为 **`https://alpine-incus-base.428048.xyz`**，是一个 **LXD/Incus simplestreams 镜像服务器**（原生格式 `lxd.tar.xz` + `rootfs.squashfs`），而非扁平 tarball 服务。安装脚本会自动：
-
-1. 读取 `https://alpine-incus-base.428048.xyz/streams/v1/images.json`；
-2. 按其中声明的路径下载对应发行版的 `lxd.tar.xz` 与 `rootfs.squashfs`；
-3. 校验元数据和 rootfs 的 SHA256 后执行 `incus image import`，自动别名化为 Agent 期望的 `alpine/3.24/cloud/amd64/ready`。
-
-> 该服务器当前发布 **Alpine（amd64）**。Debian 等未发布的发行版会自动从 GitHub Releases 默认源补齐；因此纯离线部署请配合 `--local-image-dir` 预置全部发行版镜像。
+支持使用 **LXD/Incus simplestreams 镜像服务器**（原生格式 `lxd.tar.xz` + `rootfs.squashfs`）或本地离线目录替代默认源：
 
 ```bash
-# fork 默认即使用私有镜像服务器，以下显式写法等价
-bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh) \
-  --image-mirror https://alpine-incus-base.428048.xyz
-
-# 用你自己的 simplestreams 镜像服务器（任意实现了 streams/v1/images.json 的服务）
-bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh) \
-  --image-mirror https://your-mirror.example.com
+# 使用自定义 simplestreams 镜像服务器（任意实现了 streams/v1/images.json 的服务）
+bash <(curl -fsSL https://raw.githubusercontent.com/narwhal-cloud/runman-agent/main/install.sh) \
+  --image-mirror https://mirror.example.com
 
 # 完全离线：本地目录预置 incus-<distro>-<arch>.tar.gz（无需任何网络）
-bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh) \
+bash <(curl -fsSL https://raw.githubusercontent.com/narwhal-cloud/runman-agent/main/install.sh) \
   --local-image-dir /root/incus-images
 ```
 
-> **兼容性**：`--image-mirror` 同时支持最简流（simplestreams）与传统的扁平 tarball 基址——脚本会先尝试 simplestreams 元数据，失败则回退到 `<mirror>/incus-<distro>-<arch>.tar.gz`。留空（或 `--image-mirror ""`）则直接使用 GitHub Releases。
+> **兼容性**：`--image-mirror` 同时支持最简流（simplestreams）与传统的扁平 tarball 基址——脚本会先尝试 simplestreams 元数据，失败则回退到 `<mirror>/incus-<distro>-<arch>.tar.gz`。留空（或 `--image-mirror ""`）则直接使用官方 GitHub Releases。
 
-> **simplestreams 端点要求 `index.json`**：要让 `incus remote add --protocol=simplestreams` 或 Agent 运行时按 simplestreams 协议拉取，服务器根下必须存在合法的 `streams/v1/index.json`（格式为 `datatype: index:1.0` / `format: simplestreams:1.0`，`index` 指针指向 `streams/v1/images.json`）。本项目配套的镜像服务器构建脚本 `podcctv/alpine-base` 的 `scripts/generate-streams.py` 已修正此前误把 image-downloads 内容写入 `index.json` 的 bug；若你的服务器返回 404 或 `incus remote add` 失败，请重新运行 `python3 scripts/generate-streams.py` 并重新部署（或直接把一份正确的 `index.json` 放到 `streams/v1/` 下）。
+> **注册为 incus remote**：若提供了 HTTPS 镜像源，安装脚本在导入镜像后会注册为 `custom-mirror`：
+> ```bash
+> incus remote add custom-mirror https://mirror.example.com --protocol=simplestreams --public
+> incus launch custom-mirror:alpine/3.24 my-alpine
+> ```
 
-#### 自建 custom Alpine simplestreams 服务
-
-建议使用单独服务器部署，避免镜像站重启影响容器宿主机。准备 Docker、Compose 插件、Git、
-Python 3 和可用磁盘，然后执行：
-
-```bash
-git clone https://github.com/podcctv/alpine-base.git
-cd alpine-base
-
-# 从 continuous Release 下载/重新下载产物，生成并校验 simplestreams 树，再启动 nginx
-./scripts/serve-incus.sh --download
-
-# 本机校验；下面主机名必须替换成真实域名或 IP
-python3 scripts/validate-streams.py incus-server/www
-curl -fsS http://<MIRROR_HOST>:8080/streams/v1/index.json
-curl -fsS http://<MIRROR_HOST>:8080/streams/v1/images.json
-```
-
-放通 TCP 8080 后，在已安装节点运行一键脚本，选择 **13 → Incus 镜像管理 → 2**，填写
-`http://<MIRROR_HOST>:8080`；也可首装时使用
-`--image-mirror http://<MIRROR_HOST>:8080`。安装器会直接下载、校验 SHA256 并导入镜像，
-因此可信内网 HTTP 可用于这个“直接导入”步骤。
-
-生产环境应在 nginx/Caddy/Cloudflare 前配置受信任证书，最终使用
-`https://mirror.example.com`。当前 Incus 客户端的 simplestreams remote **只接受 HTTPS**；
-因此 `incus remote add` 和 Agent 后续按 remote 动态拉取都要求 HTTPS。HTTP 源即使能完成安装器
-直接导入，也无法注册成 remote，运行时会回退上游。不要使用自签名证书，除非所有客户端都已
-显式信任相应 CA。
-
-#### 注册为 incus remote（运维便利 + 运行时验证）
-
-安装脚本会在导入镜像后 **best-effort** 执行：
-
-```bash
-incus remote add podcctv-mirror https://alpine-incus-base.428048.xyz \
-  --protocol=simplestreams --public
-```
-
-注册成功后即可直接：
-
-```bash
-incus launch podcctv-mirror:alpine/3.24 my-alpine
-```
-
-同时，该步骤也是**在线校验 `index.json` 是否生效**的手段：若返回失败，说明服务器 `index.json` 仍缺失/格式错误，Agent 后续运行时构建镜像会自动回退到上游 `images.linuxcontainers.org`，不影响既有已导入的本地 ready 镜像。
-
-> Agent 运行时（`ensureReadyImage`）在 `incus_image_mirror` 非空时，会优先以 simplestreams 协议从该服务器拉取 alpine 基础镜像，失败自动回退上游；无需本机预先 `incus remote add`。
-
-### 2. 定制 alpine 基础镜像
+### 2. 定制 Alpine 基础镜像
 
 对于需要预装特定软件/内核参数的场景，可使用自己的 alpine-base 镜像（本地 tar.gz 或已 `incus image import` 的别名）：
 
 ```bash
-# 安装时指定本地文件（导入为 incus 别名 podcctv/alpine-base，用于所有 alpine 容器）
-bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh) \
+# 安装时指定本地文件（导入为 incus 别名 custom/alpine-base，用于所有 alpine 容器）
+bash <(curl -fsSL https://raw.githubusercontent.com/narwhal-cloud/runman-agent/main/install.sh) \
   --alpine-base ./alpine-base.tar.gz
 
 # 或直接传已存在的 incus 镜像别名
-bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh) \
+bash <(curl -fsSL https://raw.githubusercontent.com/narwhal-cloud/runman-agent/main/install.sh) \
   --alpine-base my-alpine
 ```
-
-> 定制 alpine-base 由你自行构建/托管（例如基于 https://github.com/podcctv/alpine-base ），与上面的 simplestreams 镜像服务器是两套独立资源。
 
 ### 3. SSH 登录欢迎页 / 横幅
 
 预设：`none` / `default` / `minimal` / `project`（面向客户的可替换模板）。`custom` 配合 `--banner-text` 可完全自定义。
 
 ```bash
-# 使用内置 project 模板（含控制面板/文档/技术支持占位信息，部署方可自行改写）
-bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh) \
+# 使用内置 project 模板
+bash <(curl -fsSL https://raw.githubusercontent.com/narwhal-cloud/runman-agent/main/install.sh) \
   --banner-preset project
 
 # 完全自定义横幅文本
-bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh) \
+bash <(curl -fsSL https://raw.githubusercontent.com/narwhal-cloud/runman-agent/main/install.sh) \
   --banner-preset custom --banner-text "$(cat /root/my-banner.txt)"
 ```
 
@@ -440,7 +369,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/in
 
 ```bash
 # 每个容器分配 10 个公网 IPv6 地址
-bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh) \
+bash <(curl -fsSL https://raw.githubusercontent.com/narwhal-cloud/runman-agent/main/install.sh) \
   --ipv6-alloc 10
 ```
 
@@ -452,7 +381,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/in
 
 ```bash
 # 要求 IPv6 模式为 subnet 或 snat（none 模式下会直接报错退出）
-bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh) \
+bash <(curl -fsSL https://raw.githubusercontent.com/narwhal-cloud/runman-agent/main/install.sh) \
   --virt incus --ipv6-only --non-interactive
 ```
 
@@ -468,7 +397,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/in
 
 ## IPv6 配置备份与回滚
 
-涉及网卡 / sysctl / incusbr0 的改动风险较高，本 Fork 提供**完备的备份—恢复—卸载恢复**机制：
+涉及网卡 / sysctl / incusbr0 的改动风险较高，安装脚本提供**完备的备份—恢复—卸载恢复**机制：
 
 - **变更前自动备份**：安装脚本在修改任何受管系统配置**之前**，自动快照 sysctl、网卡、journald、zram、Incus 网络及本项目 systemd 文件到 `/var/lib/narwhal-agent/backups/ipv6-<时间戳>/`，并把首次快照固定为 `install-origin`。后续手工备份只更新 `latest`，不会覆盖卸载基线。
 - **一键回滚**：
@@ -494,7 +423,7 @@ bash install.sh --rollback-ipv6
 # 普通卸载：恢复网络并删除 Agent，保留 Incus 实例/镜像
 bash install.sh --uninstall
 
-# 彻底卸载/从零重装：另行删除受管 Incus 实例、ready 镜像、incusbr0 和 podcctv-mirror
+# 彻底卸载/从零重装：另行删除受管 Incus 实例、ready 镜像、incusbr0 和镜像 remote
 # 交互执行会要求输入 PURGE；自动化时显式参数即代表确认
 bash install.sh --uninstall --purge-incus
 ```
@@ -568,19 +497,17 @@ unset NARWHAL_AGENT_TOKEN
 
 ## 更新 Agent
 
-### 从原版迁移 / 只更新 Agent（推荐已有业务的机器使用）
+### 仅升级 Agent（保留网络与现有业务）
 
-无需先卸载。适用于原版标准布局：服务 `narwhal-agent`，二进制
-`/opt/narwhal-agent/narwhal-agent`，配置 `/opt/narwhal-agent/config.json`。
-使用 root 执行：
-
-也可以在总菜单选择 **14：仅升级 Agent / 从原版迁移**，效果与下面命令相同。
+无需先卸载。使用 root 执行：
 
 ```bash
-bash <(curl -fsSL https://github.com/podcctv/runman-agent/releases/download/continuous/install.sh) zh --update-only
+bash <(curl -fsSL https://raw.githubusercontent.com/narwhal-cloud/runman-agent/main/install.sh) zh --update-only
 systemctl status narwhal-agent --no-pager
 journalctl -u narwhal-agent -n 50 --no-pager
 ```
+
+也可以在总菜单选择 **14：仅升级 Agent（保留网络）**，效果与上面命令相同。
 
 `--update-only` 的边界：
 
@@ -602,8 +529,8 @@ journalctl -u narwhal-agent -n 50 --no-pager
 
 ### 自动更新来源与版本
 
-自动更新和面板手动更新只使用 `podcctv/runman-agent`，不再下载原版仓库的安装脚本；下载失败也不会执行旧缓存脚本。
-`main` 的发布版本为 `continuous-完整提交号`，通过 `continuous` 发布的 `target_commitish` 比较提交，避免固定 `main` 版本反复升级。同仓库 `v*` 构建使用稳定版通道。
+自动更新和面板手动更新使用官方仓库发布；下载失败也不会执行旧缓存脚本。
+`main` 的发布版本为 `continuous-完整提交号`，通过 `continuous` 发布的 `target_commitish` 比较提交，避免固定 `main` 版本反复升级。仓库 `v*` 构建使用稳定版通道。
 自动更新保留每 6 小时检查、发现新版本后随机延迟 24–72 小时的机制，执行 `--update-only --non-interactive`，任务日志：
 
 ```bash
@@ -621,8 +548,6 @@ Environment=RUNMAN_AGENT_AUTO_UPDATE=0
 systemctl daemon-reload
 systemctl restart narwhal-agent
 ```
-
-旧版本已经升级到原版或存在原版待更新记录时，重新执行上面的本仓库 `--update-only` 命令迁移；新版只根据本仓库发布重新判断，不执行旧的原版更新计划。
 
 ---
 
@@ -660,7 +585,7 @@ systemctl restart narwhal-agent
 | `monitor_nic`      | 用于流量统计的网卡名（留空自动检测）             |
 | `ipv6_mode`        | `none` / `snat` / `subnet`     |
 | `max_port_forward` | 每个容器的最大端口转发规则数（默认 `20`）        |
-| `incus_image_mirror` | 私有/本地镜像基址（覆盖 GitHub Releases），如 `https://alpine-incus-base.428048.xyz` |
+| `incus_image_mirror` | 私有/本地镜像基址（覆盖 GitHub Releases），如 `https://mirror.example.com` |
 | `incus_alpine_base` | 定制 alpine 基础镜像：本地 tar.gz 路径或已存在的 incus 别名 |
 | `incus_ipv6_alloc` | 每个容器分配的 IPv6 数量（默认 `1`）          |
 | `incus_ipv6_only`  | `true` 时新建容器为纯 IPv6（不分配 IPv4）      |
@@ -784,7 +709,7 @@ oneshot 服务在开机和更新时应用。
 脚本会自动重试 3 次并清理 dpkg 锁。若仍失败，手动执行 `apt-get update` 后再试。
 
 **镜像拉取缓慢或失败（Incus 模式）**
-- 改用私有镜像服务器：`--image-mirror https://alpine-incus-base.428048.xyz`
+- 改用私有镜像服务器：`--image-mirror https://mirror.example.com`
 - 或完全离线：把镜像文件放入本地目录后用 `--local-image-dir <dir>` 安装
 - 确认宿主机能访问 `images.linuxcontainers.org`（使用默认源时）
 
@@ -796,7 +721,3 @@ oneshot 服务在开机和更新时应用。
 
 **纯 IPv6 容器没有自动 SSH 高位端口**
 旧版只读取实例 IPv4，纯 IPv6 时会记录 `has no IP address`。更新并重启 Agent 后会为缺少规则的现有托管实例补建 `20000–59999/tcp → 22`，新实例则在创建完成时立即建立。可用上面的端口转发 API或面板确认。
-
----
-
-> 本文档对应 `podcctv/runman-agent` 增强分支。更多实现细节与代码评审见 [`INCU_S_OPTIMIZATION_REPORT.md`](INCU_S_OPTIMIZATION_REPORT.md)。

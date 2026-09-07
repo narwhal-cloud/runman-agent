@@ -77,7 +77,7 @@ type Config struct {
 	// 每个容器分配的 IPv6 数量（非 /64 网段精细化分配，默认 1）
 	IncusIPv6Alloc int32 `json:"incus_ipv6_alloc"`
 
-	// 自定义 alpine 基础镜像别名（结合 podcctv/alpine-base 等定制镜像）。
+	// 自定义 alpine 基础镜像别名（结合 custom/alpine-base 等定制镜像）。
 	// 非空时 OsImage=="alpine" 将使用该别名而非内置的 alpine/3.23/cloud。
 	IncusAlpineBase string `json:"incus_alpine_base"`
 

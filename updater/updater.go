@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	releaseRepository = "podcctv/runman-agent"
+	releaseRepository = "narwhal-cloud/runman-agent"
 	installScript     = "/opt/narwhal-agent/install.sh"
 )
 
@@ -209,7 +209,7 @@ func (s *Service) executeUpdate() error {
 	// 1. 先下载最新的安装脚本
 	if err := s.downloadInstallScript(); err != nil {
 		log.Printf("[Updater] Failed to download latest install script: %v", err)
-		// Never fall back to a cached script: it may belong to upstream.
+		// Never fall back to a cached script if download fails.
 		return err
 	}
 	if output, err := exec.Command("bash", "-n", installScript).CombinedOutput(); err != nil {

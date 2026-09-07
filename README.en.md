@@ -2,7 +2,7 @@
 
 > **Turn your idle server into a NAT VPS shared-hosting node. Amortize your costs. Earn revenue per day, per tenant.**
 
-[中文](README.md) | [Dashboard](https://dash.fuckip.me) | [Website](https://fuckip.me) | **[Fork (podcctv)](https://github.com/podcctv/runman-agent)**
+[中文](README.md) | [Dashboard](https://dash.fuckip.me) | [Website](https://fuckip.me)
 
 ---
 
@@ -68,25 +68,31 @@ The script will reboot the server and install Debian 13 automatically. Once the 
 
 ## Step 2 — Run the Installer
 
-> This fork pulls the installer directly from the `main` branch (the fork does not publish releases):
+You can fetch the latest installer directly from the repository:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/narwhal-cloud/runman-agent/main/install.sh)
 ```
 
-With no arguments the installer opens a guided operations menu with 13 actions:
+Or download from the latest GitHub Release:
+
+```bash
+bash <(curl -fsSL https://github.com/narwhal-cloud/runman-agent/releases/latest/download/install.sh)
+```
+
+With no arguments the installer opens a guided operations menu with 14 actions:
 install/update, status, Podman-network repair plus service restart, panel-password reset, IPv6 detection,
 manual `/64` validation, Token display/rotation, network backup/rollback, safe
 uninstall, full Incus cleanup, and backend-specific image management. The wizard
 also guides Podman data-disk and registry-mirror choices.
 
 ```bash
-# NAT4 + auto-detected public IPv6; podcctv Alpine 3.24 is the default image
-bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh) \
+# NAT4 + auto-detected public IPv6
+bash <(curl -fsSL https://raw.githubusercontent.com/narwhal-cloud/runman-agent/main/install.sh) \
   en --virt incus --nat4 --non-interactive --generate-token
 
 # IPv6-only with automatic native/tunnel routed-prefix detection
-bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh) \
+bash <(curl -fsSL https://raw.githubusercontent.com/narwhal-cloud/runman-agent/main/install.sh) \
   en --virt incus --ipv6-only --non-interactive
 
 # Manual routed /64 (HE 6in4, WireGuard, provider static route)
@@ -119,16 +125,14 @@ bash install.sh en --virt podman --data-size 8G --ipv6-mode none \
 |---|---------------------------------------|-----------------------------------------------------------------------------------------|
 | 1 | **Podman** *(recommended)*            | OCI containers via Podman. Lightweight, no KVM needed. Uses XFS loop-mounted data disk. |
 | 2 | **cloud-hypervisor** *(experimental)* | Full KVM virtual machines. Requires `/dev/kvm`. Downloads Debian/Alpine VM images.      |
-| 3 | **Incus (LXC)** *(enhanced in this fork)* | System containers via Incus. Lightweight alternative to VMs. This fork adds image mirroring, banners, fine-grained IPv6, pure-IPv6, password-login fallback, backup/rollback, and one-click uninstall. |
+| 3 | **Incus (LXC)**                       | System containers via Incus. Supports image mirroring, banners, fine-grained IPv6, pure-IPv6, backup/rollback, and one-click uninstall. |
 
-> Type 2 is experimental. Type 3 (Incus) is production-ready in this fork.
+## Incus (LXC) and Advanced Features
 
-## Fork Enhancements (podcctv)
-
-This fork of `narwhal-cloud/runman-agent` significantly enhances the **Incus (LXC)** backend and offline/intranet deployment. Highlights:
+Key highlights of the Incus backend and installer capabilities:
 
 - **Guided operations menu** — status and service/password operations plus install/update, six network scenarios, IPv6 detection/validation, Token lifecycle, backup/rollback, image management, and two uninstall levels.
-- **Private image server and default custom image** — built-in `https://alpine-incus-base.428048.xyz`; the installer verifies simplestreams checksums and imports Alpine 3.24 as `alpine/3.24/cloud/<arch>/ready`. Alpine is first in the panel image list. Override with `--image-mirror` or `--local-image-dir`.
+- **Private image server / offline local directory** — supports simplestreams image servers and offline tarballs via `--image-mirror` or `--local-image-dir`.
 - **Podman disk and registry guidance** — safe XFS size recommendations, `--data-size`, and `--podman-registry-mirror`.
 - **Docker + Podman coexistence** — an idempotent boot service allows only the Narwhal Podman subnets through Docker's `DOCKER-USER` chain; existing Docker containers are not stopped or removed.
 - **Custom alpine base** — `--alpine-base <local.tar.gz | incus-alias>`.
@@ -138,9 +142,7 @@ This fork of `narwhal-cloud/runman-agent` significantly enhances the **Incus (LX
 - **Forced SSH password login** — injected into every container regardless of base image.
 - **IPv6 backup / rollback** — pre-change backup of sysctl/network/incusbr0; `--backup-ipv6` / `--rollback-ipv6`.
 - **Token lifecycle** — supply/generate at install, `--show-token`, and generated or custom `--rotate-token` with an automatic Agent restart.
-- **Two-level uninstall** — `--uninstall` preserves Incus artifacts; add `--purge-incus` for a clean reinstall that removes managed instances, ready images, `incusbr0`, and `podcctv-mirror`.
-
-Detailed design and code review: [`INCU_S_OPTIMIZATION_REPORT.md`](INCU_S_OPTIMIZATION_REPORT.md).
+- **Two-level uninstall** — `--uninstall` preserves Incus artifacts; add `--purge-incus` for a clean reinstall that removes managed instances, ready images, `incusbr0`, and custom remotes.
 
 ## Podman Beginner Guide
 
@@ -159,26 +161,16 @@ first for private registries. A self-hosted OCI registry should use persistent
 storage and a trusted HTTPS certificate. It is not interchangeable with an
 Incus simplestreams server.
 
-## Self-hosted Incus Custom Image Service
+## Incus Custom Image Service
 
-The default custom Alpine source is
-`https://alpine-incus-base.428048.xyz`. To operate your own mirror on a separate
-server:
+To use your own simplestreams mirror server, pass `--image-mirror` during install:
 
 ```bash
-git clone https://github.com/podcctv/alpine-base.git
-cd alpine-base
-./scripts/serve-incus.sh --download
-python3 scripts/validate-streams.py incus-server/www
-curl -fsS http://<MIRROR_HOST>:8080/streams/v1/index.json
-curl -fsS http://<MIRROR_HOST>:8080/streams/v1/images.json
+bash <(curl -fsSL https://raw.githubusercontent.com/narwhal-cloud/runman-agent/main/install.sh) \
+  --image-mirror https://mirror.example.com
 ```
 
-Then choose menu **13 → Incus image management → 2**, or pass
-`--image-mirror http://<MIRROR_HOST>:8080`. Trusted-LAN HTTP works only for the
-installer's direct checksum-verified import. Current Incus simplestreams remotes
-accept HTTPS only, so production runtime pulls and `incus remote add` require a
-trusted HTTPS endpoint such as `https://mirror.example.com`:
+Or configure it via menu **13 → Incus image management → 2**. Production runtime pulls and `incus remote add` require a trusted HTTPS endpoint:
 
 ```bash
 incus remote add custom-check https://mirror.example.com \
@@ -213,11 +205,11 @@ You can override the mode and network parameters by setting environment variable
 
 ```bash
 # Force SNAT mode
-IPV6_MODE=snat bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh)
+IPV6_MODE=snat bash <(curl -fsSL https://raw.githubusercontent.com/narwhal-cloud/runman-agent/main/install.sh)
 
 # Force subnet mode with specific IP and subnet
 IPV6_MODE=subnet IPV6_ADDR=2001:db8::1 IPV6_SUBNET=2001:db8::/64 IPV6_IFACE=eth0 \
-  bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh)
+  bash <(curl -fsSL https://raw.githubusercontent.com/narwhal-cloud/runman-agent/main/install.sh)
 ```
 
 Use `bash install.sh --detect-ipv6` for detection only. Use
@@ -275,7 +267,7 @@ rotation. The web-panel password and integration Token are separate credentials.
 # Backend containers, images, networks and the Podman /data disk are preserved.
 bash install.sh --uninstall
 
-# Also delete managed Incus instances, ready images, incusbr0 and podcctv-mirror
+# Also delete managed Incus instances, ready images, incusbr0 and custom remotes
 bash install.sh --uninstall --purge-incus
 ```
 
@@ -295,15 +287,15 @@ existing managed instances after an upgrade.
 
 ## Updating the Agent
 
-### Migrate from upstream without reinstalling containers
+### Agent-only update (preserving containers and networking)
 
 For the standard `narwhal-agent` systemd service with binary and `config.json`
 under `/opt/narwhal-agent`, run as root:
 
-Menu **14** provides the same Agent-only migration flow.
+Menu **14** provides the same Agent-only update flow.
 
 ```bash
-bash <(curl -fsSL https://github.com/podcctv/runman-agent/releases/download/continuous/install.sh) en --update-only
+bash <(curl -fsSL https://raw.githubusercontent.com/narwhal-cloud/runman-agent/main/install.sh) en --update-only
 systemctl status narwhal-agent --no-pager
 journalctl -u narwhal-agent -n 50 --no-pager
 ```
@@ -332,14 +324,13 @@ Never overwrite a live database; old snapshots lack any subsequently created
 instances/rules. Retain snapshots until acceptance, then clean up explicitly to
 avoid unbounded backup disk use.
 
-Automatic and panel updates now use only `podcctv/runman-agent`, never the upstream
-installer or a stale cached script after a download failure. Rolling builds use
-`continuous-<full commit SHA>` and compare the release's immutable target commit;
-`v*` builds use this repository's stable channel. Checks run every 6 hours and
-schedule new versions 24–72 hours later. Updates run in a separate systemd unit
-with `--update-only --non-interactive`; inspect `journalctl -u narwhal-agent-update`.
-To disable automatic checks (not manual updates), add
-`Environment=RUNMAN_AGENT_AUTO_UPDATE=0` under `[Service]` using
+Automatic and panel updates use official repository releases, never a stale
+cached script after a download failure. Rolling builds use `continuous-<full commit SHA>`
+and compare the release's immutable target commit; `v*` builds use the stable channel.
+Checks run every 6 hours and schedule new versions 24–72 hours later. Updates run
+in a separate systemd unit with `--update-only --non-interactive`; inspect
+`journalctl -u narwhal-agent-update`. To disable automatic checks (not manual updates),
+add `Environment=RUNMAN_AGENT_AUTO_UPDATE=0` under `[Service]` using
 `systemctl edit narwhal-agent`, then daemon-reload and restart the Agent.
 
 ### Full component update
@@ -347,7 +338,7 @@ To disable automatic checks (not manual updates), add
 Run the same install command on an already-installed host — it automatically detects the existing installation and performs an in-place update (agent + netavark + rfw):
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/podcctv/runman-agent/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/narwhal-cloud/runman-agent/main/install.sh)
 ```
 
 ## Service Management
@@ -382,7 +373,7 @@ systemctl restart narwhal-agent
 | `monitor_nic`      | NIC to monitor for traffic stats (leave empty to auto-detect) |
 | `ipv6_mode`        | `none` / `snat` / `subnet`                                    |
 | `max_port_forward` | Maximum port-forward rules per container (default `20`)       |
-| `incus_image_mirror` | Private/local image base URL overriding GitHub Releases, e.g. `https://alpine-incus-base.428048.xyz` |
+| `incus_image_mirror` | Private/local image base URL overriding GitHub Releases, e.g. `https://mirror.example.com` |
 | `incus_alpine_base`  | Custom alpine base image: local tar.gz path or an existing incus alias |
 | `incus_ipv6_alloc`  | Number of IPv6 addresses allocated per container (default `1`) |
 | `incus_ipv6_only`   | `true` → new containers are pure-IPv6 (no IPv4)               |
