@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/netip"
 	"runtime"
 	"strings"
 	"sync"
@@ -21,8 +22,13 @@ import (
 )
 
 const (
-	SocketPath  = "/var/lib/incus/unix.socket"
-	IncusBridge = "incusbr0"
+	SocketPath         = "/var/lib/incus/unix.socket"
+	IncusBridge        = "incusbr0"
+	DefaultAlpineImage = "alpine/3.24/cloud"
+	MirrorAlpineImage  = "alpine/3.24"
+	IPv4Resolver       = "1.1.1.1"
+	IPv6Resolver       = "2606:4700:4700::1111"
+	IPv6ResolverBackup = "2001:4860:4860::8888"
 )
 
 type Manager struct {
@@ -32,23 +38,47 @@ type Manager struct {
 	ipv6Subnet string
 	ipv6Addr   string
 	ipv6Iface  string
-	buildMu    sync.Mutex
-	mu         sync.Mutex // 全局锁，确保同一时间只有一个 VM 操作
+	// 每个容器分配的 IPv6 数量（非 /64 网段精细化分配，默认 1）
+	ipv6Alloc int
+	// 自定义 alpine 基础镜像别名（结合 podcctv/alpine-base 等定制镜像）
+	alpineBase string
+	// 私有镜像服务器（simplestreams）基址；非空时运行时构建镜像优先从此拉取
+	imageMirror string
+	// 欢迎页 / SSH 登录横幅
+	bannerPreset string
+	bannerText   string
+	// 纯 IPv6 容器开关：开启后容器不分配 IPv4，仅配置静态 IPv6
+	ipv6Only bool
+	buildMu  sync.Mutex
+	mu       sync.Mutex // 全局锁，确保同一时间只有一个 VM 操作
 }
 
-func New(database *db.DB, ipv6Mode, ipv6Subnet, ipv6Addr, ipv6Iface string) (*Manager, error) {
+func New(database *db.DB, ipv6Mode, ipv6Subnet, ipv6Addr, ipv6Iface, bannerPreset, bannerText string, ipv6Alloc int, alpineBase string, ipv6Only bool, imageMirror string) (*Manager, error) {
 	c, err := incus.ConnectIncusUnix(SocketPath, nil)
 	if err != nil {
 		return nil, fmt.Errorf("connect to incus: %w", err)
 	}
 
+	if ipv6Alloc <= 0 {
+		ipv6Alloc = 1
+	}
+	if ipv6Alloc > 15 {
+		return nil, fmt.Errorf("incus_ipv6_alloc must be between 1 and 15")
+	}
+
 	return &Manager{
-		client:     c,
-		db:         database,
-		ipv6Mode:   ipv6Mode,
-		ipv6Subnet: ipv6Subnet,
-		ipv6Addr:   ipv6Addr,
-		ipv6Iface:  ipv6Iface,
+		client:       c,
+		db:           database,
+		ipv6Mode:     ipv6Mode,
+		ipv6Subnet:   ipv6Subnet,
+		ipv6Addr:     ipv6Addr,
+		ipv6Iface:    ipv6Iface,
+		ipv6Alloc:    ipv6Alloc,
+		alpineBase:   alpineBase,
+		imageMirror:  imageMirror,
+		bannerPreset: bannerPreset,
+		bannerText:   bannerText,
+		ipv6Only:     ipv6Only,
 	}, nil
 }
 
@@ -123,24 +153,39 @@ func (m *Manager) createVM(ctx context.Context, req *agent.CmdCreateVM) error {
 		return err
 	}
 
-	ipv4, ipv6 := m.computeIPs(idx)
+	ipv4, ipv6s := m.computeIPs(idx)
+	hasV6 := len(ipv6s) > 0
+
+	// 纯 IPv6 容器：必须已具备可用 IPv6 子网，且不分配 IPv4
+	if m.ipv6Only {
+		if !hasV6 {
+			return fmt.Errorf("IPv6-only containers require an IPv6 subnet (set IPV6_MODE=subnet/snat); current ipv6_mode=%q", m.ipv6Mode)
+		}
+		ipv4 = "" // 不分配 IPv4
+	}
 
 	// 计算掩码以便在 cloud-init 中使用
 	ipv6Mask := "64"
-	if m.ipv6Mode == "subnet" && m.ipv6Subnet != "" {
-		parts := strings.SplitN(m.ipv6Subnet, "::/", 2)
-		if len(parts) == 2 {
-			ipv6Mask = parts[1]
-		}
+	if prefix, err := netip.ParsePrefix(m.ipv6Subnet); err == nil {
+		ipv6Mask = fmt.Sprintf("%d", prefix.Bits())
 	}
+	gw6 := m.ipv6Gateway()
 
 	// 转换镜像别名
 	alias := req.OsImage
 	if alias == "debian" {
 		alias = "debian/13/cloud"
 	} else if alias == "alpine" {
-		alias = "alpine/3.23/cloud"
+		// 支持使用定制 alpine 基础镜像（如 podcctv/alpine-base）替代内置镜像
+		if m.alpineBase != "" {
+			alias = m.alpineBase
+		} else {
+			alias = DefaultAlpineImage
+		}
 	}
+
+	// 自定义基础镜像（本地已导入的别名）走本地源，不走 simplestreams
+	baseIsLocal := m.alpineBase != "" && req.OsImage == "alpine"
 
 	arch := runtime.GOARCH
 	if arch == "x86_64" || arch == "amd64" {
@@ -167,7 +212,7 @@ func (m *Manager) createVM(ctx context.Context, req *agent.CmdCreateVM) error {
 		_, _, err = m.client.GetImageAlias(readyAlias)
 		if err != nil {
 			log.Printf("[Incus] Building ready image for %s...", alias)
-			if buildErr := m.ensureReadyImage(ctx, alias, readyAlias, req.OsImage); buildErr != nil {
+			if buildErr := m.ensureReadyImage(ctx, alias, readyAlias, req.OsImage, baseIsLocal); buildErr != nil {
 				m.buildMu.Unlock()
 				return fmt.Errorf("auto-build image failed: %w", buildErr)
 			}
@@ -194,27 +239,46 @@ chpasswd:
 `, req.RootPassword)
 
 	if req.OsImage == "alpine" {
-		netConf := fmt.Sprintf(`      auto lo
+		netConf := `      auto lo
       iface lo inet loopback
 
       auto eth0
-      iface eth0 inet static
+`
+		if ipv4 != "" {
+			// 纯 IPv6 容器无 IPv4，DNS 改用 IPv6 公共解析器
+			dns := "1.1.1.1"
+			if m.ipv6Only {
+				dns = "2606:4700:4700::1111"
+			}
+			netConf += fmt.Sprintf(`      iface eth0 inet static
         address %s
         netmask 255.255.240.0
         gateway 10.91.0.1
-        dns-nameservers 1.1.1.1
-`, ipv4)
+        dns-nameservers %s
+`, ipv4, dns)
+		} else {
+			// 纯 IPv6 容器：仅保留 loopback 与 eth0 声明，不配置 IPv4
+			netConf += `      # IPv6-only container: no IPv4 configured
+`
+		}
 
-		if ipv6 != "" {
-			gw6 := m.ipv6Addr
-			if gw6 == "" {
-				gw6 = "fd91:cafe:cafe:10::1"
-			}
-			netConf += fmt.Sprintf(`
+		if hasV6 {
+			for i, a := range ipv6s {
+				if i == 0 {
+					netConf += fmt.Sprintf(`
       iface eth0 inet6 static
-        address %s/%s
+        address %s
+        netmask %s
         gateway %s
-`, ipv6, ipv6Mask, gw6)
+`, a, ipv6Mask, gw6)
+				} else {
+					netConf += fmt.Sprintf(`
+      iface eth0 inet6 static
+        address %s
+        netmask %s
+`, a, ipv6Mask)
+				}
+			}
 		}
 
 		userData += fmt.Sprintf(`
@@ -223,31 +287,49 @@ write_files:
     content: |
 %s`, netConf)
 	} else {
-		networkConf := fmt.Sprintf(`      [Match]
+		networkConf := `      [Match]
       Name=eth0
 
       [Network]
-      DNS=1.1.1.1
+`
+		if ipv4 != "" {
+			// 纯 IPv6 容器无 IPv4，DNS 改用 IPv6 公共解析器
+			dns := "1.1.1.1"
+			if m.ipv6Only {
+				dns = "2606:4700:4700::1111"
+			}
+			networkConf += fmt.Sprintf(`      DNS=%s
 
       [Address]
       Address=%s/20
 
       [Route]
       Gateway=10.91.0.1
-`, ipv4)
+`, dns, ipv4)
+		} else {
+			// 纯 IPv6 容器：仅配置 IPv6 DNS，不配置 IPv4 地址与网关
+			networkConf += `      DNS=2606:4700:4700::1111
 
-		if ipv6 != "" {
-			gw6 := m.ipv6Addr
-			if gw6 == "" {
-				gw6 = "fd91:cafe:cafe:10::1"
-			}
-			networkConf += fmt.Sprintf(`
+`
+		}
+
+		if hasV6 {
+			for i, a := range ipv6s {
+				if i == 0 {
+					networkConf += fmt.Sprintf(`
       [Address]
       Address=%s/%s
 
       [Route]
       Gateway=%s
-`, ipv6, ipv6Mask, gw6)
+`, a, ipv6Mask, gw6)
+				} else {
+					networkConf += fmt.Sprintf(`
+      [Address]
+      Address=%s/%s
+`, a, ipv6Mask)
+				}
+			}
 		}
 
 		userData += fmt.Sprintf(`
@@ -260,6 +342,35 @@ write_files:
 `, networkConf)
 	}
 
+	// 自定义欢迎页 / SSH 登录横幅：写入 motd（登录后）与 issue.net（登录前），
+	// 并通过 sshd drop-in 启用 Banner；同时为所有镜像（含自定义 alpine-base）
+	// 强制开启 root 密码登录，避免定制镜像缺少该配置导致 SSH 密码登录失败。
+	banner := m.bannerContent()
+	if banner != "" {
+		bannerEsc := indentLines(banner, "      ")
+		userData += fmt.Sprintf(`
+  - path: /etc/motd
+    content: |
+%s
+  - path: /etc/issue.net
+    content: |
+%s
+  - path: /etc/ssh/sshd_config.d/99-runman.conf
+    content: |
+      PermitRootLogin yes
+      PasswordAuthentication yes
+      Banner /etc/issue.net
+`, bannerEsc, bannerEsc)
+	} else {
+		// 即便不显示横幅，也确保容器支持 SSH 用户密码登录
+		userData += `
+  - path: /etc/ssh/sshd_config.d/99-runman.conf
+    content: |
+      PermitRootLogin yes
+      PasswordAuthentication yes
+`
+	}
+
 	userData += "runcmd:\n"
 	if req.OsImage == "alpine" {
 		userData += "  - rc-update add networking boot\n"
@@ -269,6 +380,18 @@ write_files:
 		userData += "  - rm -f /etc/systemd/network/10-cloud-init-*.network /run/systemd/network/10-cloud-init-*.network || true\n"
 		userData += "  - systemctl restart systemd-networkd || true\n"
 	}
+	// 强制把密码登录策略同步进主 sshd_config（部分基础镜像未 Include drop-in 目录）
+	if banner != "" {
+		userData += `  - sed -i 's/^#\?Banner.*/Banner \/etc\/issue.net/' /etc/ssh/sshd_config
+  - sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+  - sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+`
+	} else {
+		userData += `  - sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+  - sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+`
+	}
+
 	// 本地毫秒级守护：新 ready 镜像已烤入 sshd 自启，此处仅兼容旧版构建的 ready 镜像
 	userData += `  - [ sh, -c, "rc-update add sshd default 2>/dev/null || systemctl enable ssh 2>/dev/null || true" ]
   - [ sh, -c, "rc-service sshd start 2>/dev/null || systemctl start ssh 2>/dev/null || true" ]
@@ -281,10 +404,17 @@ write_files:
 	}
 
 	nic := map[string]string{
-		"type":                    "nic",
-		"network":                 IncusBridge,
-		"ipv4.address":            ipv4,
-		"security.ipv4_filtering": "true",
+		"type":    "nic",
+		"network": IncusBridge,
+	}
+	// Incus 6.x 要求 ipv4.address=none 与 security.ipv4_filtering 同时使用。
+	// 过滤也能阻止容器伪造 IPv4 源地址，确保纯 IPv6 模式不会旁路获得 IPv4。
+	if m.ipv6Only || ipv4 == "" {
+		nic["ipv4.address"] = "none"
+		nic["security.ipv4_filtering"] = "true"
+	} else {
+		nic["ipv4.address"] = ipv4
+		nic["security.ipv4_filtering"] = "true"
 	}
 
 	// 应用带宽限速
@@ -325,6 +455,14 @@ write_files:
 	if err := m.startVM(ctx, req.VmId); err != nil {
 		return err
 	}
+	// Not every custom Incus image ships cloud-init (including lightweight
+	// Alpine images). Apply the same credentials and network configuration
+	// through the Incus agent after boot so IPv6-only instances are usable
+	// regardless of image cloud-init support.
+	if err := m.configureRunningInstance(ctx, req.VmId, req.OsImage, req.RootPassword, ipv4, ipv6s, ipv6Mask, gw6); err != nil {
+		_ = m.deleteVM(ctx, req.VmId)
+		return fmt.Errorf("configure running instance: %w", err)
+	}
 
 	bizConf, _ := m.db.GetVMConfig(req.VmId)
 	if bizConf == nil {
@@ -344,7 +482,9 @@ write_files:
 		Container: req.VmId,
 		Image:     req.OsImage,
 		IPv4:      ipv4,
-		IPv6:      ipv6,
+		IPv6:      firstOrEmpty(ipv6s),
+		IPv6s:     strings.Join(ipv6s, ","),
+		IPv6Only:  m.ipv6Only,
 	}
 	_ = m.db.SaveIncusConfig(iConf)
 
@@ -383,6 +523,161 @@ func (m *Manager) startVM(ctx context.Context, vmID string) error {
 	return op.Wait()
 }
 
+func (m *Manager) configureRunningInstance(ctx context.Context, vmID, distro, rootPassword, ipv4 string, ipv6s []string, ipv6Mask, gw6 string) error {
+	if err := m.execInstanceWithRetry(ctx, vmID, []string{"/bin/sh", "-c", "mkdir -p /etc/cloud /etc/network /etc/systemd/network /etc/ssh/sshd_config.d /usr/local/sbin /run/sshd"}); err != nil {
+		return fmt.Errorf("prepare configuration directories: %w", err)
+	}
+
+	if err := m.putInstanceFile(vmID, "/run/runman-root-password", "root:"+rootPassword+"\n", 0o600); err != nil {
+		return fmt.Errorf("stage root password: %w", err)
+	}
+	defer func() { _ = m.client.DeleteInstanceFile(vmID, "/run/runman-root-password") }()
+
+	sshConfig := "PermitRootLogin yes\nPasswordAuthentication yes\n"
+	banner := m.bannerContent()
+	if banner != "" {
+		sshConfig += "Banner /etc/issue.net\n"
+		if err := m.putInstanceFile(vmID, "/etc/motd", banner+"\n", 0o644); err != nil {
+			return fmt.Errorf("write motd: %w", err)
+		}
+		if err := m.putInstanceFile(vmID, "/etc/issue.net", banner+"\n", 0o644); err != nil {
+			return fmt.Errorf("write SSH banner: %w", err)
+		}
+	}
+	if err := m.putInstanceFile(vmID, "/etc/ssh/sshd_config.d/99-runman.conf", sshConfig, 0o644); err != nil {
+		return fmt.Errorf("write SSH policy: %w", err)
+	}
+
+	var networkPath, networkConfig, activate string
+	if distro == "alpine" {
+		// Alpine's cloud-init package may probe the legacy /dev/lxd socket on
+		// Incus 6 and then wait several minutes for unrelated EC2 metadata. The
+		// Agent owns credentials and networking for these instances, so disable
+		// cloud-init before it can race with the deterministic runtime config.
+		if err := m.putInstanceFile(vmID, "/etc/cloud/cloud-init.disabled", "managed by runman-agent\n", 0o644); err != nil {
+			return fmt.Errorf("disable Alpine cloud-init: %w", err)
+		}
+		networkPath = "/etc/network/interfaces"
+		networkConfig = "auto lo\niface lo inet loopback\n\nauto eth0\n"
+		if ipv4 != "" {
+			networkConfig += fmt.Sprintf("iface eth0 inet static\n  address %s\n  netmask 255.255.240.0\n  gateway 10.91.0.1\n", ipv4)
+		} else {
+			networkConfig += "# IPv6-only container: no IPv4 configured\n"
+		}
+		for i, addr := range ipv6s {
+			networkConfig += fmt.Sprintf("\niface eth0 inet6 static\n  address %s\n  netmask %s\n", addr, ipv6Mask)
+			if i == 0 {
+				networkConfig += fmt.Sprintf("  gateway %s\n  dns-nameservers 2606:4700:4700::1111\n", gw6)
+			}
+		}
+		activate = "if command -v rc-service >/dev/null 2>&1; then " +
+			"for svc in cloud-final cloud-config cloud-init cloud-init-local; do rc-service \"$svc\" stop >/dev/null 2>&1 || true; done; " +
+			"rc-update del cloud-init-local boot >/dev/null 2>&1 || true; rc-update del cloud-init boot >/dev/null 2>&1 || true; " +
+			"rc-update del cloud-config default >/dev/null 2>&1 || true; rc-update del cloud-final default >/dev/null 2>&1 || true; " +
+			"rc-update add networking boot >/dev/null 2>&1 || true; rc-update add sshd default >/dev/null 2>&1 || true; " +
+			"rc-service networking restart; ssh-keygen -A; rc-service sshd restart; " +
+			"else /usr/local/sbin/runman-network-init; ssh-keygen -A; " +
+			"grep -qF '::wait:/usr/local/sbin/runman-network-init' /etc/inittab || echo '::wait:/usr/local/sbin/runman-network-init' >> /etc/inittab; " +
+			"grep -qF '::respawn:/usr/sbin/sshd -D -e' /etc/inittab || echo '::respawn:/usr/sbin/sshd -D -e' >> /etc/inittab; " +
+			"pkill sshd >/dev/null 2>&1 || true; /usr/sbin/sshd; fi"
+	} else {
+		networkPath = "/etc/systemd/network/10-eth0.network"
+		networkConfig = "[Match]\nName=eth0\n\n[Network]\nDNS=2606:4700:4700::1111\n"
+		if ipv4 != "" {
+			networkConfig += fmt.Sprintf("\n[Address]\nAddress=%s/20\n\n[Route]\nGateway=10.91.0.1\n", ipv4)
+		}
+		for i, addr := range ipv6s {
+			networkConfig += fmt.Sprintf("\n[Address]\nAddress=%s/%s\n", addr, ipv6Mask)
+			if i == 0 {
+				networkConfig += fmt.Sprintf("\n[Route]\nGateway=%s\n", gw6)
+			}
+		}
+		activate = "rm -f /etc/systemd/network/10-cloud-init-*.network /run/systemd/network/10-cloud-init-*.network; systemctl restart systemd-networkd; ssh-keygen -A; systemctl enable --now ssh"
+	}
+	if err := m.putInstanceFile(vmID, networkPath, networkConfig, 0o644); err != nil {
+		return fmt.Errorf("write network configuration: %w", err)
+	}
+	if distro == "alpine" {
+		fallbackNetworkInit := "#!/bin/sh\n" +
+			"attempt=0\n" +
+			"while [ \"$attempt\" -lt 30 ]; do\n" +
+			"  if ip link show eth0 >/dev/null 2>&1 && ifup -f eth0; then exit 0; fi\n" +
+			"  attempt=$((attempt + 1))\n" +
+			"  sleep 1\n" +
+			"done\n" +
+			"exit 1\n"
+		if err := m.putInstanceFile(vmID, "/usr/local/sbin/runman-network-init", fallbackNetworkInit, 0o755); err != nil {
+			return fmt.Errorf("write Alpine network init fallback: %w", err)
+		}
+	}
+
+	command := "chpasswd < /run/runman-root-password; rm -f /run/runman-root-password; " +
+		"grep -q '^Include /etc/ssh/sshd_config.d/\\*.conf' /etc/ssh/sshd_config 2>/dev/null || echo 'Include /etc/ssh/sshd_config.d/*.conf' >> /etc/ssh/sshd_config; " + activate
+	if err := m.execInstanceWithRetry(ctx, vmID, []string{"/bin/sh", "-c", command}); err != nil {
+		return fmt.Errorf("activate instance configuration: %w", err)
+	}
+
+	// ifupdown-ng does not install a resolv.conf manager by default. In that
+	// case dns-nameservers in /etc/network/interfaces is silently ignored and
+	// lightweight Alpine images are left with an empty /etc/resolv.conf. Write
+	// an explicit resolver file after the network restart so IPv6-only guests
+	// can resolve names without depending on image-specific cloud-init hooks.
+	if err := m.execInstanceWithRetry(ctx, vmID, []string{"/bin/sh", "-c", "rm -f /etc/resolv.conf"}); err != nil {
+		return fmt.Errorf("prepare resolver configuration: %w", err)
+	}
+	if err := m.putInstanceFile(vmID, "/etc/resolv.conf", instanceResolvConf(ipv4, len(ipv6s) > 0), 0o644); err != nil {
+		return fmt.Errorf("write resolver configuration: %w", err)
+	}
+	return nil
+}
+
+func instanceResolvConf(ipv4 string, hasIPv6 bool) string {
+	var b strings.Builder
+	b.WriteString("# Managed by runman-agent\n")
+	if ipv4 != "" {
+		fmt.Fprintf(&b, "nameserver %s\n", IPv4Resolver)
+	}
+	if hasIPv6 {
+		fmt.Fprintf(&b, "nameserver %s\n", IPv6Resolver)
+		fmt.Fprintf(&b, "nameserver %s\n", IPv6ResolverBackup)
+	}
+	if ipv4 == "" && !hasIPv6 {
+		fmt.Fprintf(&b, "nameserver %s\n", IPv4Resolver)
+	}
+	b.WriteString("options timeout:2 attempts:3\n")
+	return b.String()
+}
+
+func (m *Manager) putInstanceFile(vmID, path, content string, mode int) error {
+	return m.client.CreateInstanceFile(vmID, path, incus.InstanceFileArgs{
+		Content:   strings.NewReader(content),
+		UID:       0,
+		GID:       0,
+		Mode:      mode,
+		Type:      "file",
+		WriteMode: "overwrite",
+	})
+}
+
+func (m *Manager) execInstanceWithRetry(ctx context.Context, vmID string, command []string) error {
+	var lastErr error
+	for attempt := 0; attempt < 20; attempt++ {
+		op, err := m.client.ExecInstance(vmID, api.InstanceExecPost{Command: command}, nil)
+		if err == nil {
+			if err = op.Wait(); err == nil {
+				return nil
+			}
+		}
+		lastErr = err
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+	return lastErr
+}
+
 func (m *Manager) stopVM(ctx context.Context, vmID string, force bool) error {
 	op, err := m.client.UpdateInstanceState(vmID, api.InstanceStatePut{Action: "stop", Timeout: -1, Force: force}, "")
 	if err != nil {
@@ -392,14 +687,18 @@ func (m *Manager) stopVM(ctx context.Context, vmID string, force bool) error {
 }
 
 func (m *Manager) restartVM(ctx context.Context, vmID string) error {
-	op, err := m.client.UpdateInstanceState(vmID, api.InstanceStatePut{Action: "restart", Timeout: -1}, "")
+	// An infinite graceful timeout can leave the API request and Incus operation
+	// stuck forever when a minimal OpenRC guest doesn't handle the reboot signal.
+	// Force makes restart deterministic while the finite timeout remains useful
+	// to Incus implementations that attempt a graceful shutdown first.
+	op, err := m.client.UpdateInstanceState(vmID, api.InstanceStatePut{Action: "restart", Timeout: 10, Force: true}, "")
 	if err != nil {
 		return err
 	}
 	return op.Wait()
 }
 
-func (m *Manager) ensureReadyImage(ctx context.Context, baseAlias, readyAlias, distro string) error {
+func (m *Manager) ensureReadyImage(ctx context.Context, baseAlias, readyAlias, distro string, baseIsLocal bool) error {
 	builderName := fmt.Sprintf("builder-%d", time.Now().Unix())
 
 	pkgSSH := "openssh-server"
@@ -450,15 +749,34 @@ runcmd:
   - [ sh, -c, "command -v sshd >/dev/null 2>&1 && touch /root/build_done" ]
 `, pkgSSH, pkgCron, aptConfig, installCmd, pkgCron, pkgCron)
 
-	op, err := m.client.CreateInstance(api.InstancesPost{
-		Name: builderName,
-		Type: api.InstanceTypeContainer,
-		Source: api.InstanceSource{
+	var builderSource api.InstanceSource
+	if baseIsLocal {
+		// 本地已导入的定制基础镜像（如 podcctv/alpine-base），不使用 simplestreams 远端
+		builderSource = api.InstanceSource{
+			Type:  "image",
+			Alias: baseAlias,
+		}
+	} else if m.imageMirror != "" && distro == "alpine" {
+		// 优先从私有 simplestreams 镜像服务器拉取 alpine 基础镜像
+		builderSource = api.InstanceSource{
+			Type:     "image",
+			Server:   m.imageMirror,
+			Protocol: "simplestreams",
+			Alias:    MirrorAlpineImage,
+		}
+	} else {
+		builderSource = api.InstanceSource{
 			Type:     "image",
 			Server:   "https://images.linuxcontainers.org",
 			Protocol: "simplestreams",
 			Alias:    baseAlias,
-		},
+		}
+	}
+
+	op, err := m.client.CreateInstance(api.InstancesPost{
+		Name:   builderName,
+		Type:   api.InstanceTypeContainer,
+		Source: builderSource,
 		InstancePut: api.InstancePut{
 			Config: map[string]string{
 				"cloud-init.user-data": builderUserData,
@@ -466,7 +784,29 @@ runcmd:
 		},
 	})
 	if err != nil {
-		return err
+		// 私有镜像服务器拉取失败（版本缺失/不可达/索引异常），回退到上游 linuxcontainers
+		if m.imageMirror != "" && builderSource.Server == m.imageMirror {
+			log.Printf("[Incus] mirror pull failed (%v), falling back to images.linuxcontainers.org", err)
+			builderSource = api.InstanceSource{
+				Type:     "image",
+				Server:   "https://images.linuxcontainers.org",
+				Protocol: "simplestreams",
+				Alias:    baseAlias,
+			}
+			op, err = m.client.CreateInstance(api.InstancesPost{
+				Name:   builderName,
+				Type:   api.InstanceTypeContainer,
+				Source: builderSource,
+				InstancePut: api.InstancePut{
+					Config: map[string]string{
+						"cloud-init.user-data": builderUserData,
+					},
+				},
+			})
+		}
+		if err != nil {
+			return err
+		}
 	}
 	_ = op.Wait()
 
@@ -517,24 +857,142 @@ runcmd:
 	return op.Wait()
 }
 
-func (m *Manager) computeIPs(idx int) (ipv4, ipv6 string) {
+// computeIPs 根据索引计算静态 IPv4 以及（IPv6 模式下）一组静态 IPv6 地址。
+// 每个容器分配 m.ipv6Alloc 个 IPv6 地址，支持非 /64 网段的精细化分配
+// （例如在一个 /64 内给某容器连续分配 10 个可用地址）。
+func (m *Manager) computeIPs(idx int) (ipv4 string, ipv6s []string) {
 	host := idx & 0xff
 	subnet := (idx >> 8) & 0xf
 	ipv4 = fmt.Sprintf("10.91.%d.%d", subnet, host)
 
+	n := m.ipv6Alloc
+	if n < 1 {
+		n = 1
+	}
+
 	switch m.ipv6Mode {
 	case "subnet":
-		if m.ipv6Subnet != "" {
-			parts := strings.SplitN(m.ipv6Subnet, "::/", 2)
-			if len(parts) == 2 {
-				prefix := parts[0]
-				ipv6 = fmt.Sprintf("%s::%x", prefix, idx)
+		prefix, err := netip.ParsePrefix(m.ipv6Subnet)
+		if err == nil && prefix.Addr().Is6() {
+			prefix = prefix.Masked()
+			// idx starts at 2. Reserve offset 0 and 1, then pack each VM's
+			// allocation contiguously within the first /112.
+			base := uint64(2 + (idx-2)*n)
+			for k := 0; k < n; k++ {
+				addr, ok := addIPv6Offset(prefix.Addr(), base+uint64(k))
+				if !ok || !prefix.Contains(addr) {
+					return ipv4, nil
+				}
+				ipv6s = append(ipv6s, addr.String())
 			}
 		}
 	case "snat":
-		ipv6 = fmt.Sprintf("fd91:cafe:cafe:10::%x", idx)
+		base := idx * n
+		for k := 0; k < n; k++ {
+			ipv6s = append(ipv6s, fmt.Sprintf("fd91:cafe:cafe:10::%x", base+k))
+		}
 	}
 	return
+}
+
+// ipv6Gateway 返回容器 IPv6 静态地址应使用的网关。
+// subnet 模式下网关必须是 incusbr0 的桥地址（<前缀>::1），而非宿主机公网地址；
+// snat 模式使用 ULA 网关；其余回退到宿主机地址。
+func (m *Manager) ipv6Gateway() string {
+	if m.ipv6Mode == "subnet" && m.ipv6Subnet != "" {
+		if prefix, err := netip.ParsePrefix(m.ipv6Subnet); err == nil && prefix.Addr().Is6() {
+			// The installer assigns the last address of the first /112 to
+			// incusbr0. This avoids colliding with routed-prefix host ::1/128.
+			if addr, ok := addIPv6Offset(prefix.Masked().Addr(), 0xffff); ok && prefix.Contains(addr) {
+				return addr.String()
+			}
+		}
+	}
+	if m.ipv6Mode == "snat" {
+		return "fd91:cafe:cafe:10::1"
+	}
+	if m.ipv6Addr != "" {
+		return m.ipv6Addr
+	}
+	return "fd91:cafe:cafe:10::1"
+}
+
+// addIPv6Offset adds a small allocation offset to an IPv6 address without
+// relying on textual `::` placement. It therefore works for every valid CIDR
+// spelling, including fully expanded and non-/64 prefixes.
+func addIPv6Offset(addr netip.Addr, offset uint64) (netip.Addr, bool) {
+	if !addr.Is6() {
+		return netip.Addr{}, false
+	}
+	b := addr.As16()
+	carry := offset
+	for i := len(b) - 1; i >= 0 && carry > 0; i-- {
+		sum := uint64(b[i]) + (carry & 0xff)
+		b[i] = byte(sum)
+		carry = (carry >> 8) + (sum >> 8)
+	}
+	if carry != 0 {
+		return netip.Addr{}, false
+	}
+	return netip.AddrFrom16(b), true
+}
+
+// ── 自定义欢迎页 / SSH 登录横幅 ─────────────────────────────────────────────────
+
+const (
+	bannerDefault = `========================================
+ NarwhalCloud NAT VPS — 欢迎使用
+ 本实例由 NarwhalCloud Agent 管理
+ 请勿进行未授权操作，所有行为均被记录
+========================================`
+
+	bannerMinimal = `NarwhalCloud NAT VPS — Authorized access only`
+
+	// bannerProject 是面向客户的"预设项目"模板，部署方可按需替换文本。
+	bannerProject = `========================================
+  欢迎使用我们的 NAT VPS 服务
+  - 控制面板：https://host.example.com
+  - 文档中心：https://docs.example.com
+  - 技术支持：support@example.com
+  祝您使用愉快！
+========================================`
+)
+
+// bannerContent 根据预设类型返回横幅文本。
+// preset 取值：none / default / minimal / project / custom（custom 时使用 bannerText）。
+func (m *Manager) bannerContent() string {
+	switch m.bannerPreset {
+	case "none", "":
+		return ""
+	case "custom":
+		if strings.TrimSpace(m.bannerText) != "" {
+			return m.bannerText
+		}
+		return bannerDefault
+	case "minimal":
+		return bannerMinimal
+	case "project":
+		return bannerProject
+	default:
+		return bannerDefault
+	}
+}
+
+// indentLines 给文本的每一行加上统一前缀（用于嵌进 cloud-init write_files 的内容块）。
+func indentLines(s, prefix string) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	for i := range lines {
+		lines[i] = prefix + lines[i]
+	}
+	return strings.Join(lines, "\n")
+}
+
+// firstOrEmpty 返回切片首个元素，空切片返回空串。
+func firstOrEmpty(s []string) string {
+	if len(s) == 0 {
+		return ""
+	}
+	return s[0]
 }
 
 func (m *Manager) ResetPassword(_ context.Context, vmID, password string) error {
@@ -588,8 +1046,7 @@ func (m *Manager) GetVMLocalIP(_ context.Context, vmID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	parts := strings.SplitN(conf.IPv4, "/", 2)
-	return parts[0], nil
+	return incusForwardIP(conf.IPv4, conf.IPv6), nil
 }
 
 func (m *Manager) GetVMLocalIPv6(_ context.Context, vmID string) (string, error) {
@@ -597,14 +1054,27 @@ func (m *Manager) GetVMLocalIPv6(_ context.Context, vmID string) (string, error)
 	if err != nil {
 		return "", err
 	}
-	parts := strings.SplitN(conf.IPv6, "/", 2)
-	return parts[0], nil
+	return addressWithoutCIDR(conf.IPv6), nil
+}
+
+func incusForwardIP(ipv4, ipv6 string) string {
+	if ip := addressWithoutCIDR(ipv4); ip != "" {
+		return ip
+	}
+	return addressWithoutCIDR(ipv6)
+}
+
+func addressWithoutCIDR(value string) string {
+	parts := strings.SplitN(strings.TrimSpace(value), "/", 2)
+	return parts[0]
 }
 
 func (m *Manager) GetSupportedImages(_ context.Context) ([]*agent.OSImageInfo, error) {
 	return []*agent.OSImageInfo{
+		// Keep the fork's custom Alpine image first so the web panel selects it
+		// by default. Debian remains available as an explicit alternative.
+		{Id: "alpine", Name: "Alpine (podcctv custom Incus image)"},
 		{Id: "debian", Name: "Debian (Incus)"},
-		{Id: "alpine", Name: "Alpine (Incus)"},
 	}, nil
 }
 

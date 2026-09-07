@@ -63,7 +63,8 @@ type VMManager interface {
 	GetVMInfo(ctx context.Context, vmID string) (*agent.VMSummary, error)
 	ListVMs(ctx context.Context) ([]*agent.VMSummary, error)
 
-	// GetVMLocalIP 获取 VM 内部 IP (用于端口转发)
+	// GetVMLocalIP 获取 VM 的可达内部地址（IPv4 优先，无 IPv4 时可返回 IPv6）
+	// 用于用户态端口转发。
 	GetVMLocalIP(ctx context.Context, vmID string) (string, error)
 
 	// GetSupportedImages 获取该虚拟化支持的镜像列表

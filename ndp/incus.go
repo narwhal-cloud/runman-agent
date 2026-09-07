@@ -6,6 +6,7 @@ import (
 	"context"
 	"net/netip"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
 
@@ -73,6 +74,7 @@ func (t *incusTracker) sync() {
 	configsVal := results[0]
 	var b netipx.IPSetBuilder
 	var newIPsList []netip.Addr
+	seen := make(map[netip.Addr]struct{})
 
 	if configsVal.Kind() == reflect.Slice {
 		for i := 0; i < configsVal.Len(); i++ {
@@ -84,27 +86,36 @@ func (t *incusTracker) sync() {
 				cfg = cfg.Elem()
 			}
 
-			ipv6Field := cfg.FieldByName("IPv6")
-			if !ipv6Field.IsValid() {
-				continue
+			// 新记录把完整地址列表保存在 IPv6s，旧记录可能只存在
+			// IPv6（或把逗号列表写在其中）；兼容两种格式并去重。
+			var values []string
+			for _, fieldName := range []string{"IPv6", "IPv6s"} {
+				field := cfg.FieldByName(fieldName)
+				if field.IsValid() && field.Kind() == reflect.String {
+					values = append(values, strings.Split(field.String(), ",")...)
+				}
 			}
+			for _, entry := range values {
+				entry = strings.TrimSpace(entry)
+				if entry == "" {
+					continue
+				}
+				ip, err := netip.ParseAddr(entry)
+				if err != nil {
+					continue
+				}
+				if _, exists := seen[ip]; exists {
+					continue
+				}
+				seen[ip] = struct{}{}
+				b.Add(ip)
 
-			ipv6 := ipv6Field.String()
-			if ipv6 == "" {
-				continue
-			}
-
-			ip, err := netip.ParseAddr(ipv6)
-			if err != nil {
-				continue
-			}
-			b.Add(ip)
-
-			t.mu.RLock()
-			isNew := !t.ips.Contains(ip)
-			t.mu.RUnlock()
-			if isNew {
-				newIPsList = append(newIPsList, ip)
+				t.mu.RLock()
+				isNew := !t.ips.Contains(ip)
+				t.mu.RUnlock()
+				if isNew {
+					newIPsList = append(newIPsList, ip)
+				}
 			}
 		}
 	}
