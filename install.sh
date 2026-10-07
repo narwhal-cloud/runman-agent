@@ -774,6 +774,18 @@ detect_arch() {
 
 # ── IPv6 helpers ──────────────────────────────────────────────────────────────
 
+# 从默认路由提取网卡名。
+# 不能用固定列号（awk '{print $5}'）：带 nhid 的路由（RFC 5549 nexthop 对象，
+# 常见于 AWS EC2 / 部分云内核与较新 iproute2）会在 "default" 和 "via" 之间插入
+# "nhid <id>"，使 dev 落到第 7 列。固定列号此时取到的是网关地址而非网卡名，
+# 导致后续所有 "ip ... dev <网关地址>" 静默失败，IPv6 检测误判为无地址。
+default_route_iface() {
+    local family="${1:-6}"
+    ip "-${family}" route show default 2>/dev/null \
+        | head -1 \
+        | awk '{for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit }}'
+}
+
 ipv6_plus_one() {
     python3 -c "import ipaddress; print(str(ipaddress.IPv6Address('$1') + 1))" 2>/dev/null
 }
@@ -861,7 +873,7 @@ PY
 
 prompt_manual_ipv6() {
     local default_iface default_addr default_subnet default_kind answer
-    default_iface=$(ip -6 route show default 2>/dev/null | head -1 | awk '{print $5}')
+    default_iface=$(default_route_iface 6)
     read -rp "$(t "IPv6 uplink interface [$default_iface]: " "IPv6 上行网卡 [$default_iface]: ")" answer
     IPV6_IFACE="${answer:-$default_iface}"
     default_addr=$(ip -o -6 addr show dev "$IPV6_IFACE" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
@@ -1004,7 +1016,7 @@ detect_and_configure_ipv6() {
     fi
 
     local iface
-    iface=$(ip -6 route show default 2>/dev/null | head -1 | awk '{print $5}')
+    iface=$(default_route_iface 6)
     if [ -z "$iface" ]; then
         log "$(t "No default IPv6 route found." "未找到默认 IPv6 路由。")" >&2
         echo "none"; return 0
@@ -1528,7 +1540,7 @@ install_rfw() {
         elif [ "$mode" = "1" ] || [ "$NON_INTERACTIVE" = "1" ]; then
             # --install-rfw promises a no-prompt forced install. Prefer the
             # default IPv4 uplink so tunnel/bridge interfaces are not selected.
-            SEL_IFACE=$(ip -4 route show default 2>/dev/null | awk 'NR==1 {print $5}')
+            SEL_IFACE=$(default_route_iface 4)
             if [ -z "$SEL_IFACE" ] || ! printf '%s\n' "${interfaces[@]}" | grep -Fxq "$SEL_IFACE"; then
                 SEL_IFACE="${interfaces[0]}"
             fi
@@ -2708,7 +2720,7 @@ fi
 
 # IPV6_IFACE 未知时，从默认路由自动推断
 if [ -z "$IPV6_IFACE" ] && [ -n "$IPV6_ADDR" ]; then
-    IPV6_IFACE=$(ip -6 route show default 2>/dev/null | head -1 | awk '{print $5}')
+    IPV6_IFACE=$(default_route_iface 6)
 fi
 
 # 决定最终 IPv6 模式（用户显式指定优先，否则按前缀自动判断）

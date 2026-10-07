@@ -226,5 +226,84 @@ cp "$TEST_ROOT/new-agent" "$3"
         self.assertIn('XDP.*(attach|附加)', source)
 
 
+class DefaultRouteIfaceTests(unittest.TestCase):
+    """The uplink must be parsed by field name, never by a fixed column.
+
+    Kernels using RFC 5549 nexthop objects (AWS EC2, some cloud images) render
+    the IPv6 default route as::
+
+        default nhid 3525900573 via fe80::4ee:... dev ens5 proto ra metric 100
+
+    Reading a fixed column (awk '{print $5}') then yields the gateway address
+    instead of the interface name, so every later ``ip ... dev <gateway>`` call
+    fails silently and detection reports "No global IPv6 address found".  On a
+    host whose only IPv6 is a single /128 that produced ipv6_mode=none and a
+    container network with ipv6_enabled=false.
+    """
+    # ip(8) output formats seen in the wild, all of which must yield "ens5".
+    ROUTES = {
+        "nhid": ("default nhid 3525900573 via fe80::4ee:e8ff:fe3e:2051 dev ens5 "
+                 "proto ra metric 100 expires 1792sec pref medium"),
+        "plain-via": "default via fe80::4ee:e8ff:fe3e:2051 dev ens5 proto ra metric 100",
+        "no-gateway": "default dev ens5 proto ra metric 100",
+        "metric-first": "default metric 100 via fe80::4ee:e8ff:fe3e:2051 dev ens5 proto ra",
+    }
+    ADDR = ("2: ens5: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 9001 state UP qlen 1000\n"
+            "    inet6 2406:da18:1e08:2900:21f3:dda1:e810:46b8/128 scope global "
+            "dynamic noprefixroute \n"
+            "       valid_lft 386sec preferred_lft 76sec\n"
+            "    inet6 fe80::4ee:e8ff:fe3e:2051/64 scope link \n"
+            "       valid_lft forever preferred_lft forever\n")
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="runman-route-test-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.mock = self.root / "bin"
+        self.mock.mkdir()
+        # Only ens5 answers; a wrong interface name yields no address at all.
+        (self.mock / "ip").write_text(
+            '#!/bin/bash\n'
+            'case "$*" in\n'
+            '  "-6 route show default") echo "$TEST_ROUTE" ;;\n'
+            '  "-6 addr show dev ens5") cat "$TEST_ADDR_FILE" ;;\n'
+            '  *) exit 1 ;;\n'
+            'esac\n')
+        (self.mock / "ip").chmod(0o755)
+        (self.mock / "curl").write_text("#!/bin/bash\nexit 0\n")
+        (self.mock / "curl").chmod(0o755)
+        (self.root / "addr.txt").write_text(self.ADDR)
+        self.script = self.root / "install.sh"
+        self.script.write_text((Path(__file__).resolve().parents[1] / "install.sh").read_text())
+
+    def detect(self, route):
+        env = dict(os.environ, PATH=str(self.mock) + ":" + os.environ["PATH"],
+                   TEST_ROUTE=route, TEST_ADDR_FILE=str(self.root / "addr.txt"))
+        for key in list(env):
+            if key.startswith(("INCUS_", "IPV6_", "PODMAN_", "RUNMAN_", "NARWHAL_")):
+                del env[key]
+        return subprocess.run(["bash", str(self.script), "--detect-ipv6"], cwd=self.root,
+                              env=env, text=True, capture_output=True, timeout=30)
+
+    def test_uplink_is_found_for_every_route_format(self):
+        for label, route in self.ROUTES.items():
+            with self.subTest(format=label):
+                result = self.detect(route)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("Default IPv6 interface: ens5", result.stderr)
+                self.assertNotIn("No default IPv6 route found", result.stderr)
+
+    def test_slash128_host_selects_snat(self):
+        result = self.detect(self.ROUTES["nhid"])
+        self.assertIn("SNAT mode", result.stderr)
+        self.assertEqual(
+            result.stdout.strip().splitlines()[-1],
+            "ens5|2406:da18:1e08:2900:21f3:dda1:e810:46b8|128||0")
+
+    def test_source_never_parses_route_columns_by_position(self):
+        source = (Path(__file__).resolve().parents[1] / "install.sh").read_text()
+        self.assertNotRegex(source, r"route show default.*print \$5")
+
+
 if __name__ == "__main__":
     unittest.main()
